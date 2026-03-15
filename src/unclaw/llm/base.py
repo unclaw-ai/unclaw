@@ -7,9 +7,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from unclaw.errors import UnclawError
+
+if TYPE_CHECKING:
+    from unclaw.tools.contracts import ToolCall, ToolDefinition
 
 
 class LLMError(UnclawError):
@@ -62,6 +65,7 @@ class LLMResponse:
     created_at: str
     finish_reason: str | None = None
     reasoning: str | None = None
+    tool_calls: tuple[ToolCall, ...] | None = None
     raw_payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -102,6 +106,7 @@ class BaseLLMProvider(ABC):
         timeout_seconds: float | None = None,
         thinking_enabled: bool = False,
         content_callback: LLMContentCallback | None = None,
+        tools: Sequence[ToolDefinition] | None = None,
     ) -> LLMResponse:
         """Run a synchronous chat request."""
 

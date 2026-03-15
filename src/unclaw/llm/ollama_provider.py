@@ -19,6 +19,7 @@ from unclaw.llm.base import (
     ResolvedModelProfile,
     utc_now_iso,
 )
+from unclaw.tools.contracts import ToolCall, ToolDefinition
 
 
 class OllamaProvider(BaseLLMProvider):
@@ -43,6 +44,7 @@ class OllamaProvider(BaseLLMProvider):
         timeout_seconds: float | None = None,
         thinking_enabled: bool = False,
         content_callback: LLMContentCallback | None = None,
+        tools: Sequence[ToolDefinition] | None = None,
     ) -> LLMResponse:
         self.validate_profile(profile)
 
@@ -52,7 +54,7 @@ class OllamaProvider(BaseLLMProvider):
         thinking_requested = (
             thinking_enabled and profile.capabilities.thinking_supported
         )
-        payload = {
+        payload: dict[str, Any] = {
             "model": profile.model_name,
             "messages": [message.as_payload() for message in messages],
             "stream": content_callback is not None,
@@ -61,6 +63,12 @@ class OllamaProvider(BaseLLMProvider):
             # Providers that need graded reasoning levels would require a wider config change.
             "think": thinking_requested,
         }
+
+        if tools:
+            payload["tools"] = [
+                _tool_definition_to_ollama(tool) for tool in tools
+            ]
+
         if content_callback is not None:
             return self._stream_chat(
                 profile=profile,
@@ -95,6 +103,7 @@ class OllamaProvider(BaseLLMProvider):
             created_at=created_at,
             finish_reason=finish_reason,
             reasoning=_extract_reasoning(response_payload),
+            tool_calls=_extract_tool_calls(response_payload),
             raw_payload=response_payload,
         )
 
@@ -348,6 +357,64 @@ def _extract_message_text(message: dict[str, Any], *, key: str) -> str | None:
     if not isinstance(value, str):
         return None
     return value
+
+
+def _tool_definition_to_ollama(tool: ToolDefinition) -> dict[str, Any]:
+    """Convert a ToolDefinition to Ollama's native tool format.
+
+    Ollama expects:
+    {"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}
+    """
+    properties: dict[str, dict[str, str]] = {}
+    for arg_name, arg_description in tool.arguments.items():
+        properties[arg_name] = {"type": "string", "description": arg_description}
+
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": list(tool.arguments.keys()),
+            },
+        },
+    }
+
+
+def _extract_tool_calls(payload: dict[str, Any]) -> tuple[ToolCall, ...] | None:
+    """Parse tool_calls from an Ollama response, if present.
+
+    Ollama returns tool calls in:
+    {"message": {"tool_calls": [{"function": {"name": ..., "arguments": {...}}}]}}
+    """
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    raw_tool_calls = message.get("tool_calls")
+    if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+        return None
+
+    parsed: list[ToolCall] = []
+    for raw_call in raw_tool_calls:
+        if not isinstance(raw_call, dict):
+            continue
+        function = raw_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments = function.get("arguments")
+        if not isinstance(arguments, dict):
+            arguments = {}
+        parsed.append(ToolCall(tool_name=name, arguments=arguments))
+
+    if not parsed:
+        return None
+    return tuple(parsed)
 
 
 def _read_error_body(error: HTTPError) -> str:
