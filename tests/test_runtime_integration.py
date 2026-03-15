@@ -1282,7 +1282,7 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """When the model returns no tool_calls, behavior is identical to before."""
+    """Non-native profiles stay on plain chat and do not send native tools."""
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
@@ -1298,6 +1298,7 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
+    captured_tools: list[object | None] = []
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1306,6 +1307,15 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
             pass
 
         def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            captured_tools.append(tools)
+            if tools is not None:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -1328,6 +1338,7 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
         )
 
         assert reply == "Plain text reply"
+        assert captured_tools == [None]
         # No tool events should appear.
         event_types = [e.event_type for e in published_events]
         assert "tool.started" not in event_types
@@ -1343,6 +1354,7 @@ def test_agent_loop_one_tool_call_then_final_response(
     """Model calls one tool, observes the result, and produces a final text reply."""
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -1357,6 +1369,7 @@ def test_agent_loop_one_tool_call_then_final_response(
         memory_manager=SimpleNamespace(),
     )
     call_count = 0
+    captured_tools: list[object | None] = []
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1367,6 +1380,7 @@ def test_agent_loop_one_tool_call_then_final_response(
         def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
             nonlocal call_count
             call_count += 1
+            captured_tools.append(tools)
             if call_count == 1:
                 # First call: model requests a tool call.
                 return LLMResponse(
@@ -1422,6 +1436,8 @@ def test_agent_loop_one_tool_call_then_final_response(
 
         assert reply == "The page contains example content."
         assert call_count == 2
+        assert len(captured_tools) == 2
+        assert all(tools is not None for tools in captured_tools)
 
         # Verify tool tracing events.
         event_types = [e.event_type for e in published_events]
@@ -1446,6 +1462,7 @@ def test_agent_loop_multi_step_with_two_tool_rounds(
     """Model performs two rounds of tool calls before producing a final reply."""
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1542,6 +1559,7 @@ def test_agent_loop_max_steps_guardrail(
 
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1611,6 +1629,7 @@ def test_agent_loop_tool_failure_path(
     """When a tool fails, its error is fed back to the model as context."""
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -1699,6 +1718,18 @@ def test_agent_loop_tool_failure_path(
         assert tool_finished_events[0].payload["success"] is False
     finally:
         session_manager.close()
+
+
+def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
+    profile = settings.models[profile_name]
+    settings.models[profile_name] = profile.__class__(
+        name=profile.name,
+        provider=profile.provider,
+        model_name=profile.model_name,
+        temperature=profile.temperature,
+        thinking_supported=profile.thinking_supported,
+        tool_mode=tool_mode,
+    )
 
 
 def _create_temp_project(tmp_path: Path) -> Path:

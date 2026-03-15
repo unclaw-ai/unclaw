@@ -284,12 +284,25 @@ def _resolve_tool_definitions(
     tool_registry: ToolRegistry,
     model_profile: Any,
 ) -> list[ToolDefinition] | None:
-    """Return tool definitions if the model supports tools, else None."""
-    tool_mode = getattr(model_profile, "tool_mode", "none")
-    if tool_mode.strip().lower() == "none":
+    """Return tool definitions only for models with native tool-calling support."""
+    if not _supports_native_tool_calling(model_profile):
         return None
     tools = tool_registry.list_tools()
     return tools if tools else None
+
+
+def _supports_native_tool_calling(model_profile: Any) -> bool:
+    """Check runtime/profile metadata for explicit native tool-calling support."""
+    capabilities = getattr(model_profile, "capabilities", None)
+    supports_native = getattr(capabilities, "supports_native_tool_calling", None)
+    if isinstance(supports_native, bool):
+        return supports_native
+
+    tool_mode = getattr(model_profile, "tool_mode", None)
+    if not isinstance(tool_mode, str):
+        return False
+
+    return tool_mode.strip().lower() == "native"
 
 
 def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...] | None:
