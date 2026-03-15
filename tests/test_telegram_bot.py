@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from unclaw.channels import telegram_bot
+from unclaw.channels import telegram_api, telegram_bot
 from unclaw.core.command_handler import CommandResult, CommandStatus
 from unclaw.core.session_manager import SessionManager
 from unclaw.local_secrets import mask_telegram_bot_token
@@ -206,7 +206,7 @@ def test_telegram_api_errors_mask_bot_token(monkeypatch) -> None:
     def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
         raise OSError(f"request failed for {request.full_url}")
 
-    monkeypatch.setattr(telegram_bot, "urlopen", fake_urlopen)
+    monkeypatch.setattr(telegram_api, "urlopen", fake_urlopen)
 
     with pytest.raises(telegram_bot.TelegramApiError) as exc_info:
         client.get_me()
