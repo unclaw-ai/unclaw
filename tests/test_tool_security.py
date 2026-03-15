@@ -114,7 +114,7 @@ def test_fetch_tool_blocks_private_network_targets_by_default(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))
         ],
@@ -138,13 +138,13 @@ def test_fetch_tool_allows_public_urls(monkeypatch, tmp_path: Path) -> None:
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         lambda request, timeout_seconds, allow_private_networks: _FakeResponse(
             url=request.full_url,
             body="public content",
@@ -179,7 +179,7 @@ def test_fetch_tool_can_opt_in_to_private_network_access(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         lambda request, timeout_seconds, allow_private_networks: _FakeResponse(
             url=request.full_url,
             body="private content",
@@ -206,13 +206,13 @@ def test_search_tool_returns_compact_structured_results(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -295,13 +295,13 @@ def test_search_tool_uses_iterative_second_level_exploration(
     requested_urls: list[str] = []
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -410,17 +410,17 @@ def test_search_tool_respects_fetch_budget(
             """
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._should_stop_retrieval",
+        "unclaw.tools.web_retrieval._should_stop_retrieval",
         lambda **kwargs: False,
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body=f"<html><body>{''.join(search_results)}</body></html>",
             page_bodies=page_bodies,
@@ -456,17 +456,17 @@ def test_search_tool_respects_depth_cap(
     requested_urls: list[str] = []
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._should_stop_retrieval",
+        "unclaw.tools.web_retrieval._should_stop_retrieval",
         lambda **kwargs: False,
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -544,13 +544,13 @@ def test_search_tool_deduplicates_evidence_across_sources(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -618,13 +618,13 @@ def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -689,13 +689,13 @@ def test_search_tool_summary_bullets_capture_findings_not_titles(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -765,13 +765,13 @@ def test_search_tool_merges_identity_style_facts_into_one_summary_bullet(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -848,13 +848,13 @@ def test_search_tool_handles_partial_read_failures_gracefully(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -925,13 +925,13 @@ def test_search_tool_reports_provider_failures_cleanly(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _raise_url_timeout,
     )
 
@@ -955,13 +955,13 @@ def test_search_tool_filters_consent_and_cookie_noise_from_evidence(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1015,13 +1015,13 @@ def test_search_tool_filters_site_descriptive_passages(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1075,13 +1075,13 @@ def test_search_tool_penalizes_homepage_results(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1149,13 +1149,13 @@ def test_search_tool_summary_deduplicates_near_identical_bullets(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1240,13 +1240,13 @@ def test_search_tool_penalizes_live_streaming_pages(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1319,13 +1319,13 @@ def test_search_tool_filters_promotional_and_subscription_text(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
@@ -1381,13 +1381,13 @@ def test_search_tool_excludes_weak_sources_from_output(
     executor = ToolExecutor.with_default_tools(settings)
 
     monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
+        "unclaw.tools.web_safety.socket.getaddrinfo",
         lambda host, port, type=socket.SOCK_STREAM: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
         ],
     )
     monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
+        "unclaw.tools.web_fetch._open_request",
         _build_search_open_request(
             search_body="""
             <html>
