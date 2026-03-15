@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypedDict
 
 
 class ToolPermissionLevel(StrEnum):
@@ -81,7 +81,89 @@ class ToolResult:
 type ToolHandler = Callable[[ToolCall], ToolResult]
 
 
+# ---------------------------------------------------------------------------
+# Search payload schema — shared contract between the web-search tool
+# (producer) and search_grounding / research_flow (consumers).
+# ---------------------------------------------------------------------------
+
+
+class SearchFindingPayload(TypedDict):
+    """One synthesized finding in the search tool payload."""
+
+    text: str
+    score: float
+    support_count: int
+    source_titles: list[str]
+    source_urls: list[str]
+
+
+class SearchDisplaySourcePayload(TypedDict):
+    """One display source entry in the search tool payload."""
+
+    title: str
+    url: str
+
+
+class SearchResultSourcePayload(TypedDict):
+    """One detailed result source in the search tool payload."""
+
+    title: str
+    url: str
+    takeaway: str
+    depth: int
+    fetched: bool
+    evidence_count: int
+    fetch_error: str | None
+    used_snippet_fallback: bool
+    usefulness: float
+
+
+class SearchEvidencePayload(TypedDict):
+    """One evidence entry in the search tool payload."""
+
+    text: str
+    url: str
+    source_title: str
+    score: float
+    depth: int
+    query_relevance: float
+    evidence_quality: float
+    novelty: float
+    supporting_urls: list[str]
+    supporting_titles: list[str]
+
+
+class SearchWebPayload(TypedDict):
+    """Formal schema for the search_web tool result payload.
+
+    Produced by web_tools.search_web(), consumed by search_grounding
+    and research_flow.  Any key change must be reflected here so both
+    sides stay in sync.
+    """
+
+    query: str
+    provider: str
+    initial_result_count: int
+    considered_candidate_count: int
+    fetch_attempt_count: int
+    fetch_success_count: int
+    evidence_count: int
+    statement_count: int
+    fact_cluster_count: int
+    finding_count: int
+    summary_points: list[str]
+    display_sources: list[SearchDisplaySourcePayload]
+    synthesized_findings: list[SearchFindingPayload]
+    results: list[SearchResultSourcePayload]
+    evidence: list[SearchEvidencePayload]
+
+
 __all__ = [
+    "SearchDisplaySourcePayload",
+    "SearchEvidencePayload",
+    "SearchFindingPayload",
+    "SearchResultSourcePayload",
+    "SearchWebPayload",
     "ToolCall",
     "ToolDefinition",
     "ToolHandler",

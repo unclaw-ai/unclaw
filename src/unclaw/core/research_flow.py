@@ -15,7 +15,7 @@ from unclaw.core.search_grounding import (
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.core.runtime import run_user_turn
 from unclaw.schemas.chat import MessageRole
-from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.contracts import SearchWebPayload, ToolCall, ToolResult
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 _NO_FINDINGS_REPLY = "No clear findings were extracted from the retrieved sources."
@@ -160,7 +160,7 @@ def run_search_then_answer(
 def append_search_sources_section(
     reply_text: str,
     *,
-    payload: Mapping[str, Any] | None,
+    payload: SearchWebPayload | Mapping[str, Any] | None,
 ) -> str:
     """Append a compact sources section to a natural-language reply."""
     if reply_text in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
@@ -245,7 +245,7 @@ def _build_search_tool_history_content(
 
 
 def _extract_search_sources(
-    payload: Mapping[str, Any] | None,
+    payload: SearchWebPayload | Mapping[str, Any] | None,
 ) -> tuple[tuple[str, str], ...]:
     if not isinstance(payload, Mapping):
         return ()

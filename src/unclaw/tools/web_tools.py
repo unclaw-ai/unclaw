@@ -19,6 +19,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 
 from unclaw.tools.contracts import (
+    SearchDisplaySourcePayload,
+    SearchEvidencePayload,
+    SearchFindingPayload,
+    SearchResultSourcePayload,
+    SearchWebPayload,
     ToolCall,
     ToolDefinition,
     ToolPermissionLevel,
@@ -257,68 +262,70 @@ def search_web(call: ToolCall) -> ToolResult:
         synthesis=synthesis,
     )
 
+    payload: SearchWebPayload = {
+        "query": query,
+        "provider": _SEARCH_PROVIDER_NAME,
+        "initial_result_count": outcome.initial_result_count,
+        "considered_candidate_count": outcome.considered_candidate_count,
+        "fetch_attempt_count": outcome.fetch_attempt_count,
+        "fetch_success_count": outcome.fetch_success_count,
+        "evidence_count": len(outcome.evidence_items),
+        "statement_count": len(synthesis.statements),
+        "fact_cluster_count": len(synthesis.fact_clusters),
+        "finding_count": len(synthesis.findings),
+        "summary_points": list(summary_points),
+        "display_sources": [
+            SearchDisplaySourcePayload(
+                title=source.title,
+                url=source.url,
+            )
+            for source in display_sources
+        ],
+        "synthesized_findings": [
+            SearchFindingPayload(
+                text=finding.text,
+                score=finding.score,
+                support_count=finding.support_count,
+                source_titles=list(finding.source_titles),
+                source_urls=list(finding.source_urls),
+            )
+            for finding in synthesis.findings
+        ],
+        "results": [
+            SearchResultSourcePayload(
+                title=source.title,
+                url=source.url,
+                takeaway=source.takeaway,
+                depth=source.depth,
+                fetched=source.fetched,
+                evidence_count=source.evidence_count,
+                fetch_error=source.fetch_error,
+                used_snippet_fallback=source.used_snippet_fallback,
+                usefulness=source.usefulness,
+            )
+            for source in outcome.sources
+        ],
+        "evidence": [
+            SearchEvidencePayload(
+                text=evidence.text,
+                url=evidence.url,
+                source_title=evidence.source_title,
+                score=evidence.score,
+                depth=evidence.depth,
+                query_relevance=evidence.query_relevance,
+                evidence_quality=evidence.evidence_quality,
+                novelty=evidence.novelty,
+                supporting_urls=list(evidence.supporting_urls),
+                supporting_titles=list(evidence.supporting_titles),
+            )
+            for evidence in outcome.evidence_items
+        ],
+    }
+
     return ToolResult.ok(
         tool_name=tool_name,
         output_text=output_text,
-        payload={
-            "query": query,
-            "provider": _SEARCH_PROVIDER_NAME,
-            "initial_result_count": outcome.initial_result_count,
-            "considered_candidate_count": outcome.considered_candidate_count,
-            "fetch_attempt_count": outcome.fetch_attempt_count,
-            "fetch_success_count": outcome.fetch_success_count,
-            "evidence_count": len(outcome.evidence_items),
-            "statement_count": len(synthesis.statements),
-            "fact_cluster_count": len(synthesis.fact_clusters),
-            "finding_count": len(synthesis.findings),
-            "summary_points": list(summary_points),
-            "display_sources": [
-                {
-                    "title": source.title,
-                    "url": source.url,
-                }
-                for source in display_sources
-            ],
-            "synthesized_findings": [
-                {
-                    "text": finding.text,
-                    "score": finding.score,
-                    "support_count": finding.support_count,
-                    "source_titles": list(finding.source_titles),
-                    "source_urls": list(finding.source_urls),
-                }
-                for finding in synthesis.findings
-            ],
-            "results": [
-                {
-                    "title": source.title,
-                    "url": source.url,
-                    "takeaway": source.takeaway,
-                    "depth": source.depth,
-                    "fetched": source.fetched,
-                    "evidence_count": source.evidence_count,
-                    "fetch_error": source.fetch_error,
-                    "used_snippet_fallback": source.used_snippet_fallback,
-                    "usefulness": source.usefulness,
-                }
-                for source in outcome.sources
-            ],
-            "evidence": [
-                {
-                    "text": evidence.text,
-                    "url": evidence.url,
-                    "source_title": evidence.source_title,
-                    "score": evidence.score,
-                    "depth": evidence.depth,
-                    "query_relevance": evidence.query_relevance,
-                    "evidence_quality": evidence.evidence_quality,
-                    "novelty": evidence.novelty,
-                    "supporting_urls": list(evidence.supporting_urls),
-                    "supporting_titles": list(evidence.supporting_titles),
-                }
-                for evidence in outcome.evidence_items
-            ],
-        },
+        payload=payload,
     )
 
 

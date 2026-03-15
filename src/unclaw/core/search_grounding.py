@@ -10,6 +10,7 @@ import unicodedata
 from typing import Any
 
 from unclaw.schemas.chat import ChatMessage, MessageRole
+from unclaw.tools.contracts import SearchWebPayload
 
 _MAX_COMPOSED_FACTS = 3
 _SEARCH_TOOL_PREFIX = "Tool: search_web\n"
@@ -161,7 +162,7 @@ def has_search_grounding_context(history: Sequence[ChatMessage]) -> bool:
 
 
 def build_search_grounding_context(
-    payload: Mapping[str, Any] | None,
+    payload: SearchWebPayload | Mapping[str, Any] | None,
     *,
     query: str = "",
     current_date: date | None = None,
@@ -206,7 +207,7 @@ def build_search_grounding_context(
 
 def build_search_tool_history_summary(
     *,
-    payload: Mapping[str, Any] | None,
+    payload: SearchWebPayload | Mapping[str, Any] | None,
     query: str = "",
     current_date: date | None = None,
 ) -> tuple[str, ...]:
@@ -272,7 +273,7 @@ def build_search_tool_history_summary(
 def shape_search_backed_reply(
     reply_text: str,
     *,
-    payload: Mapping[str, Any] | None,
+    payload: SearchWebPayload | Mapping[str, Any] | None,
     query: str,
     current_date: date | None = None,
 ) -> str:
