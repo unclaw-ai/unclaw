@@ -2,22 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from time import perf_counter
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from unclaw.core.search_grounding import (
     build_search_tool_history_summary,
+    parse_search_tool_history,
+    shape_reply_with_grounding,
     shape_search_backed_reply,
 )
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.core.runtime import run_user_turn
 from unclaw.llm.base import LLMContentCallback
-from unclaw.schemas.chat import MessageRole
+from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.tools.contracts import SearchWebPayload, ToolCall, ToolResult
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+
+if TYPE_CHECKING:
+    from unclaw.tools.registry import ToolRegistry
 
 _NO_FINDINGS_REPLY = "No clear findings were extracted from the retrieved sources."
 
@@ -27,7 +31,7 @@ class ResearchTurnResult:
     """Completed /search turn metadata returned to interactive channels."""
 
     assistant_reply: str
-    tool_result: ToolResult
+    tool_result: ToolResult | None = None
 
 
 def is_search_tool_call(call: ToolCall) -> bool:
@@ -87,85 +91,50 @@ def run_search_command(
     session_manager: Any,
     command_handler: Any,
     tracer: Any,
-    tool_executor: Any,
     tool_call: ToolCall,
     stream_output_func: LLMContentCallback | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> ResearchTurnResult:
-    """Handle /search by pre-executing the tool, then answering via run_user_turn.
+    """Route /search through the shared runtime path without pre-executing.
 
-    The search tool is executed upfront because the user explicitly requested it
-    via ``/search``.  The answer is generated through the same ``run_user_turn``
-    path used for every other chat turn, including the observation-action agent
-    loop when the active model supports native tool calling.
+    The search query is shaped into a user-intent request and fed into
+    ``run_user_turn()``.  If the active model supports native tool calling,
+    the agent loop will execute ``search_web`` autonomously and the grounding
+    transform will apply post-processing from the tool result in session
+    history.  For models without native tool calling (e.g. json_plan), the
+    model answers from its own knowledge — this is an honest temporary
+    limitation until those profiles are upgraded.
     """
     query = _read_tool_call_query(tool_call)
     session = session_manager.ensure_current_session()
+    shaped_request = _build_search_user_request(query)
     session_manager.add_message(
         MessageRole.USER,
-        query,
+        shaped_request,
         session_id=session.id,
     )
 
-    # Execute the search tool (user explicitly requested via /search).
-    tracer.trace_tool_started(
-        session_id=session.id,
-        tool_name=tool_call.tool_name,
-        arguments=tool_call.arguments,
-    )
-    tool_started_at = perf_counter()
-    tool_result = tool_executor.execute(tool_call)
-    tracer.trace_tool_finished(
-        session_id=session.id,
-        tool_name=tool_result.tool_name,
-        success=tool_result.success,
-        output_length=len(tool_result.output_text),
-        error=tool_result.error,
-        tool_duration_ms=_elapsed_ms(tool_started_at),
-    )
-    persist_tool_result(
-        session_manager=session_manager,
-        session_id=session.id,
-        result=tool_result,
-        tool_call=tool_call,
-    )
-
-    if not tool_result.success:
-        assistant_reply = _build_search_failure_reply(
+    # The grounding transform runs after the agent loop completes (tool
+    # results are already persisted) but before the assistant reply is
+    # stored, so it can safely inspect session history.
+    def _grounding_transform(reply: str) -> str:
+        return _apply_search_grounding_from_history(
+            reply,
             query=query,
-            result=tool_result,
-        )
-        session_manager.add_message(
-            MessageRole.ASSISTANT,
-            assistant_reply,
+            session_manager=session_manager,
             session_id=session.id,
         )
-        return ResearchTurnResult(
-            assistant_reply=assistant_reply,
-            tool_result=tool_result,
-        )
 
-    # Generate the answer through the common runtime path.
     assistant_reply = run_user_turn(
         session_manager=session_manager,
         command_handler=command_handler,
-        user_input=query,
+        user_input=shaped_request,
         tracer=tracer,
-        tool_registry=getattr(tool_executor, "registry", None),
+        tool_registry=tool_registry,
         stream_output_func=stream_output_func,
-        assistant_reply_transform=lambda reply: append_search_sources_section(
-            shape_search_backed_reply(
-                reply,
-                payload=tool_result.payload,
-                query=query,
-                current_date=date.today(),
-            ),
-            payload=tool_result.payload,
-        ),
+        assistant_reply_transform=_grounding_transform,
     )
-    return ResearchTurnResult(
-        assistant_reply=assistant_reply,
-        tool_result=tool_result,
-    )
+    return ResearchTurnResult(assistant_reply=assistant_reply)
 
 
 def append_search_sources_section(
@@ -306,15 +275,77 @@ def _read_tool_call_query(tool_call: ToolCall) -> str:
     return query.strip()
 
 
-def _build_search_failure_reply(
+def _build_search_user_request(query: str) -> str:
+    """Shape a raw search query into an explicit user-intent request.
+
+    The shaped request tells the model that the user explicitly asked for a
+    web search, so models with native tool calling will invoke ``search_web``
+    through the agent loop.
+    """
+    return (
+        f"Search the web for: {query}\n\n"
+        "Use the search_web tool to find relevant, up-to-date information "
+        "and provide a detailed, grounded answer with sources."
+    )
+
+
+def _apply_search_grounding_from_history(
+    reply: str,
     *,
     query: str,
-    result: ToolResult,
+    session_manager: Any,
+    session_id: str,
 ) -> str:
-    error_text = result.error or result.output_text.strip()
-    if error_text:
-        return f'I could not complete a web search for "{query}": {error_text}'
-    return f'I could not complete a web search for "{query}".'
+    """Apply grounding rewrite and sources using tool results from session history.
+
+    Called as an ``assistant_reply_transform`` after the agent loop has
+    completed and tool results are already persisted.
+    """
+    grounding = _find_latest_search_grounding(session_manager, session_id)
+    if grounding is None:
+        return reply
+
+    shaped = shape_reply_with_grounding(reply, grounding=grounding, query=query)
+    return _append_sources_from_grounding(shaped, sources=grounding.display_sources)
+
+
+def _find_latest_search_grounding(
+    session_manager: Any,
+    session_id: str,
+) -> Any:
+    """Find the most recent search grounding context from session history."""
+    list_messages = getattr(session_manager, "list_messages", None)
+    if not callable(list_messages):
+        return None
+
+    messages: Sequence[ChatMessage] = list_messages(session_id)
+    for message in reversed(messages):
+        if message.role is not MessageRole.TOOL:
+            continue
+        grounding = parse_search_tool_history(message.content)
+        if grounding is not None:
+            return grounding
+    return None
+
+
+def _append_sources_from_grounding(
+    reply: str,
+    *,
+    sources: tuple[tuple[str, str], ...],
+) -> str:
+    """Append a compact sources section using parsed grounding display sources."""
+    if reply in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
+        return reply
+    if not sources:
+        return reply
+
+    lines = [reply.rstrip(), "", "Sources:"]
+    for title, url in sources:
+        if title:
+            lines.append(f"- {title}: {url}")
+        else:
+            lines.append(f"- {url}")
+    return "\n".join(lines)
 
 
 def _read_string_list(value: Any) -> tuple[str, ...]:
@@ -325,7 +356,3 @@ def _read_string_list(value: Any) -> tuple[str, ...]:
         for item in value
         if isinstance(item, str) and item.strip()
     )
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))

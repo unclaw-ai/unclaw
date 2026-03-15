@@ -266,8 +266,8 @@ class TelegramBotChannel:
                     session_manager=self.session_manager,
                     command_handler=command_handler,
                     tracer=self.tracer,
-                    tool_executor=self.tool_executor,
                     tool_call=result.tool_call,
+                    tool_registry=self.tool_executor.registry,
                 ).assistant_reply
                 _refresh_memory_summary(
                     memory_manager=self.memory_manager,

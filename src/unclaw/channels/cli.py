@@ -182,9 +182,9 @@ def run_cli(
                         session_manager=session_manager,
                         command_handler=command_handler,
                         tracer=tracer,
-                        tool_executor=tool_executor,
                         tool_call=result.tool_call,
                         stream_output_func=assistant_stream.write,
+                        tool_registry=tool_executor.registry,
                     ).assistant_reply
                     assistant_stream.finish(assistant_reply)
                     _refresh_session_summary(

@@ -278,12 +278,22 @@ def shape_search_backed_reply(
     current_date: date | None = None,
 ) -> str:
     """Rewrite risky search-backed replies into grounded, compact prose."""
-    stripped_reply = reply_text.strip()
     grounding = build_search_grounding_context(
         payload,
         query=query,
         current_date=current_date,
     )
+    return shape_reply_with_grounding(reply_text, grounding=grounding, query=query)
+
+
+def shape_reply_with_grounding(
+    reply_text: str,
+    *,
+    grounding: SearchGroundingContext | None,
+    query: str,
+) -> str:
+    """Rewrite risky search-backed replies using a pre-parsed grounding context."""
+    stripped_reply = reply_text.strip()
     if grounding is None or not stripped_reply:
         return stripped_reply
 
@@ -891,6 +901,7 @@ __all__ = [
     "build_search_tool_history_summary",
     "has_search_grounding_context",
     "parse_search_tool_history",
+    "shape_reply_with_grounding",
     "shape_search_backed_reply",
     "should_apply_search_grounding",
 ]

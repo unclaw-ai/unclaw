@@ -12,8 +12,9 @@ from unclaw.llm.base import LLMResponse
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolResult
+from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 
 def test_terminal_assistant_stream_finishes_cleanly_when_stream_matches(capsys) -> None:
@@ -46,6 +47,7 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -58,6 +60,35 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
             build_or_refresh_session_summary=lambda _session_id: None
         ),
     )
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=(
+            "Search query: latest news about Ollama\n"
+            "Sources fetched: 2 of 2 attempted\n"
+            "Evidence kept: 4\n"
+        ),
+        payload={
+            "query": "latest news about Ollama",
+            "summary_points": [
+                "Ollama shipped a new update with improved search grounding."
+            ],
+            "display_sources": [
+                {
+                    "title": "Ollama Blog",
+                    "url": "https://ollama.com/blog/search-update",
+                },
+                {
+                    "title": "Release Notes",
+                    "url": "https://example.com/releases/ollama-search",
+                },
+            ],
+        },
+    )
+    search_registry = ToolRegistry()
+    search_registry.register(SEARCH_WEB_DEFINITION, lambda _call: search_tool_result)
+
+    call_count = 0
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -80,7 +111,31 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
             content_callback=None,
             tools=None,
         ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            del profile, messages, timeout_seconds, thinking_enabled, tools
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(
+                        tool_name="search_web",
+                        arguments={"query": "latest news about Ollama"},
+                    ),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "search_web", "arguments": {"query": "latest news about Ollama"}}}
+                            ],
+                        }
+                    },
+                )
+            if content_callback is not None:
+                content_callback("Ollama shipped a new update with improved search grounding.")
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -111,31 +166,8 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
             tracer=tracer,
             tool_executor=SimpleNamespace(
                 list_tools=lambda: [],
-                execute=lambda _tool_call: ToolResult.ok(
-                    tool_name="search_web",
-                    output_text=(
-                        "Search query: latest news about Ollama\n"
-                        "Sources fetched: 2 of 2 attempted\n"
-                        "Evidence kept: 4\n"
-                    ),
-                    payload={
-                        "query": "latest news about Ollama",
-                        "summary_points": [
-                            "Ollama shipped a new update with improved search grounding."
-                        ],
-                        "display_sources": [
-                            {
-                                "title": "Ollama Blog",
-                                "url": "https://ollama.com/blog/search-update",
-                            },
-                            {
-                                "title": "Release Notes",
-                                "url": "https://example.com/releases/ollama-search",
-                            },
-                        ],
-                    },
-                ),
-                registry=ToolRegistry(),
+                execute=lambda _tool_call: search_tool_result,
+                registry=search_registry,
             ),
         )
     finally:
@@ -159,3 +191,15 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
     return project_root
+
+
+def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
+    profile = settings.models[profile_name]
+    settings.models[profile_name] = profile.__class__(
+        name=profile.name,
+        provider=profile.provider,
+        model_name=profile.model_name,
+        temperature=profile.temperature,
+        thinking_supported=profile.thinking_supported,
+        tool_mode=tool_mode,
+    )

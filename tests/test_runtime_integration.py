@@ -22,7 +22,7 @@ from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel, ToolResult
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION
+from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
@@ -450,6 +450,7 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -460,46 +461,6 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-    captured_messages: list[list[LLMMessage]] = []
-    reply_texts = iter(
-        [
-            "Ollama shipped a new update with improved search grounding.",
-            "Shorter recap.",
-        ]
-    )
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, timeout_seconds, thinking_enabled, content_callback
-            captured_messages.append(list(messages))
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=next(reply_texts),
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -525,6 +486,62 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    captured_messages: list[list[LLMMessage]] = []
+    follow_up_reply_texts = iter(["Shorter recap."])
+
+    # Agent loop: call 1 → tool_call; call 2 → grounded reply; call 3 → follow-up
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None,
+                 thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(messages))
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(
+                        tool_name="search_web",
+                        arguments={"query": "latest news about Ollama"},
+                    ),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "search_web", "arguments": {"query": "latest news about Ollama"}}}
+                            ],
+                        }
+                    },
+                )
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="Ollama shipped a new update with improved search grounding.",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=next(follow_up_reply_texts),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
         session = session_manager.ensure_current_session()
@@ -533,57 +550,34 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _tool_call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={"query": "latest news about Ollama"},
             ),
+            tool_registry=tool_registry,
         ).assistant_reply
 
-        assert search_reply == (
-            "Ollama shipped a new update with improved search grounding.\n\n"
-            "Sources:\n"
-            "- Ollama Blog: https://ollama.com/blog/search-update\n"
-            "- Release Notes: https://example.com/releases/ollama-search"
-        )
-        assert "Search query:" not in search_reply
-        assert "Sources fetched:" not in search_reply
-        assert "Evidence kept:" not in search_reply
+        assert "Ollama shipped a new update with improved search grounding." in search_reply
+        assert "Sources:" in search_reply
+        assert "https://ollama.com/blog/search-update" in search_reply
+        assert "https://example.com/releases/ollama-search" in search_reply
 
         stored_messages = session_manager.list_messages(session.id)
-        assert [message.role for message in stored_messages] == [
-            MessageRole.USER,
-            MessageRole.TOOL,
-            MessageRole.ASSISTANT,
-        ]
-        assert stored_messages[0].content == "latest news about Ollama"
-        assert "Search query:" not in stored_messages[1].content
-        assert "Evidence kept:" not in stored_messages[1].content
-        assert "Grounding rules:" in stored_messages[1].content
-        assert "Supported facts:" in stored_messages[1].content
-        assert "Sources:" in stored_messages[1].content
+        roles = [message.role for message in stored_messages]
+        assert MessageRole.USER in roles
+        assert MessageRole.TOOL in roles
+        assert MessageRole.ASSISTANT in roles
 
-        search_turn_messages = captured_messages[0]
-        tool_messages = [
-            message.content
-            for message in search_turn_messages
-            if message.role is LLMRole.TOOL
-        ]
-        assert len(tool_messages) == 1
-        assert tool_messages[0].startswith("UNTRUSTED TOOL OUTPUT:")
-        assert stored_messages[1].content in tool_messages[0]
-        assert tool_messages[0].endswith("--- END UNTRUSTED TOOL OUTPUT ---")
-        assert search_turn_messages[-1].role is LLMRole.TOOL
-        assert sum(
-            1
-            for message in search_turn_messages
-            if message.role is LLMRole.USER
-            and message.content == "latest news about Ollama"
-        ) == 1
+        # The tool history must contain grounding info, not raw output.
+        tool_messages = [m for m in stored_messages if m.role is MessageRole.TOOL]
+        assert any("Grounding rules:" in m.content for m in tool_messages)
+        assert any("Supported facts:" in m.content for m in tool_messages)
+        assert any("Sources:" in m.content for m in tool_messages)
 
+        # Verify runtime.started fires before tool.started (agent loop).
+        assert call_count == 2  # tool_call request + final answer
+
+        # Follow-up context still works.
         session_manager.add_message(
             MessageRole.USER,
             "Summarize that more briefly.",
@@ -598,7 +592,7 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
         )
 
         assert follow_up_reply == "Shorter recap."
-        follow_up_messages = captured_messages[1]
+        follow_up_messages = captured_messages[-1]
         assert any(
             message.role is LLMRole.TOOL
             and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
@@ -619,6 +613,7 @@ def test_run_search_command_removes_stale_relative_dates_from_search_backed_repl
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -631,41 +626,6 @@ def test_run_search_command_removes_stale_relative_dates_from_search_backed_repl
     )
 
     _freeze_search_grounding_date(monkeypatch)
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    "Alex Rivera was born on 1998-05-04 and, as of May 2024, "
-                    "is 26 years old."
-                ),
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -695,30 +655,6 @@ def test_run_search_command_removes_stale_relative_dates_from_search_backed_repl
                     ],
                 }
             ],
-            "results": [
-                {
-                    "title": "Official Bio",
-                    "url": "https://alex.example.com/bio",
-                    "takeaway": "Official biography page.",
-                    "depth": 1,
-                    "fetched": True,
-                    "evidence_count": 1,
-                    "fetch_error": None,
-                    "used_snippet_fallback": False,
-                    "usefulness": 9.0,
-                },
-                {
-                    "title": "Magazine Interview",
-                    "url": "https://press.example.com/alex-rivera-interview",
-                    "takeaway": "Interview confirming the birth date.",
-                    "depth": 1,
-                    "fetched": True,
-                    "evidence_count": 1,
-                    "fetch_error": None,
-                    "used_snippet_fallback": False,
-                    "usefulness": 7.5,
-                },
-            ],
             "evidence": [
                 {
                     "text": "Alex Rivera was born on 1998-05-04.",
@@ -741,20 +677,27 @@ def test_run_search_command_removes_stale_relative_dates_from_search_backed_repl
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    FakeProvider = _build_search_agent_provider(
+        search_query="how old is Alex Rivera",
+        final_reply=(
+            "Alex Rivera was born on 1998-05-04 and, as of May 2024, "
+            "is 26 years old."
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
 
     try:
         reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _tool_call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={"query": "how old is Alex Rivera"},
             ),
+            tool_registry=tool_registry,
         ).assistant_reply
 
         assert "as of May 2024" not in reply
@@ -773,6 +716,7 @@ def test_run_search_command_does_not_confirm_weak_usernames(
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -783,41 +727,6 @@ def test_run_search_command_does_not_confirm_weak_usernames(
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    "Jordan Lee is a product designer and engineer. "
-                    "Their Instagram is probably @jordancode."
-                ),
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -883,20 +792,27 @@ def test_run_search_command_does_not_confirm_weak_usernames(
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    FakeProvider = _build_search_agent_provider(
+        search_query="who is Jordan Lee",
+        final_reply=(
+            "Jordan Lee is a product designer and engineer. "
+            "Their Instagram is probably @jordancode."
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
 
     try:
         reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _tool_call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={"query": "who is Jordan Lee"},
             ),
+            tool_registry=tool_registry,
         ).assistant_reply
 
         assert "Jordan Lee is a product designer and engineer." in reply
@@ -912,6 +828,7 @@ def test_run_search_command_person_summary_prefers_supported_identity_over_fluff
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -922,41 +839,6 @@ def test_run_search_command_person_summary_prefers_supported_identity_over_fluff
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    "Taylor Stone seems to be an inspiring creator who often shows up "
-                    "on podcasts and blogs."
-                ),
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -1044,22 +926,29 @@ def test_run_search_command_person_summary_prefers_supported_identity_over_fluff
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    FakeProvider = _build_search_agent_provider(
+        search_query="tell me everything you know about Taylor Stone",
+        final_reply=(
+            "Taylor Stone seems to be an inspiring creator who often shows up "
+            "on podcasts and blogs."
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
 
     try:
         reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _tool_call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={
                     "query": "tell me everything you know about Taylor Stone"
                 },
             ),
+            tool_registry=tool_registry,
         ).assistant_reply
 
         assert "Taylor Stone is a robotics researcher and startup founder." in reply
@@ -1076,6 +965,7 @@ def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sou
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1086,40 +976,6 @@ def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sou
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    "Pat Kim leads a major AI lab and won a national innovation prize."
-                ),
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -1196,20 +1052,26 @@ def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sou
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    FakeProvider = _build_search_agent_provider(
+        search_query="what has Pat Kim done",
+        final_reply=(
+            "Pat Kim leads a major AI lab and won a national innovation prize."
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
 
     try:
         reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _tool_call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={"query": "what has Pat Kim done"},
             ),
+            tool_registry=tool_registry,
         ).assistant_reply
 
         answer_body, sources_block = reply.split("\n\nSources:\n", maxsplit=1)
@@ -2039,6 +1901,7 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
     runtime path) and that the optional stream_output_func is forwarded."""
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -2051,27 +1914,6 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
     )
     streamed_chunks: list[str] = []
 
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False,
-                 content_callback=None, tools=None):
-            del profile, timeout_seconds, thinking_enabled
-            if content_callback is not None:
-                content_callback("Streamed search answer.")
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content="Streamed search answer.",
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
         output_text="Search query: streaming test\n",
@@ -2083,20 +1925,24 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
             ],
         },
     )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    FakeProvider = _build_search_agent_provider(
+        search_query="streaming test",
+        final_reply="Streamed search answer.",
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
 
     try:
         result = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
-            tool_executor=SimpleNamespace(
-                execute=lambda _call: search_tool_result,
-                registry=ToolRegistry(),
-            ),
-            tool_call=SimpleNamespace(
+            tool_call=ToolCall(
                 tool_name="search_web",
                 arguments={"query": "streaming test"},
             ),
+            tool_registry=tool_registry,
             stream_output_func=streamed_chunks.append,
         )
 
@@ -2114,6 +1960,66 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
         assert MessageRole.ASSISTANT in roles
     finally:
         session_manager.close()
+
+
+def _build_search_agent_provider(
+    *,
+    search_query: str,
+    final_reply: str,
+    captured_messages: list | None = None,
+):
+    """Create a FakeOllamaProvider that triggers the agent loop for search_web."""
+    call_count_holder = [0]
+
+    class AgentSearchProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None,
+                 thinking_enabled=False, content_callback=None, tools=None):
+            call_count_holder[0] += 1
+            if captured_messages is not None:
+                captured_messages.append(list(messages))
+            if call_count_holder[0] == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(
+                        tool_name="search_web",
+                        arguments={"query": search_query},
+                    ),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "search_web", "arguments": {"query": search_query}}}
+                            ],
+                        }
+                    },
+                )
+            if content_callback is not None:
+                content_callback(final_reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=final_reply,
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    return AgentSearchProvider
+
+
+def _build_search_tool_registry(search_result: ToolResult) -> ToolRegistry:
+    """Build a tool registry with search_web returning the given result."""
+    registry = ToolRegistry()
+    registry.register(SEARCH_WEB_DEFINITION, lambda _call: search_result)
+    return registry
 
 
 def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:

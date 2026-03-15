@@ -16,8 +16,9 @@ from unclaw.logs.tracer import Tracer
 from unclaw.llm.base import LLMResponse
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolResult
+from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
 
@@ -592,6 +593,8 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
         event_repository=session_manager.event_repository,
     )
 
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
+
     try:
         session = session_manager.create_session(title="Telegram chat 42")
         command_handler = telegram_bot.CommandHandler(
@@ -602,6 +605,35 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
             ),
             allow_exit=False,
         )
+
+        search_tool_result = ToolResult.ok(
+            tool_name="search_web",
+            output_text=(
+                "Search query: latest news about Ollama\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": "latest news about Ollama",
+                "summary_points": [
+                    "Ollama shipped a new update with improved search grounding."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Ollama Blog",
+                        "url": "https://ollama.com/blog/search-update",
+                    },
+                    {
+                        "title": "Release Notes",
+                        "url": "https://example.com/releases/ollama-search",
+                    },
+                ],
+            },
+        )
+        search_registry = ToolRegistry()
+        search_registry.register(SEARCH_WEB_DEFINITION, lambda _call: search_tool_result)
+
+        call_count = 0
 
         class FakeOllamaProvider:
             provider_name = "ollama"
@@ -624,7 +656,31 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
                 content_callback=None,
                 tools=None,
             ):
-                del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
+                nonlocal call_count
+                call_count += 1
+                del profile, messages, timeout_seconds, thinking_enabled, tools
+                if call_count == 1:
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name="qwen3.5:4b",
+                        content="",
+                        created_at="2026-03-13T12:00:00Z",
+                        finish_reason="stop",
+                        tool_calls=(ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": "latest news about Ollama"},
+                        ),),
+                        raw_payload={
+                            "message": {
+                                "content": "",
+                                "tool_calls": [
+                                    {"function": {"name": "search_web", "arguments": {"query": "latest news about Ollama"}}}
+                                ],
+                            }
+                        },
+                    )
+                if content_callback is not None:
+                    content_callback("Ollama shipped a new update with improved search grounding.")
                 return LLMResponse(
                     provider="ollama",
                     model_name="qwen3.5:4b",
@@ -652,31 +708,8 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
             tracer=tracer,
             tool_executor=SimpleNamespace(
                 list_tools=lambda: [],
-                execute=lambda _tool_call: ToolResult.ok(
-                    tool_name="search_web",
-                    output_text=(
-                        "Search query: latest news about Ollama\n"
-                        "Sources fetched: 2 of 2 attempted\n"
-                        "Evidence kept: 4\n"
-                    ),
-                    payload={
-                        "query": "latest news about Ollama",
-                        "summary_points": [
-                            "Ollama shipped a new update with improved search grounding."
-                        ],
-                        "display_sources": [
-                            {
-                                "title": "Ollama Blog",
-                                "url": "https://ollama.com/blog/search-update",
-                            },
-                            {
-                                "title": "Release Notes",
-                                "url": "https://example.com/releases/ollama-search",
-                            },
-                        ],
-                    },
-                ),
-                registry=ToolRegistry(),
+                execute=lambda _tool_call: search_tool_result,
+                registry=search_registry,
             ),
             api_client=api_client,
             session_store=SimpleNamespace(bind_chat=lambda **kwargs: None),
@@ -837,6 +870,18 @@ def _build_channel_for_settings(
         clock=clock,
     )
     return channel, api_client, tracer
+
+
+def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
+    profile = settings.models[profile_name]
+    settings.models[profile_name] = profile.__class__(
+        name=profile.name,
+        provider=profile.provider,
+        model_name=profile.model_name,
+        temperature=profile.temperature,
+        thinking_supported=profile.thinking_supported,
+        tool_mode=tool_mode,
+    )
 
 
 def _create_temp_project(
