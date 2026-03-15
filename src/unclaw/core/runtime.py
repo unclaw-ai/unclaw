@@ -18,6 +18,7 @@ from unclaw.core.orchestrator import (
 )
 from unclaw.core.router import route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
@@ -28,12 +29,6 @@ from unclaw.tools.dispatcher import ToolDispatcher
 
 if TYPE_CHECKING:
     from unclaw.tools.registry import ToolRegistry
-
-_RUNTIME_ERROR_REPLY = (
-    "I could not complete that request locally right now. "
-    "Check that Ollama is running and the selected model is available."
-)
-_EMPTY_RESPONSE_REPLY = "The local model returned an empty response."
 
 _MAX_AGENT_STEPS_DEFAULT = 6
 _MAX_STEPS_FALLBACK_REPLY = (
@@ -150,7 +145,7 @@ def run_user_turn(
                 max_steps=max_agent_steps,
             )
         else:
-            assistant_reply = response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+            assistant_reply = response.response.content.strip() or EMPTY_RESPONSE_REPLY
 
     except ModelCallFailedError as exc:
         active_tracer.trace_model_failed(
@@ -161,7 +156,7 @@ def run_user_turn(
             model_duration_ms=exc.duration_ms,
             error=str(exc),
         )
-        assistant_reply = _RUNTIME_ERROR_REPLY
+        assistant_reply = RUNTIME_ERROR_REPLY
     except (
         ConfigurationError,
         LLMError,
@@ -175,7 +170,7 @@ def run_user_turn(
             model_name=selected_model.model_name,
             error=str(exc),
         )
-        assistant_reply = _RUNTIME_ERROR_REPLY
+        assistant_reply = RUNTIME_ERROR_REPLY
 
     if assistant_reply_transform is not None:
         assistant_reply = assistant_reply_transform(assistant_reply)
@@ -217,7 +212,7 @@ def _run_agent_loop(
     for _step in range(max_steps):
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
-            return current_response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+            return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
 
         # Append the assistant message (with tool_calls) to context.
         context_messages.append(
@@ -281,7 +276,7 @@ def _run_agent_loop(
 
     # Final check: last model call may have produced a text reply.
     if not current_response.response.tool_calls:
-        return current_response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+        return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
 
     # max_steps reached without a final text reply.
     return _MAX_STEPS_FALLBACK_REPLY

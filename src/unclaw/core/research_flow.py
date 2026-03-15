@@ -12,11 +12,8 @@ from unclaw.core.search_grounding import (
     build_search_tool_history_summary,
     shape_search_backed_reply,
 )
-from unclaw.core.runtime import (
-    _EMPTY_RESPONSE_REPLY,
-    _RUNTIME_ERROR_REPLY,
-    run_user_turn,
-)
+from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
+from unclaw.core.runtime import run_user_turn
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
@@ -166,7 +163,7 @@ def append_search_sources_section(
     payload: Mapping[str, Any] | None,
 ) -> str:
     """Append a compact sources section to a natural-language reply."""
-    if reply_text in {_RUNTIME_ERROR_REPLY, _EMPTY_RESPONSE_REPLY}:
+    if reply_text in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
         return reply_text
 
     sources = _extract_search_sources(payload)

@@ -18,3 +18,10 @@ DATABASE_FILE_NAME = "app.db"
 LOG_FILE_NAME = "runtime.log"
 
 PROJECT_ROOT_ENV_VAR = "UNCLAW_PROJECT_ROOT"
+
+# Fallback reply strings shared between runtime.py and research_flow.py.
+EMPTY_RESPONSE_REPLY = "The local model returned an empty response."
+RUNTIME_ERROR_REPLY = (
+    "I could not complete that request locally right now. "
+    "Check that Ollama is running and the selected model is available."
+)
