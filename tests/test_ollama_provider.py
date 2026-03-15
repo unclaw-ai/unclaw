@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from unclaw.llm import ollama_provider
 from unclaw.llm.base import LLMMessage, LLMRole, ModelCapabilities, ResolvedModelProfile
+from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 
 
@@ -387,3 +390,139 @@ class _FakeStreamResponse:
 
     def __iter__(self):
         return iter(self._lines)
+
+
+# ---------------------------------------------------------------------------
+# Real Ollama integration tests (skipped when Ollama is unavailable)
+# ---------------------------------------------------------------------------
+
+# Models known to support Ollama native tool calling.
+_TOOL_CAPABLE_MODEL_PREFIXES = (
+    "qwen",
+    "llama3.1",
+    "llama3.2",
+    "llama3.3",
+    "mistral",
+    "command-r",
+    "firefunction",
+    "hermes",
+)
+
+
+def _find_tool_capable_model() -> str | None:
+    """Return the name of a locally installed model that supports tool calling,
+    or *None* if Ollama is unreachable or no suitable model is found."""
+    provider = OllamaProvider()
+    if not provider.is_available(timeout_seconds=5):
+        return None
+    try:
+        models = provider.list_models(timeout_seconds=5)
+    except Exception:
+        return None
+    for model in models:
+        base = model.split(":")[0].lower()
+        if any(base.startswith(prefix) for prefix in _TOOL_CAPABLE_MODEL_PREFIXES):
+            return model
+    return None
+
+
+_INTEGRATION_MODEL = _find_tool_capable_model()
+
+_skip_no_ollama = pytest.mark.skipif(
+    _INTEGRATION_MODEL is None,
+    reason="Ollama unavailable or no tool-capable model installed locally",
+)
+
+
+def _build_integration_profile(model_name: str) -> ResolvedModelProfile:
+    return ResolvedModelProfile(
+        name="integration",
+        provider="ollama",
+        model_name=model_name,
+        temperature=0.0,
+        capabilities=ModelCapabilities(
+            thinking_supported=False,
+            tool_mode="native",
+            supports_tools=True,
+            supports_native_tool_calling=True,
+        ),
+    )
+
+
+_SIMPLE_TOOL = ToolDefinition(
+    name="get_weather",
+    description="Get the current weather for a given city.",
+    permission_level=ToolPermissionLevel.NETWORK,
+    arguments={"city": "The city name to look up weather for"},
+)
+
+
+@_skip_no_ollama
+def test_integration_tool_definitions_accepted_by_ollama() -> None:
+    """Ollama accepts a chat request with tool definitions and returns
+    a structurally valid response (content string, valid model name,
+    valid created_at)."""
+    assert _INTEGRATION_MODEL is not None
+    provider = OllamaProvider()
+    profile = _build_integration_profile(_INTEGRATION_MODEL)
+
+    response = provider.chat(
+        profile=profile,
+        messages=[LLMMessage(role=LLMRole.USER, content="Hello, what can you do?")],
+        tools=[_SIMPLE_TOOL],
+        timeout_seconds=120,
+    )
+
+    assert response.provider == "ollama"
+    assert isinstance(response.model_name, str) and response.model_name
+    assert isinstance(response.created_at, str) and response.created_at
+    assert isinstance(response.content, str)
+    assert isinstance(response.raw_payload, dict)
+
+
+@_skip_no_ollama
+def test_integration_tool_call_response_parsed_into_contract() -> None:
+    """When prompted to use a tool, a real Ollama model returns a tool_call
+    that is correctly parsed into the ToolCall dataclass contract.
+
+    If the model does not produce a tool call (model-dependent), the test
+    verifies the response still conforms to the LLMResponse contract and
+    skips the tool_call-specific assertions with a clear message."""
+    assert _INTEGRATION_MODEL is not None
+    provider = OllamaProvider()
+    profile = _build_integration_profile(_INTEGRATION_MODEL)
+
+    response = provider.chat(
+        profile=profile,
+        messages=[
+            LLMMessage(
+                role=LLMRole.USER,
+                content="What is the weather in Paris? Use the get_weather tool.",
+            ),
+        ],
+        tools=[_SIMPLE_TOOL],
+        timeout_seconds=120,
+    )
+
+    # The response must always conform to the LLMResponse contract.
+    assert response.provider == "ollama"
+    assert isinstance(response.content, str)
+    assert isinstance(response.raw_payload, dict)
+
+    if response.tool_calls is None:
+        pytest.skip(
+            f"Model {_INTEGRATION_MODEL} did not produce a tool call for this prompt "
+            "(model-dependent behavior); structural contract still validated."
+        )
+
+    # Validate parsed tool calls match the ToolCall contract.
+    assert isinstance(response.tool_calls, tuple)
+    assert len(response.tool_calls) >= 1
+
+    first_call = response.tool_calls[0]
+    assert isinstance(first_call, ToolCall)
+    assert isinstance(first_call.tool_name, str) and first_call.tool_name
+    assert isinstance(first_call.arguments, dict)
+    # The model should have called our get_weather tool.
+    assert first_call.tool_name == "get_weather"
+    assert "city" in first_call.arguments
