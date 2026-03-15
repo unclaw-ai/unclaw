@@ -1,4 +1,3 @@
 bot_token_env_var: TELEGRAM_BOT_TOKEN
 polling_timeout_seconds: 30
-allowed_chat_ids:
-- REDACTED_TELEGRAM_CHAT_ID
+allowed_chat_ids: []
