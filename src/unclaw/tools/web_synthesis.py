@@ -30,6 +30,7 @@ from unclaw.tools.web_text import (
     _evidence_similarity,
     _extract_subject_tokens,
     _fold_for_match,
+    _join_summary_parts,
     _keyword_overlap_score,
     _looks_promotional,
     _looks_site_descriptive,
@@ -411,16 +412,6 @@ def _merge_cluster_text(
         _join_summary_parts(tuple(combined_parts)),
         limit=_MAX_SUMMARY_POINT_CHARS,
     )
-
-
-def _join_summary_parts(parts: tuple[str, ...]) -> str:
-    cleaned_parts = [part.strip() for part in parts if part.strip()]
-    if not cleaned_parts:
-        return ""
-    joined = ". ".join(_strip_terminal_punctuation(part) for part in cleaned_parts)
-    if joined and joined[-1] not in ".!?":
-        joined += "."
-    return joined
 
 
 def _merge_copular_cluster(
