@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from unclaw.core.capabilities import build_runtime_capability_summary
+from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.orchestrator import (
@@ -249,7 +250,12 @@ def _run_agent_loop(
                 tool_call=tool_call,
             )
             context_messages.append(
-                LLMMessage(role=LLMRole.TOOL, content=tool_result.output_text)
+                LLMMessage(
+                    role=LLMRole.TOOL,
+                    content=build_untrusted_tool_message_content(
+                        tool_result.output_text
+                    ),
+                )
             )
 
         # Call the model again with extended context.
