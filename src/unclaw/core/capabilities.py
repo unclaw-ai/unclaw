@@ -86,6 +86,10 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "as available."
             ),
             (
+                "- If tool use is available in this turn, use only the listed "
+                "built-in tools and base the final answer on their results."
+            ),
+            (
                 "- If tool output is already present in the conversation, treat it "
                 "as retrieved context that you may summarize, compare, extract, "
                 "or analyze. Do not say you cannot access it, and do not ask the "
@@ -118,10 +122,6 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
 
 def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines = [
-        (
-            "Autonomous model-side tool execution in this chat turn. "
-            "Use the listed Unclaw built-in tools instead."
-        ),
         "Shell command execution.",
         "Any capability that is not listed as available above.",
     ]

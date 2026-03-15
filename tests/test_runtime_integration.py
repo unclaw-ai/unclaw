@@ -182,7 +182,9 @@ def test_runtime_capability_summary_reports_available_and_missing_capabilities()
     assert "Web search via /search <query>." in context
     assert "Session memory and summary access." in context
     assert "Do not claim you have no tool access" in context
+    assert "If tool use is available in this turn" in context
     assert "Do not say you cannot access it" in context
+    assert "Autonomous model-side tool execution" not in context
 
 
 def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
