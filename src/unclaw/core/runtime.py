@@ -75,17 +75,19 @@ def run_user_turn(
     active_tool_registry = tool_registry or create_default_tool_registry(
         session_manager.settings
     )
-    capability_summary = build_runtime_capability_summary(
-        tool_registry=active_tool_registry,
-        memory_summary_available=command_handler.memory_manager is not None,
-    )
-    turn_started_at = perf_counter()
 
-    # Determine tool definitions for agent loop.
+    # Determine tool definitions for agent loop first, so the capability
+    # summary can honestly report whether model-driven tool use is active.
     tool_definitions = _resolve_tool_definitions(
         tool_registry=active_tool_registry,
         model_profile=selected_model,
     )
+    capability_summary = build_runtime_capability_summary(
+        tool_registry=active_tool_registry,
+        memory_summary_available=command_handler.memory_manager is not None,
+        model_can_call_tools=tool_definitions is not None,
+    )
+    turn_started_at = perf_counter()
 
     active_tracer.trace_runtime_started(
         session_id=session.id,

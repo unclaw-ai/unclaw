@@ -19,6 +19,7 @@ class RuntimeCapabilitySummary:
     url_fetch_available: bool
     web_search_available: bool
     memory_summary_available: bool
+    model_can_call_tools: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -33,6 +34,7 @@ def build_runtime_capability_summary(
     *,
     tool_registry: ToolRegistry,
     memory_summary_available: bool,
+    model_can_call_tools: bool = False,
 ) -> RuntimeCapabilitySummary:
     """Summarize the currently enabled built-in tools and related runtime features."""
     available_tool_names = tuple(
@@ -49,6 +51,7 @@ def build_runtime_capability_summary(
         url_fetch_available=FETCH_URL_TEXT_DEFINITION.name in available_tool_name_set,
         web_search_available=SEARCH_WEB_DEFINITION.name in available_tool_name_set,
         memory_summary_available=memory_summary_available,
+        model_can_call_tools=model_can_call_tools,
     )
 
 
@@ -74,6 +77,14 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
 
     lines.append("Unavailable capabilities:")
     lines.extend(f"- {line}" for line in unavailable_lines)
+    if summary.model_can_call_tools:
+        lines.append("Tool invocation mode: model-callable (you may call tools directly this turn).")
+    else:
+        lines.append(
+            "Tool invocation mode: user-initiated slash commands only "
+            "(you cannot call tools directly this turn)."
+        )
+
     lines.extend(
         (
             "Behavior rules:",
@@ -85,9 +96,29 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "- You may say you can use Unclaw built-in tools that are listed "
                 "as available."
             ),
+        )
+    )
+
+    if summary.model_can_call_tools:
+        lines.append(
+            "- Use only the listed built-in tools and base the final answer "
+            "on their results."
+        )
+    else:
+        lines.extend(
             (
-                "- If tool use is available in this turn, use only the listed "
-                "built-in tools and base the final answer on their results."
+                "- Tools listed above are available only when the user types the "
+                "slash command. You cannot invoke them yourself in this turn.",
+                "- Do not say \"let me search\" or \"I will look that up\" as if "
+                "you can perform the action right now.",
+            )
+        )
+
+    lines.extend(
+        (
+            (
+                "- Do not claim you already searched, fetched, or read something "
+                "unless actual tool output is present in this conversation."
             ),
             (
                 "- If tool output is already present in the conversation, treat it "

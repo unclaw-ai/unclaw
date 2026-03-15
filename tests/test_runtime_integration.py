@@ -177,14 +177,80 @@ def test_runtime_capability_summary_reports_available_and_missing_capabilities()
     assert summary.local_file_read_available is False
     assert summary.local_directory_listing_available is False
     assert summary.memory_summary_available is False
+    assert summary.model_can_call_tools is False
     assert "Available built-in tools:" in context
     assert "/fetch <url>: fetch one public URL and extract text." in context
     assert "Web search via /search <query>." in context
     assert "Session memory and summary access." in context
     assert "Do not claim you have no tool access" in context
-    assert "If tool use is available in this turn" in context
+    assert "user-initiated slash commands only" in context
     assert "Do not say you cannot access it" in context
-    assert "Autonomous model-side tool execution" not in context
+    assert "Do not claim you already searched" in context
+
+
+def test_capability_context_non_native_turn_forbids_model_tool_claims() -> None:
+    """json_plan / non-native turn: context must not imply live model-driven tool use."""
+    registry = ToolRegistry()
+    registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+    )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "user-initiated slash commands only" in context
+    assert "you cannot call tools directly this turn" in context
+    assert "You cannot invoke them yourself in this turn" in context
+    assert 'Do not say "let me search"' in context
+    assert "Do not claim you already searched" in context
+    # Must NOT contain model-callable language
+    assert "model-callable" not in context
+    assert "you may call tools directly" not in context
+
+
+def test_capability_context_native_turn_permits_model_tool_use() -> None:
+    """Native / tool-callable turn: context should permit using available tools."""
+    registry = ToolRegistry()
+    registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+    )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "model-callable" in context
+    assert "you may call tools directly this turn" in context
+    assert "Use only the listed built-in tools" in context
+    # Must NOT contain non-native restrictions
+    assert "user-initiated slash commands only" not in context
+    assert "You cannot invoke them yourself" not in context
+    # Anti-hallucination rule still present
+    assert "Do not claim you already searched" in context
+
+
+def test_capability_context_without_tool_output_forbids_claiming_search_happened() -> None:
+    """Turn without actual tool output: must forbid claiming a search happened."""
+    registry = ToolRegistry()
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "Do not claim you already searched, fetched, or read something" in context
+    assert "unless actual tool output is present" in context
 
 
 def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
