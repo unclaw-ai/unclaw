@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -9,11 +10,12 @@ from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.context_builder import build_context_messages
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
-from unclaw.llm.base import LLMContentCallback, LLMError, LLMResponse
+from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse
 from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.logs.tracer import Tracer
 from unclaw.settings import Settings
+from unclaw.tools.contracts import ToolDefinition
 
 
 class OrchestratorError(UnclawError):
@@ -46,6 +48,7 @@ class OrchestratorTurnResult:
 
     response: LLMResponse
     model_duration_ms: int
+    context_messages: tuple[LLMMessage, ...] = ()
 
 
 @dataclass(slots=True)
@@ -66,6 +69,7 @@ class Orchestrator:
         capability_summary: RuntimeCapabilitySummary | None = None,
         thinking_enabled: bool = False,
         content_callback: LLMContentCallback | None = None,
+        tools: Sequence[ToolDefinition] | None = None,
     ) -> OrchestratorTurnResult:
         """Resolve the model, build context, and call the provider."""
         profile = resolve_model_profile(self.settings, model_profile_name)
@@ -93,6 +97,7 @@ class Orchestrator:
                 messages=context_messages,
                 thinking_enabled=thinking_enabled,
                 content_callback=content_callback,
+                tools=tools,
             )
         except LLMError as exc:
             raise ModelCallFailedError(
@@ -106,6 +111,53 @@ class Orchestrator:
         return OrchestratorTurnResult(
             response=response,
             model_duration_ms=_elapsed_ms(model_started_at),
+            context_messages=tuple(context_messages),
+        )
+
+    def call_model(
+        self,
+        *,
+        session_id: str,
+        messages: Sequence[LLMMessage],
+        model_profile_name: str,
+        thinking_enabled: bool = False,
+        content_callback: LLMContentCallback | None = None,
+        tools: Sequence[ToolDefinition] | None = None,
+    ) -> OrchestratorTurnResult:
+        """Call the model with pre-built messages (for agent loop iterations)."""
+        profile = resolve_model_profile(self.settings, model_profile_name)
+        provider = self._create_provider(profile.provider)
+
+        self.tracer.trace_model_called(
+            session_id=session_id,
+            provider=profile.provider,
+            model_profile_name=profile.name,
+            model_name=profile.model_name,
+            message_count=len(messages),
+        )
+
+        model_started_at = perf_counter()
+        try:
+            response = provider.chat(
+                profile=profile,
+                messages=messages,
+                thinking_enabled=thinking_enabled,
+                content_callback=content_callback,
+                tools=tools,
+            )
+        except LLMError as exc:
+            raise ModelCallFailedError(
+                provider=profile.provider,
+                model_profile_name=profile.name,
+                model_name=profile.model_name,
+                duration_ms=_elapsed_ms(model_started_at),
+                error=str(exc),
+            ) from exc
+
+        return OrchestratorTurnResult(
+            response=response,
+            model_duration_ms=_elapsed_ms(model_started_at),
+            context_messages=tuple(messages),
         )
 
     def _create_provider(self, provider_name: str) -> OllamaProvider:

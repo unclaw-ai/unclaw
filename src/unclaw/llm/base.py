@@ -49,10 +49,14 @@ class LLMMessage:
 
     role: LLMRole | str
     content: str
+    tool_calls_payload: tuple[dict[str, Any], ...] | None = None
 
-    def as_payload(self) -> dict[str, str]:
+    def as_payload(self) -> dict[str, Any]:
         """Return a provider-friendly message payload."""
-        return {"role": str(self.role), "content": self.content}
+        payload: dict[str, Any] = {"role": str(self.role), "content": self.content}
+        if self.tool_calls_payload is not None:
+            payload["tool_calls"] = list(self.tool_calls_payload)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

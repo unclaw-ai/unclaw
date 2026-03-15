@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
@@ -13,14 +13,17 @@ from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
     OrchestratorError,
+    OrchestratorTurnResult,
 )
 from unclaw.core.router import route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.errors import ConfigurationError
-from unclaw.llm.base import LLMContentCallback, LLMError
+from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
+from unclaw.tools.contracts import ToolDefinition
+from unclaw.tools.dispatcher import ToolDispatcher
 
 if TYPE_CHECKING:
     from unclaw.tools.registry import ToolRegistry
@@ -30,6 +33,12 @@ _RUNTIME_ERROR_REPLY = (
     "Check that Ollama is running and the selected model is available."
 )
 _EMPTY_RESPONSE_REPLY = "The local model returned an empty response."
+
+_MAX_AGENT_STEPS_DEFAULT = 6
+_MAX_STEPS_FALLBACK_REPLY = (
+    "I reached the maximum number of steps for this request. "
+    "Here is what I found so far."
+)
 
 
 def run_user_turn(
@@ -42,6 +51,7 @@ def run_user_turn(
     stream_output_func: LLMContentCallback | None = None,
     tool_registry: ToolRegistry | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
+    max_agent_steps: int = _MAX_AGENT_STEPS_DEFAULT,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -69,6 +79,12 @@ def run_user_turn(
         memory_summary_available=command_handler.memory_manager is not None,
     )
     turn_started_at = perf_counter()
+
+    # Determine tool definitions for agent loop.
+    tool_definitions = _resolve_tool_definitions(
+        tool_registry=active_tool_registry,
+        model_profile=selected_model,
+    )
 
     active_tracer.trace_runtime_started(
         session_id=session.id,
@@ -103,6 +119,7 @@ def run_user_turn(
             capability_summary=capability_summary,
             thinking_enabled=thinking_enabled,
             content_callback=stream_output_func,
+            tools=tool_definitions,
         )
         active_tracer.trace_model_succeeded(
             session_id=session.id,
@@ -113,7 +130,25 @@ def run_user_turn(
             model_duration_ms=response.model_duration_ms,
             reasoning=response.response.reasoning,
         )
-        assistant_reply = response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+
+        # --- Agent observation-action loop ---
+        if response.response.tool_calls and tool_definitions and max_agent_steps > 0:
+            assistant_reply = _run_agent_loop(
+                first_response=response,
+                orchestrator=orchestrator,
+                session_id=session.id,
+                session_manager=session_manager,
+                tracer=active_tracer,
+                tool_registry=active_tool_registry,
+                tool_definitions=tool_definitions,
+                model_profile_name=route.model_profile_name,
+                thinking_enabled=thinking_enabled,
+                content_callback=stream_output_func,
+                max_steps=max_agent_steps,
+            )
+        else:
+            assistant_reply = response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+
     except ModelCallFailedError as exc:
         active_tracer.trace_model_failed(
             session_id=session.id,
@@ -153,6 +188,119 @@ def run_user_turn(
         turn_duration_ms=_elapsed_ms(turn_started_at),
     )
     return assistant_reply
+
+
+def _run_agent_loop(
+    *,
+    first_response: OrchestratorTurnResult,
+    orchestrator: Orchestrator,
+    session_id: str,
+    session_manager: SessionManager,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    tool_definitions: Sequence[ToolDefinition],
+    model_profile_name: str,
+    thinking_enabled: bool,
+    content_callback: LLMContentCallback | None,
+    max_steps: int,
+) -> str:
+    """Execute the observation-action loop until text reply or step limit."""
+    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
+
+    context_messages: list[LLMMessage] = list(first_response.context_messages)
+    dispatcher = ToolDispatcher(tool_registry)
+    current_response = first_response
+
+    for _step in range(max_steps):
+        tool_calls = current_response.response.tool_calls
+        if not tool_calls:
+            return current_response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+
+        # Append the assistant message (with tool_calls) to context.
+        context_messages.append(
+            LLMMessage(
+                role=LLMRole.ASSISTANT,
+                content=current_response.response.content,
+                tool_calls_payload=_extract_raw_tool_calls(current_response.response),
+            )
+        )
+
+        # Execute each tool call through the existing dispatcher.
+        for tool_call in tool_calls:
+            tool_started_at = perf_counter()
+            tracer.trace_tool_started(
+                session_id=session_id,
+                tool_name=tool_call.tool_name,
+                arguments=tool_call.arguments,
+            )
+            tool_result = dispatcher.dispatch(tool_call)
+            tracer.trace_tool_finished(
+                session_id=session_id,
+                tool_name=tool_result.tool_name,
+                success=tool_result.success,
+                output_length=len(tool_result.output_text),
+                error=tool_result.error,
+                tool_duration_ms=_elapsed_ms(tool_started_at),
+            )
+            persist_tool_result(
+                session_manager=session_manager,
+                session_id=session_id,
+                result=tool_result,
+                tool_call=tool_call,
+            )
+            context_messages.append(
+                LLMMessage(role=LLMRole.TOOL, content=tool_result.output_text)
+            )
+
+        # Call the model again with extended context.
+        current_response = orchestrator.call_model(
+            session_id=session_id,
+            messages=context_messages,
+            model_profile_name=model_profile_name,
+            thinking_enabled=thinking_enabled,
+            content_callback=content_callback,
+            tools=tool_definitions,
+        )
+        tracer.trace_model_succeeded(
+            session_id=session_id,
+            provider=current_response.response.provider,
+            model_name=current_response.response.model_name,
+            finish_reason=current_response.response.finish_reason,
+            output_length=len(current_response.response.content),
+            model_duration_ms=current_response.model_duration_ms,
+            reasoning=current_response.response.reasoning,
+        )
+
+    # Final check: last model call may have produced a text reply.
+    if not current_response.response.tool_calls:
+        return current_response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+
+    # max_steps reached without a final text reply.
+    return _MAX_STEPS_FALLBACK_REPLY
+
+
+def _resolve_tool_definitions(
+    *,
+    tool_registry: ToolRegistry,
+    model_profile: Any,
+) -> list[ToolDefinition] | None:
+    """Return tool definitions if the model supports tools, else None."""
+    tool_mode = getattr(model_profile, "tool_mode", "none")
+    if tool_mode.strip().lower() == "none":
+        return None
+    tools = tool_registry.list_tools()
+    return tools if tools else None
+
+
+def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...] | None:
+    """Extract raw tool_calls from the provider response for re-sending."""
+    message = response.raw_payload.get("message")
+    if not isinstance(message, dict):
+        return None
+    raw_tool_calls = message.get("tool_calls")
+    if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
+        return None
+    return tuple(raw_tool_calls)
 
 
 def _elapsed_ms(started_at: float) -> int:

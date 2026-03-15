@@ -20,7 +20,7 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolResult
+from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION
 
@@ -66,6 +66,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del timeout_seconds
             captured["profile_name"] = profile.name
@@ -221,6 +222,7 @@ def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, content_callback
             captured["messages"] = list(messages)
@@ -318,6 +320,7 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, content_callback
             captured_messages.append(list(messages))
@@ -478,6 +481,7 @@ def test_run_search_then_answer_removes_stale_relative_dates_from_search_backed_
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, messages, timeout_seconds, thinking_enabled, content_callback
             return LLMResponse(
@@ -629,6 +633,7 @@ def test_run_search_then_answer_does_not_confirm_weak_usernames(
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, messages, timeout_seconds, thinking_enabled, content_callback
             return LLMResponse(
@@ -767,6 +772,7 @@ def test_run_search_then_answer_person_summary_prefers_supported_identity_over_f
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, messages, timeout_seconds, thinking_enabled, content_callback
             return LLMResponse(
@@ -930,6 +936,7 @@ def test_run_search_then_answer_omits_unconfirmed_achievements_and_keeps_compact
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, messages, timeout_seconds, thinking_enabled, content_callback
             return LLMResponse(
@@ -1082,6 +1089,7 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_search(
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, content_callback
             captured_messages.extend(messages)
@@ -1230,6 +1238,7 @@ def test_run_user_turn_uses_configured_ollama_timeout(
             timeout_seconds=None,
             thinking_enabled=False,
             content_callback=None,
+            tools=None,
         ):
             del profile, messages, timeout_seconds, thinking_enabled, content_callback
             return LLMResponse(
@@ -1260,6 +1269,434 @@ def test_run_user_turn_uses_configured_ollama_timeout(
         assert assistant_reply == "Timed reply"
         assert captured["default_timeout_seconds"] == 123.0
         assert captured["base_url"] == "http://127.0.0.1:11434"
+    finally:
+        session_manager.close()
+
+
+# ---------------------------------------------------------------------------
+# Agent observation-action loop tests (P0-2)
+# ---------------------------------------------------------------------------
+
+
+def test_agent_loop_text_only_fallback_when_no_tool_calls(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """When the model returns no tool_calls, behavior is identical to before."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Plain text reply",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, "Hello", session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Hello",
+            tracer=tracer,
+        )
+
+        assert reply == "Plain text reply"
+        # No tool events should appear.
+        event_types = [e.event_type for e in published_events]
+        assert "tool.started" not in event_types
+        assert "tool.finished" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_one_tool_call_then_final_response(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Model calls one tool, observes the result, and produces a final text reply."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: model requests a tool call.
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fetch_url_text", arguments={"url": "https://example.com"}),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "fetch_url_text", "arguments": {"url": "https://example.com"}}}
+                            ],
+                        }
+                    },
+                )
+            # Second call: model returns final text.
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The page contains example content.",
+                created_at="2026-03-13T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    # Register a simple tool that will be called.
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="Example Domain content"),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, "Fetch example.com", session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Fetch example.com",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "The page contains example content."
+        assert call_count == 2
+
+        # Verify tool tracing events.
+        event_types = [e.event_type for e in published_events]
+        assert "tool.started" in event_types
+        assert "tool.finished" in event_types
+
+        # Verify two model.succeeded events (first call + loop call).
+        assert event_types.count("model.succeeded") == 2
+
+        # Verify the tool result was persisted.
+        messages = session_manager.list_messages(session.id)
+        tool_messages = [m for m in messages if m.role is MessageRole.TOOL]
+        assert len(tool_messages) >= 1
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_multi_step_with_two_tool_rounds(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Model performs two rounds of tool calls before producing a final reply."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fetch_url_text", arguments={"url": "https://a.com"}),),
+                    raw_payload={"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "fetch_url_text", "arguments": {"url": "https://a.com"}}}
+                    ]}},
+                )
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fetch_url_text", arguments={"url": "https://b.com"}),),
+                    raw_payload={"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "fetch_url_text", "arguments": {"url": "https://b.com"}}}
+                    ]}},
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Combined result from both pages.",
+                created_at="2026-03-13T12:00:02Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Content from {call.arguments.get('url', 'unknown')}",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, "Compare A and B", session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Compare A and B",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Combined result from both pages."
+        assert call_count == 3
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_max_steps_guardrail(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """When max_agent_steps is reached, a safe fallback reply is returned."""
+    from unclaw.core.runtime import _MAX_STEPS_FALLBACK_REPLY
+
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            # Always return a tool call — never a final text reply.
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+                tool_calls=(ToolCall(tool_name="fetch_url_text", arguments={"url": "https://loop.com"}),),
+                raw_payload={"message": {"content": "", "tool_calls": [
+                    {"function": {"name": "fetch_url_text", "arguments": {"url": "https://loop.com"}}}
+                ]}},
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="page content"),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, "Infinite loop test", session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Infinite loop test",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            max_agent_steps=2,
+        )
+
+        assert reply == _MAX_STEPS_FALLBACK_REPLY
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_tool_failure_path(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """When a tool fails, its error is fed back to the model as context."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(messages))
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fetch_url_text", arguments={"url": "https://fail.com"}),),
+                    raw_payload={"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "fetch_url_text", "arguments": {"url": "https://fail.com"}}}
+                    ]}},
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The URL could not be fetched.",
+                created_at="2026-03-13T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.failure(tool_name=call.tool_name, error="Connection refused"),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, "Fetch fail.com", session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Fetch fail.com",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "The URL could not be fetched."
+        assert call_count == 2
+
+        # The second model call should contain the tool error as context.
+        second_call_messages = captured_messages[1]
+        tool_result_messages = [m for m in second_call_messages if m.role == LLMRole.TOOL]
+        assert len(tool_result_messages) == 1
+        assert "Connection refused" in tool_result_messages[0].content
+
+        # Verify tool.finished event recorded the failure.
+        tool_finished_events = [
+            e for e in published_events if e.event_type == "tool.finished"
+        ]
+        assert len(tool_finished_events) == 1
+        assert tool_finished_events[0].payload["success"] is False
     finally:
         session_manager.close()
 

@@ -622,8 +622,9 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
                 timeout_seconds=None,
                 thinking_enabled=False,
                 content_callback=None,
+                tools=None,
             ):
-                del profile, messages, timeout_seconds, thinking_enabled, content_callback
+                del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
                 return LLMResponse(
                     provider="ollama",
                     model_name="qwen3.5:4b",
