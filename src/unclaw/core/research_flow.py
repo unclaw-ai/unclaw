@@ -1,4 +1,4 @@
-"""Shared /search flow and tool-history helpers."""
+"""Shared /search command helpers and tool-history formatting."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from unclaw.core.search_grounding import (
 )
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.core.runtime import run_user_turn
+from unclaw.llm.base import LLMContentCallback
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import SearchWebPayload, ToolCall, ToolResult
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
@@ -30,7 +31,7 @@ class ResearchTurnResult:
 
 
 def is_search_tool_call(call: ToolCall) -> bool:
-    """Return whether one tool call should run through the research flow."""
+    """Return whether one tool call targets the search_web tool."""
     return call.tool_name == SEARCH_WEB_DEFINITION.name
 
 
@@ -81,15 +82,22 @@ def build_tool_history_content(
     )
 
 
-def run_search_then_answer(
+def run_search_command(
     *,
     session_manager: Any,
     command_handler: Any,
     tracer: Any,
     tool_executor: Any,
     tool_call: ToolCall,
+    stream_output_func: LLMContentCallback | None = None,
 ) -> ResearchTurnResult:
-    """Execute bounded web retrieval, persist it as tool context, then answer naturally."""
+    """Handle /search by pre-executing the tool, then answering via run_user_turn.
+
+    The search tool is executed upfront because the user explicitly requested it
+    via ``/search``.  The answer is generated through the same ``run_user_turn``
+    path used for every other chat turn, including the observation-action agent
+    loop when the active model supports native tool calling.
+    """
     query = _read_tool_call_query(tool_call)
     session = session_manager.ensure_current_session()
     session_manager.add_message(
@@ -98,6 +106,7 @@ def run_search_then_answer(
         session_id=session.id,
     )
 
+    # Execute the search tool (user explicitly requested via /search).
     tracer.trace_tool_started(
         session_id=session.id,
         tool_name=tool_call.tool_name,
@@ -135,12 +144,14 @@ def run_search_then_answer(
             tool_result=tool_result,
         )
 
+    # Generate the answer through the common runtime path.
     assistant_reply = run_user_turn(
         session_manager=session_manager,
         command_handler=command_handler,
         user_input=query,
         tracer=tracer,
         tool_registry=getattr(tool_executor, "registry", None),
+        stream_output_func=stream_output_func,
         assistant_reply_transform=lambda reply: append_search_sources_section(
             shape_search_backed_reply(
                 reply,

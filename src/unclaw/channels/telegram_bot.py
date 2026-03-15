@@ -22,7 +22,7 @@ from unclaw.core.executor import ToolExecutor
 from unclaw.core.research_flow import (
     is_search_tool_call,
     persist_tool_result,
-    run_search_then_answer,
+    run_search_command,
 )
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
@@ -434,7 +434,7 @@ class TelegramBotChannel:
             reply_text = _format_tool_list(self.tool_executor.list_tools())
         elif result.tool_call is not None:
             if is_search_tool_call(result.tool_call):
-                reply_text = run_search_then_answer(
+                reply_text = run_search_command(
                     session_manager=self.session_manager,
                     command_handler=command_handler,
                     tracer=self.tracer,

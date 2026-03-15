@@ -12,7 +12,7 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.research_flow import build_tool_history_content, run_search_then_answer
+from unclaw.core.research_flow import build_tool_history_content, run_search_command
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMResponse, LLMRole
@@ -444,7 +444,7 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
         session_manager.close()
 
 
-def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_context(
+def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_context(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -529,7 +529,7 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
     try:
         session = session_manager.ensure_current_session()
 
-        search_reply = run_search_then_answer(
+        search_reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
@@ -613,7 +613,7 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
         session_manager.close()
 
 
-def test_run_search_then_answer_removes_stale_relative_dates_from_search_backed_replies(
+def test_run_search_command_removes_stale_relative_dates_from_search_backed_replies(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -743,7 +743,7 @@ def test_run_search_then_answer_removes_stale_relative_dates_from_search_backed_
     )
 
     try:
-        reply = run_search_then_answer(
+        reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
@@ -767,7 +767,7 @@ def test_run_search_then_answer_removes_stale_relative_dates_from_search_backed_
         session_manager.close()
 
 
-def test_run_search_then_answer_does_not_confirm_weak_usernames(
+def test_run_search_command_does_not_confirm_weak_usernames(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -885,7 +885,7 @@ def test_run_search_then_answer_does_not_confirm_weak_usernames(
     )
 
     try:
-        reply = run_search_then_answer(
+        reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
@@ -906,7 +906,7 @@ def test_run_search_then_answer_does_not_confirm_weak_usernames(
         session_manager.close()
 
 
-def test_run_search_then_answer_person_summary_prefers_supported_identity_over_fluff(
+def test_run_search_command_person_summary_prefers_supported_identity_over_fluff(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1046,7 +1046,7 @@ def test_run_search_then_answer_person_summary_prefers_supported_identity_over_f
     )
 
     try:
-        reply = run_search_then_answer(
+        reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
@@ -1070,7 +1070,7 @@ def test_run_search_then_answer_person_summary_prefers_supported_identity_over_f
         session_manager.close()
 
 
-def test_run_search_then_answer_omits_unconfirmed_achievements_and_keeps_compact_sources(
+def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sources(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -1198,7 +1198,7 @@ def test_run_search_then_answer_omits_unconfirmed_achievements_and_keeps_compact
     )
 
     try:
-        reply = run_search_then_answer(
+        reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
             tracer=tracer,
@@ -2027,6 +2027,91 @@ def test_agent_loop_wraps_adversarial_tool_output_as_untrusted_data(
         assert second_call_tool_messages[0].endswith(
             "--- END UNTRUSTED TOOL OUTPUT ---"
         )
+    finally:
+        session_manager.close()
+
+
+def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Verify that run_search_command delegates to run_user_turn (the shared
+    runtime path) and that the optional stream_output_func is forwarded."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    streamed_chunks: list[str] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False,
+                 content_callback=None, tools=None):
+            del profile, timeout_seconds, thinking_enabled
+            if content_callback is not None:
+                content_callback("Streamed search answer.")
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Streamed search answer.",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: streaming test\n",
+        payload={
+            "query": "streaming test",
+            "summary_points": ["Streaming works in search."],
+            "display_sources": [
+                {"title": "Docs", "url": "https://example.com/docs"},
+            ],
+        },
+    )
+
+    try:
+        result = run_search_command(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "streaming test"},
+            ),
+            stream_output_func=streamed_chunks.append,
+        )
+
+        assert "Streamed search answer." in result.assistant_reply
+        assert "Sources:" in result.assistant_reply
+        assert "https://example.com/docs" in result.assistant_reply
+        assert streamed_chunks == ["Streamed search answer."]
+
+        stored_messages = session_manager.list_messages(
+            session_manager.ensure_current_session().id,
+        )
+        roles = [m.role for m in stored_messages]
+        assert MessageRole.USER in roles
+        assert MessageRole.TOOL in roles
+        assert MessageRole.ASSISTANT in roles
     finally:
         session_manager.close()
 

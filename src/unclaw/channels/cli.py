@@ -13,7 +13,7 @@ from unclaw.core.executor import ToolExecutor
 from unclaw.core.research_flow import (
     is_search_tool_call,
     persist_tool_result,
-    run_search_then_answer,
+    run_search_command,
 )
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
@@ -177,14 +177,16 @@ def run_cli(
                 continue
             if result.tool_call is not None:
                 if is_search_tool_call(result.tool_call):
-                    assistant_reply = run_search_then_answer(
+                    assistant_stream = _TerminalAssistantStream()
+                    assistant_reply = run_search_command(
                         session_manager=session_manager,
                         command_handler=command_handler,
                         tracer=tracer,
                         tool_executor=tool_executor,
                         tool_call=result.tool_call,
+                        stream_output_func=assistant_stream.write,
                     ).assistant_reply
-                    _render_assistant_reply(assistant_reply)
+                    assistant_stream.finish(assistant_reply)
                     _refresh_session_summary(
                         memory_manager=memory_manager,
                         session_id=session_manager.ensure_current_session().id,
