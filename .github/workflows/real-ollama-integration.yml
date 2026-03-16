@@ -1,0 +1,82 @@
+name: real-ollama-integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 4 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/real-ollama-integration.yml"
+      - "config/**"
+      - "pyproject.toml"
+      - "src/unclaw/core/**"
+      - "src/unclaw/llm/**"
+      - "src/unclaw/tools/**"
+      - "tests/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/real-ollama-integration.yml"
+      - "config/**"
+      - "pyproject.toml"
+      - "src/unclaw/core/**"
+      - "src/unclaw/llm/**"
+      - "src/unclaw/tools/**"
+      - "tests/**"
+
+concurrency:
+  group: real-ollama-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-ollama:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      REAL_OLLAMA: "1"
+      # Smallest repo-aligned model that is still credible for native tool calls in CI.
+      REAL_OLLAMA_MODEL: "qwen3.5:4b"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama server
+        run: |
+          ollama serve >/tmp/ollama.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/ollama.log
+          exit 1
+
+      - name: Pull CI model
+        run: ollama pull "${REAL_OLLAMA_MODEL}"
+
+      - name: Run real Ollama integration subset
+        run: >
+          pytest -m real_ollama
+          tests/test_ollama_provider.py
+          tests/test_real_ollama_runtime_integration.py
+          -q
+
+      - name: Show Ollama log on failure
+        if: failure()
+        run: cat /tmp/ollama.log

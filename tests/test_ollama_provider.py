@@ -704,45 +704,11 @@ class _FakeStreamResponse:
 
 
 # ---------------------------------------------------------------------------
-# Real Ollama integration tests (skipped when Ollama is unavailable)
+# Real Ollama integration tests
+# Run with:
+# REAL_OLLAMA=1 REAL_OLLAMA_MODEL=qwen3.5:4b \
+# pytest -m real_ollama tests/test_ollama_provider.py -q
 # ---------------------------------------------------------------------------
-
-# Models known to support Ollama native tool calling.
-_TOOL_CAPABLE_MODEL_PREFIXES = (
-    "qwen",
-    "llama3.1",
-    "llama3.2",
-    "llama3.3",
-    "mistral",
-    "command-r",
-    "firefunction",
-    "hermes",
-)
-
-
-def _find_tool_capable_model() -> str | None:
-    """Return the name of a locally installed model that supports tool calling,
-    or *None* if Ollama is unreachable or no suitable model is found."""
-    provider = OllamaProvider()
-    if not provider.is_available(timeout_seconds=5):
-        return None
-    try:
-        models = provider.list_models(timeout_seconds=5)
-    except Exception:
-        return None
-    for model in models:
-        base = model.split(":")[0].lower()
-        if any(base.startswith(prefix) for prefix in _TOOL_CAPABLE_MODEL_PREFIXES):
-            return model
-    return None
-
-
-_INTEGRATION_MODEL = _find_tool_capable_model()
-
-_skip_no_ollama = pytest.mark.skipif(
-    _INTEGRATION_MODEL is None,
-    reason="Ollama unavailable or no tool-capable model installed locally",
-)
 
 
 def _build_integration_profile(model_name: str) -> ResolvedModelProfile:
@@ -770,14 +736,14 @@ _SIMPLE_TOOL = ToolDefinition(
 
 @pytest.mark.integration
 @pytest.mark.real_ollama
-@_skip_no_ollama
-def test_integration_tool_definitions_accepted_by_ollama() -> None:
+def test_integration_tool_definitions_accepted_by_ollama(
+    real_ollama_model_name: str,
+) -> None:
     """Ollama accepts a chat request with tool definitions and returns
     a structurally valid response (content string, valid model name,
     valid created_at)."""
-    assert _INTEGRATION_MODEL is not None
     provider = OllamaProvider()
-    profile = _build_integration_profile(_INTEGRATION_MODEL)
+    profile = _build_integration_profile(real_ollama_model_name)
 
     response = provider.chat(
         profile=profile,
@@ -795,49 +761,79 @@ def test_integration_tool_definitions_accepted_by_ollama() -> None:
 
 @pytest.mark.integration
 @pytest.mark.real_ollama
-@_skip_no_ollama
-def test_integration_tool_call_response_parsed_into_contract() -> None:
-    """When prompted to use a tool, a real Ollama model returns a tool_call
-    that is correctly parsed into the ToolCall dataclass contract.
-
-    If the model does not produce a tool call (model-dependent), the test
-    verifies the response still conforms to the LLMResponse contract and
-    skips the tool_call-specific assertions with a clear message."""
-    assert _INTEGRATION_MODEL is not None
+def test_integration_streaming_chat_round_trips_incremental_content(
+    real_ollama_model_name: str,
+) -> None:
+    """A live Ollama streaming response reaches the callback and the final content."""
     provider = OllamaProvider()
-    profile = _build_integration_profile(_INTEGRATION_MODEL)
+    profile = _build_integration_profile(real_ollama_model_name)
+    streamed_chunks: list[str] = []
 
     response = provider.chat(
         profile=profile,
         messages=[
             LLMMessage(
                 role=LLMRole.USER,
-                content="What is the weather in Paris? Use the get_weather tool.",
+                content="Reply with one short sentence about local models.",
+            ),
+        ],
+        timeout_seconds=120,
+        content_callback=streamed_chunks.append,
+    )
+
+    assert response.provider == "ollama"
+    assert isinstance(response.content, str)
+    assert response.content.strip()
+    assert isinstance(response.raw_payload, dict)
+    assert streamed_chunks
+    assert "".join(streamed_chunks) == response.content
+
+
+@pytest.mark.integration
+@pytest.mark.real_ollama
+def test_integration_streaming_tool_call_response_parsed_into_contract(
+    real_ollama_model_name: str,
+) -> None:
+    """If the live model emits a tool call while streaming, the provider keeps it."""
+    provider = OllamaProvider()
+    profile = _build_integration_profile(real_ollama_model_name)
+    streamed_chunks: list[str] = []
+
+    response = provider.chat(
+        profile=profile,
+        messages=[
+            LLMMessage(
+                role=LLMRole.USER,
+                content=(
+                    "Use the get_weather tool for Paris before answering. "
+                    "Do not answer from memory."
+                ),
             ),
         ],
         tools=[_SIMPLE_TOOL],
         timeout_seconds=120,
+        content_callback=streamed_chunks.append,
     )
 
-    # The response must always conform to the LLMResponse contract.
     assert response.provider == "ollama"
     assert isinstance(response.content, str)
     assert isinstance(response.raw_payload, dict)
 
     if response.tool_calls is None:
         pytest.skip(
-            f"Model {_INTEGRATION_MODEL} did not produce a tool call for this prompt "
-            "(model-dependent behavior); structural contract still validated."
+            f"Model {real_ollama_model_name} did not emit a tool call for this "
+            "streaming prompt; real provider and streaming boundaries were still validated."
         )
 
-    # Validate parsed tool calls match the ToolCall contract.
     assert isinstance(response.tool_calls, tuple)
     assert len(response.tool_calls) >= 1
+    assert "message" in response.raw_payload
+    assert isinstance(response.raw_payload["message"], dict)
+    assert isinstance(response.raw_payload["message"].get("tool_calls"), list)
 
     first_call = response.tool_calls[0]
     assert isinstance(first_call, ToolCall)
     assert isinstance(first_call.tool_name, str) and first_call.tool_name
     assert isinstance(first_call.arguments, dict)
-    # The model should have called our get_weather tool.
     assert first_call.tool_name == "get_weather"
     assert "city" in first_call.arguments

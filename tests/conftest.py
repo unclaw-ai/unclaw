@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -9,6 +10,40 @@ import yaml
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+_REAL_OLLAMA_TOOL_CAPABLE_MODEL_PREFIXES = (
+    "qwen",
+    "llama3.1",
+    "llama3.2",
+    "llama3.3",
+    "mistral",
+    "command-r",
+    "firefunction",
+    "hermes",
+)
+
+
+def _real_ollama_enabled() -> bool:
+    return os.environ.get("REAL_OLLAMA", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-untyped-def]
+    del config
+    if _real_ollama_enabled():
+        return
+
+    skip_real_ollama = pytest.mark.skip(
+        reason="Set REAL_OLLAMA=1 to run real_ollama tests.",
+    )
+    for item in items:
+        if "real_ollama" in item.keywords:
+            item.add_marker(skip_real_ollama)
 
 
 @pytest.fixture
@@ -36,6 +71,45 @@ def make_temp_project(tmp_path: Path):
         return project_root
 
     return _make_temp_project
+
+
+@pytest.fixture(scope="session")
+def real_ollama_model_name() -> str:
+    if not _real_ollama_enabled():
+        pytest.skip("Set REAL_OLLAMA=1 to run real_ollama tests.")
+
+    from unclaw.llm.ollama_provider import OllamaProvider
+
+    provider = OllamaProvider()
+    if not provider.is_available(timeout_seconds=5):
+        pytest.fail(
+            "REAL_OLLAMA=1 but Ollama is not reachable at http://127.0.0.1:11434."
+        )
+
+    available_models = provider.list_models(timeout_seconds=5)
+    configured_model = os.environ.get("REAL_OLLAMA_MODEL", "").strip()
+    if configured_model:
+        if configured_model not in available_models:
+            pytest.fail(
+                "REAL_OLLAMA_MODEL={!r} is not installed. Available models: {}.".format(
+                    configured_model,
+                    ", ".join(available_models) or "[none]",
+                )
+            )
+        return configured_model
+
+    for model_name in available_models:
+        model_base = model_name.split(":")[0].lower()
+        if any(
+            model_base.startswith(prefix)
+            for prefix in _REAL_OLLAMA_TOOL_CAPABLE_MODEL_PREFIXES
+        ):
+            return model_name
+
+    pytest.fail(
+        "REAL_OLLAMA=1 but no tool-capable Ollama model is installed. "
+        "Set REAL_OLLAMA_MODEL to a pulled model such as qwen3.5:4b."
+    )
 
 
 @pytest.fixture
