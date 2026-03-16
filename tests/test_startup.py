@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -73,8 +72,11 @@ def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> No
     )
 
 
-def test_startup_report_accepts_local_telegram_token(monkeypatch, tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_startup_report_accepts_local_telegram_token(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     (project_root / "config" / "secrets.yaml").write_text(
         yaml.safe_dump(
@@ -157,9 +159,9 @@ def test_build_banner_centers_brand_tagline() -> None:
 
 
 def test_bootstrap_prunes_runtime_traces_older_than_retention_window(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_id: str
     old_created_at = _utc_iso_days_ago(45)
@@ -228,9 +230,9 @@ def test_bootstrap_prunes_runtime_traces_older_than_retention_window(
 
 
 def test_bootstrap_keeps_old_runtime_traces_when_retention_is_disabled(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     _set_logging_value(project_root, "retention_days", 0)
     settings = load_settings(project_root=project_root)
     old_created_at = _utc_iso_days_ago(45)
@@ -276,13 +278,6 @@ def test_bootstrap_keeps_old_runtime_traces_when_retention_is_disabled(
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    project_root = tmp_path / "project"
-    shutil.copytree(_repo_root() / "config", project_root / "config")
-    return project_root
-
 
 def _set_logging_value(project_root: Path, key: str, value: object) -> None:
     app_config_path = project_root / "config" / "app.yaml"

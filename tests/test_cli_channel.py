@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -46,12 +45,13 @@ def test_terminal_assistant_stream_explains_interrupted_streams(capsys) -> None:
 
 def test_cli_search_returns_a_natural_reply_with_compact_sources(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
     capsys,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -192,10 +192,10 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
 
 def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecution(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
     capsys,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -324,22 +324,3 @@ def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecuti
     assert "Sources:\n- Ollama Blog: https://ollama.com/blog/search-update" in output
     assert "- Release Notes: https://example.com/releases/ollama-search" in output
     assert captured_messages
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
-
-
-def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
-    profile = settings.models[profile_name]
-    settings.models[profile_name] = profile.__class__(
-        name=profile.name,
-        provider=profile.provider,
-        model_name=profile.model_name,
-        temperature=profile.temperature,
-        thinking_supported=profile.thinking_supported,
-        tool_mode=tool_mode,
-    )

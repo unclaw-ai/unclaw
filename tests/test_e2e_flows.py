@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -20,9 +19,9 @@ pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
 def test_start_entrypoint_bootstraps_runtime_and_leaves_a_usable_session(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = _patch_ready_ollama(monkeypatch, project_root)
 
     monkeypatch.setattr("builtins.input", _raise_eof)
@@ -45,10 +44,10 @@ def test_start_entrypoint_bootstraps_runtime_and_leaves_a_usable_session(
 
 def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
     capsys,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = _patch_ready_ollama(monkeypatch, project_root)
     scripted_inputs = iter(["Hello from the terminal."])
 
@@ -124,10 +123,10 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
 
 def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
     capsys,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = _patch_ready_ollama(monkeypatch, project_root)
     search_registry = _build_search_registry(
         query="fais une recherche en ligne sur Marine Leleu et fais moi sa biographie",
@@ -260,10 +259,10 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
 
 def test_cli_search_command_runs_end_to_end_via_shared_runtime(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
     capsys,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = _patch_ready_ollama(monkeypatch, project_root)
     search_registry = _build_search_registry(
         query="latest news about Ollama",
@@ -406,14 +405,6 @@ def _build_search_registry(
         ),
     )
     return registry
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
-
 
 def _next_input(scripted_inputs) -> str:  # type: ignore[no-untyped-def]
     try:

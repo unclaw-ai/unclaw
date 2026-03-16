@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -14,8 +13,10 @@ from unclaw.settings import load_settings
 pytestmark = pytest.mark.unit
 
 
-def test_load_settings_errors_when_app_config_file_is_missing(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_settings_errors_when_app_config_file_is_missing(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_config_path.unlink()
 
@@ -25,8 +26,10 @@ def test_load_settings_errors_when_app_config_file_is_missing(tmp_path: Path) ->
     assert str(exc_info.value) == f"Missing configuration file: {app_config_path}"
 
 
-def test_load_settings_errors_when_models_yaml_is_malformed(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_settings_errors_when_models_yaml_is_malformed(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     models_config_path = project_root / "config" / "models.yaml"
     models_config_path.write_text("profiles: [\n", encoding="utf-8")
 
@@ -39,9 +42,9 @@ def test_load_settings_errors_when_models_yaml_is_malformed(tmp_path: Path) -> N
 
 
 def test_load_settings_errors_when_default_profile_key_is_missing(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["models"].pop("default_profile")
@@ -57,9 +60,9 @@ def test_load_settings_errors_when_default_profile_key_is_missing(
 
 
 def test_load_settings_errors_when_channel_flag_has_invalid_type(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["channels"]["telegram_enabled"] = "yes"
@@ -71,8 +74,10 @@ def test_load_settings_errors_when_channel_flag_has_invalid_type(
     assert str(exc_info.value) == "Configuration key 'telegram_enabled' must be a boolean."
 
 
-def test_load_settings_errors_when_logging_mode_is_invalid(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_settings_errors_when_logging_mode_is_invalid(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["logging"]["mode"] = "verbose"
@@ -88,9 +93,9 @@ def test_load_settings_errors_when_logging_mode_is_invalid(tmp_path: Path) -> No
 
 
 def test_load_settings_errors_when_logging_retention_is_negative(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["logging"]["retention_days"] = -1
@@ -106,9 +111,9 @@ def test_load_settings_errors_when_logging_retention_is_negative(
 
 
 def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["models"]["default_profile"] = "ghost"
@@ -125,9 +130,9 @@ def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
 
 
 def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
 
     profile = resolve_model_profile(settings, "deep")
@@ -137,8 +142,10 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
     assert profile.keep_alive == "10m"
 
 
-def test_load_settings_allows_profile_keep_alive_to_be_absent(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_settings_allows_profile_keep_alive_to_be_absent(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     models_config_path = project_root / "config" / "models.yaml"
     models_payload = _read_yaml(models_config_path)
     profiles = models_payload["profiles"]
@@ -155,8 +162,10 @@ def test_load_settings_allows_profile_keep_alive_to_be_absent(tmp_path: Path) ->
     assert profile.keep_alive is None
 
 
-def test_load_telegram_config_errors_when_yaml_is_malformed(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_telegram_config_errors_when_yaml_is_malformed(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     telegram_config_path = project_root / "config" / "telegram.yaml"
     telegram_config_path.write_text("allowed_chat_ids: [\n", encoding="utf-8")
@@ -170,9 +179,9 @@ def test_load_telegram_config_errors_when_yaml_is_malformed(tmp_path: Path) -> N
 
 
 def test_load_telegram_config_errors_when_chat_ids_include_boolean(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     telegram_config_path = project_root / "config" / "telegram.yaml"
     telegram_payload = _read_yaml(telegram_config_path)
@@ -186,14 +195,6 @@ def test_load_telegram_config_errors_when_chat_ids_include_boolean(
         str(exc_info.value)
         == "Telegram chat ids must be integers, not boolean values."
     )
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
-
 
 def _read_yaml(path: Path) -> dict[str, object]:
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))

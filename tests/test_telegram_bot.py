@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,8 +60,9 @@ class FakeTracer:
 
 def test_load_telegram_config_denies_all_when_allowlist_is_empty(
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[])
+    project_root = make_temp_project(allowed_chat_ids=[])
     settings = load_settings(project_root=project_root)
 
     config = telegram_bot.load_telegram_config(settings)
@@ -74,9 +74,10 @@ def test_load_telegram_config_denies_all_when_allowlist_is_empty(
 def test_unauthorized_chat_is_rejected_without_running_model(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
     channel, api_client, tracer = _build_channel(
-        tmp_path,
+        make_temp_project,
         allowed_chat_ids=(),
     )
 
@@ -116,10 +117,11 @@ def test_unauthorized_chat_is_rejected_without_running_model(
 def test_telegram_rate_limit_rejects_excess_burst_and_recovers(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
     current_time = [110.0]
     channel, api_client, tracer = _build_channel(
-        tmp_path,
+        make_temp_project,
         allowed_chat_ids=(42,),
         clock=lambda: current_time[0],
     )
@@ -222,8 +224,9 @@ def test_telegram_api_errors_mask_bot_token(monkeypatch) -> None:
 def test_telegram_management_commands_update_local_allowlist(
     capsys,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[])
+    project_root = make_temp_project(allowed_chat_ids=[])
     settings = load_settings(project_root=project_root)
 
     assert telegram_bot.main(project_root=project_root, command="allow", chat_id=42) == 0
@@ -245,8 +248,9 @@ def test_telegram_management_commands_update_local_allowlist(
 def test_rejected_chat_stays_blocked_until_it_is_explicitly_allowed(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[])
+    project_root = make_temp_project(allowed_chat_ids=[])
     settings = load_settings(project_root=project_root)
 
     blocked_channel, blocked_api_client, _ = _build_channel_for_settings(
@@ -339,8 +343,9 @@ def test_rejected_chat_stays_blocked_until_it_is_explicitly_allowed(
 def test_telegram_allow_latest_uses_logged_rejected_chat(
     capsys,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[])
+    project_root = make_temp_project(allowed_chat_ids=[])
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -360,8 +365,9 @@ def test_telegram_allow_latest_uses_logged_rejected_chat(
 
 def test_telegram_allow_command_normalizes_duplicates_and_preserves_config_values(
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[])
+    project_root = make_temp_project(allowed_chat_ids=[])
     telegram_config_path = project_root / "config" / "telegram.yaml"
     telegram_config_path.write_text(
         yaml.safe_dump(
@@ -388,8 +394,9 @@ def test_telegram_allow_command_normalizes_duplicates_and_preserves_config_value
 def test_telegram_main_uses_locally_stored_token_without_env(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     (project_root / "config" / "secrets.yaml").write_text(
         yaml.safe_dump(
@@ -497,8 +504,9 @@ def test_telegram_main_uses_locally_stored_token_without_env(
 def test_telegram_tool_traces_use_explicit_chat_session_id(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    project_root = make_temp_project(allowed_chat_ids=[42])
     settings = load_settings(project_root=project_root)
     api_client = FakeApiClient()
     tracer = FakeTracer()
@@ -585,8 +593,10 @@ def test_telegram_tool_traces_use_explicit_chat_session_id(
 def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    project_root = make_temp_project(allowed_chat_ids=[42])
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     api_client = FakeApiClient()
@@ -595,7 +605,7 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
         event_repository=session_manager.event_repository,
     )
 
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
 
     try:
         session = session_manager.create_session(title="Telegram chat 42")
@@ -767,8 +777,9 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
 def test_telegram_search_non_native_uses_runtime_tool_path_without_channel_preexecution(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    project_root = make_temp_project(allowed_chat_ids=[42])
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     api_client = FakeApiClient()
@@ -934,8 +945,9 @@ def test_telegram_search_non_native_uses_runtime_tool_path_without_channel_preex
 def test_telegram_command_result_session_id_overrides_global_current_session(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    project_root = make_temp_project(allowed_chat_ids=[42])
     settings = load_settings(project_root=project_root)
     api_client = FakeApiClient()
     tracer = FakeTracer()
@@ -995,13 +1007,12 @@ def test_telegram_command_result_session_id_overrides_global_current_session(
 
 
 def _build_channel(
-    tmp_path: Path,
+    make_temp_project,
     *,
     allowed_chat_ids: tuple[int, ...],
     clock=lambda: 0.0,
 ) -> tuple[telegram_bot.TelegramBotChannel, FakeApiClient, FakeTracer]:
-    project_root = _create_temp_project(
-        tmp_path,
+    project_root = make_temp_project(
         allowed_chat_ids=list(allowed_chat_ids),
     )
     settings = load_settings(project_root=project_root)
@@ -1039,35 +1050,3 @@ def _build_channel_for_settings(
         clock=clock,
     )
     return channel, api_client, tracer
-
-
-def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
-    profile = settings.models[profile_name]
-    settings.models[profile_name] = profile.__class__(
-        name=profile.name,
-        provider=profile.provider,
-        model_name=profile.model_name,
-        temperature=profile.temperature,
-        thinking_supported=profile.thinking_supported,
-        tool_mode=tool_mode,
-    )
-
-
-def _create_temp_project(
-    tmp_path: Path,
-    *,
-    allowed_chat_ids: list[int] | None = None,
-) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    if allowed_chat_ids is not None:
-        telegram_config_path = project_root / "config" / "telegram.yaml"
-        payload = yaml.safe_load(telegram_config_path.read_text(encoding="utf-8"))
-        assert isinstance(payload, dict)
-        payload["allowed_chat_ids"] = allowed_chat_ids
-        telegram_config_path.write_text(
-            yaml.safe_dump(payload, sort_keys=False),
-            encoding="utf-8",
-        )
-    return project_root

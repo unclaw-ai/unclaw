@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import socket
 from pathlib import Path
 from urllib.error import URLError
@@ -67,8 +66,11 @@ def _raise_url_timeout(
     raise URLError("timed out")
 
 
-def test_read_tool_rejects_paths_outside_allowed_roots(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_read_tool_rejects_paths_outside_allowed_roots(
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     outside_file = tmp_path / "outside.txt"
     outside_file.write_text("secret\n", encoding="utf-8")
@@ -86,8 +88,11 @@ def test_read_tool_rejects_paths_outside_allowed_roots(tmp_path: Path) -> None:
     assert "outside the allowed local roots" in result.error
 
 
-def test_list_tool_rejects_directories_outside_allowed_roots(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_list_tool_rejects_directories_outside_allowed_roots(
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     outside_directory = tmp_path / "outside-dir"
     outside_directory.mkdir()
@@ -108,8 +113,9 @@ def test_list_tool_rejects_directories_outside_allowed_roots(tmp_path: Path) -> 
 def test_fetch_tool_blocks_private_network_targets_by_default(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -132,8 +138,12 @@ def test_fetch_tool_blocks_private_network_targets_by_default(
     assert "blocked because" in result.error
 
 
-def test_fetch_tool_allows_public_urls(monkeypatch, tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_fetch_tool_allows_public_urls(
+    monkeypatch,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -165,8 +175,9 @@ def test_fetch_tool_allows_public_urls(monkeypatch, tmp_path: Path) -> None:
 def test_fetch_tool_can_opt_in_to_private_network_access(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
@@ -200,8 +211,9 @@ def test_fetch_tool_can_opt_in_to_private_network_access(
 def test_search_tool_returns_compact_structured_results(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -288,8 +300,9 @@ def test_search_tool_returns_compact_structured_results(
 def test_search_tool_uses_iterative_second_level_exploration(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
     requested_urls: list[str] = []
@@ -371,8 +384,9 @@ def test_search_tool_uses_iterative_second_level_exploration(
 def test_search_tool_respects_fetch_budget(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
     requested_urls: list[str] = []
@@ -449,8 +463,9 @@ def test_search_tool_respects_fetch_budget(
 def test_search_tool_respects_depth_cap(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
     requested_urls: list[str] = []
@@ -538,8 +553,9 @@ def test_search_tool_respects_depth_cap(
 def test_search_tool_deduplicates_evidence_across_sources(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -612,8 +628,9 @@ def test_search_tool_deduplicates_evidence_across_sources(
 def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -683,8 +700,9 @@ def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
 def test_search_tool_summary_bullets_capture_findings_not_titles(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -759,8 +777,9 @@ def test_search_tool_summary_bullets_capture_findings_not_titles(
 def test_search_tool_merges_identity_style_facts_into_one_summary_bullet(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -842,8 +861,9 @@ def test_search_tool_merges_identity_style_facts_into_one_summary_bullet(
 def test_search_tool_handles_partial_read_failures_gracefully(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -919,8 +939,9 @@ def test_search_tool_handles_partial_read_failures_gracefully(
 def test_search_tool_reports_provider_failures_cleanly(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -949,8 +970,9 @@ def test_search_tool_reports_provider_failures_cleanly(
 def test_search_tool_filters_consent_and_cookie_noise_from_evidence(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1009,8 +1031,9 @@ def test_search_tool_filters_consent_and_cookie_noise_from_evidence(
 def test_search_tool_filters_site_descriptive_passages(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1069,8 +1092,9 @@ def test_search_tool_filters_site_descriptive_passages(
 def test_search_tool_penalizes_homepage_results(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1143,8 +1167,9 @@ def test_search_tool_penalizes_homepage_results(
 def test_search_tool_summary_deduplicates_near_identical_bullets(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1233,9 +1258,10 @@ def test_search_tool_summary_deduplicates_near_identical_bullets(
 def test_search_tool_penalizes_live_streaming_pages(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
     """Live TV / streaming / direct pages should rank below real articles."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1312,9 +1338,10 @@ def test_search_tool_penalizes_live_streaming_pages(
 def test_search_tool_filters_promotional_and_subscription_text(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
     """Promotional and subscription text should not leak into evidence or summary."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1374,9 +1401,10 @@ def test_search_tool_filters_promotional_and_subscription_text(
 def test_search_tool_excludes_weak_sources_from_output(
     monkeypatch,
     tmp_path: Path,
+    make_temp_project,
 ) -> None:
     """Sources with no kept evidence and low usefulness should not appear in final output."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
 
@@ -1441,14 +1469,6 @@ def test_search_tool_excludes_weak_sources_from_output(
     # The live streaming page should not appear in final sources
     sources_section = result.output_text.split("Sources:")[1] if "Sources:" in result.output_text else ""
     assert "Watch Live Stream" not in sources_section
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
-
 
 def _build_search_open_request(
     *,

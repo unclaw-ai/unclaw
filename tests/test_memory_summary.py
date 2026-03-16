@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.research_flow import build_tool_history_content
 from unclaw.core.runtime import run_user_turn
@@ -95,9 +92,9 @@ def test_summarize_session_messages_retains_grounded_search_facts() -> None:
 
 def test_run_user_turn_includes_persisted_session_memory_after_history_window_rolls_forward(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     memory_manager = MemoryManager(session_manager=session_manager)
@@ -254,10 +251,3 @@ def test_run_user_turn_includes_persisted_session_memory_after_history_window_ro
         )
     finally:
         session_manager.close()
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root

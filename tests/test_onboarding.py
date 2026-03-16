@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import stat
-import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,9 +26,9 @@ EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
 
 def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
 
     monkeypatch.setattr(
@@ -90,9 +89,9 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
 
 def test_advanced_onboarding_can_choose_installed_and_custom_models(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
 
     monkeypatch.setattr(
@@ -196,9 +195,9 @@ def test_interactive_select_uses_value_for_initial_choice(monkeypatch) -> None:
 
 def test_onboarding_can_keep_existing_local_telegram_token(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
     (project_root / "config" / "secrets.yaml").write_text(
         yaml.safe_dump(
@@ -239,9 +238,9 @@ def test_onboarding_can_keep_existing_local_telegram_token(
 
 def test_channel_preset_writes_telegram_only_to_app_config(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
 
     monkeypatch.setattr(
@@ -276,9 +275,9 @@ def test_channel_preset_writes_telegram_only_to_app_config(
 
 def test_onboarding_creates_backups_before_overwriting_existing_files(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
     secrets_path = project_root / "config" / "secrets.yaml"
     secrets_path.write_text(
@@ -370,8 +369,10 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
     }
 
 
-def test_load_telegram_config_rejects_pasted_bot_token(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_load_telegram_config_rejects_pasted_bot_token(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
     telegram_config_path = project_root / "config" / "telegram.yaml"
     telegram_config_path.write_text(
@@ -391,9 +392,9 @@ def test_load_telegram_config_rejects_pasted_bot_token(tmp_path: Path) -> None:
 
 
 def test_write_local_secrets_rewrites_permissions_to_owner_only(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
     settings = load_settings(project_root=project_root)
     secrets_path = project_root / "config" / "secrets.yaml"
     secrets_path.write_text("telegram:\n  bot_token: stale\n", encoding="utf-8")
@@ -405,25 +406,6 @@ def test_write_local_secrets_rewrites_permissions_to_owner_only(
     )
 
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    telegram_config_path = project_root / "config" / "telegram.yaml"
-    telegram_payload = yaml.safe_load(telegram_config_path.read_text(encoding="utf-8"))
-    assert isinstance(telegram_payload, dict)
-    telegram_payload["allowed_chat_ids"] = []
-    telegram_config_path.write_text(
-        yaml.safe_dump(telegram_payload, sort_keys=False),
-        encoding="utf-8",
-    )
-    secrets_path = project_root / "config" / "secrets.yaml"
-    if secrets_path.exists():
-        secrets_path.unlink()
-    return project_root
-
 
 def _read_yaml(path: Path) -> dict[str, object]:
     with path.open("r", encoding="utf-8") as handle:

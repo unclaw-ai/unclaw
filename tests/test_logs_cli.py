@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 
 import yaml
@@ -12,9 +11,9 @@ from unclaw.logs.tracer import Tracer
 
 
 def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     log_path = project_root / "data" / "logs" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
@@ -111,8 +110,10 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
     assert not any("model.called" in line for line in outputs)
 
 
-def test_run_logs_full_shows_raw_lines_when_follow_is_disabled(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_run_logs_full_shows_raw_lines_when_follow_is_disabled(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     log_path = project_root / "data" / "logs" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
@@ -147,9 +148,9 @@ def test_run_logs_full_shows_raw_lines_when_follow_is_disabled(tmp_path: Path) -
 
 
 def test_run_logs_explains_how_to_generate_logs_when_file_is_missing(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
 
     outputs: list[str] = []
     result = run_logs(
@@ -274,8 +275,10 @@ def test_tracer_can_opt_in_to_reasoning_text_logging(tmp_path: Path) -> None:
     assert model_event["payload"]["reasoning_length"] == 5
 
 
-def test_run_logs_full_redacts_reasoning_text_when_disabled(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_run_logs_full_redacts_reasoning_text_when_disabled(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     log_path = project_root / "data" / "logs" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(
@@ -308,8 +311,10 @@ def test_run_logs_full_redacts_reasoning_text_when_disabled(tmp_path: Path) -> N
     assert not any('"reasoning_text": "chain"' in line for line in outputs)
 
 
-def test_run_logs_full_shows_reasoning_text_when_opted_in(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_run_logs_full_shows_reasoning_text_when_opted_in(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     _set_include_reasoning_text(project_root, True)
     log_path = project_root / "data" / "logs" / "runtime.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -342,8 +347,10 @@ def test_run_logs_full_shows_reasoning_text_when_opted_in(tmp_path: Path) -> Non
     assert any('"reasoning_text": "chain"' in line for line in outputs)
 
 
-def test_run_logs_reports_when_trace_retention_is_disabled(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_run_logs_reports_when_trace_retention_is_disabled(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
     _set_logging_value(project_root, "retention_days", 0)
 
     outputs: list[str] = []
@@ -355,14 +362,6 @@ def test_run_logs_reports_when_trace_retention_is_disabled(tmp_path: Path) -> No
 
     assert result == 0
     assert "Trace retention: disabled." in outputs
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
-
 
 def _set_include_reasoning_text(project_root: Path, enabled: bool) -> None:
     _set_logging_value(project_root, "include_reasoning_text", enabled)

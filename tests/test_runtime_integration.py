@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from datetime import date as real_date
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,9 +30,9 @@ pytestmark = pytest.mark.integration
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
@@ -164,9 +163,9 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
 
 def test_run_user_turn_preserves_unicode_chat_content_across_runtime_and_persistence(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -277,9 +276,9 @@ def test_run_user_turn_preserves_unicode_chat_content_across_runtime_and_persist
 
 def test_run_user_turn_streams_and_persists_reply_without_leaked_think_tags(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -464,9 +463,9 @@ def test_capability_context_without_tool_output_forbids_claiming_search_happened
 
 def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -562,9 +561,9 @@ def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
 
 def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -655,9 +654,9 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
 
 def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_for_non_native_profile(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
@@ -823,11 +822,12 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
 
 def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_context(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -986,11 +986,12 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
 
 def test_run_search_command_preserves_unicode_grounding_and_sources(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1117,9 +1118,9 @@ def test_run_search_command_preserves_unicode_grounding_and_sources(
 
 def test_run_search_command_non_native_profile_executes_search_inside_runtime_and_keeps_follow_up_context(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
@@ -1287,11 +1288,12 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
 
 def test_run_search_command_removes_stale_relative_dates_from_search_backed_replies(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1390,11 +1392,12 @@ def test_run_search_command_removes_stale_relative_dates_from_search_backed_repl
 
 def test_run_search_command_does_not_confirm_weak_usernames(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1502,11 +1505,12 @@ def test_run_search_command_does_not_confirm_weak_usernames(
 
 def test_run_search_command_person_summary_prefers_supported_identity_over_fluff(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1639,11 +1643,12 @@ def test_run_search_command_person_summary_prefers_supported_identity_over_fluff
 
 def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sources(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -1764,9 +1769,9 @@ def test_run_search_command_omits_unconfirmed_achievements_and_keeps_compact_sou
 
 def test_run_user_turn_keeps_follow_up_turns_grounded_after_search(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -1903,9 +1908,9 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_search(
 
 def test_run_user_turn_uses_configured_ollama_timeout(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
     assert isinstance(app_payload, dict)
@@ -1991,10 +1996,10 @@ def test_run_user_turn_uses_configured_ollama_timeout(
 
 def test_agent_loop_text_only_fallback_when_no_tool_calls(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
     """Non-native profiles stay on plain chat and do not send native tools."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
@@ -2060,12 +2065,13 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
 
 def test_agent_loop_one_tool_call_then_final_response(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """Model calls one tool, observes the result, and produces a final text reply."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -2168,12 +2174,13 @@ def test_agent_loop_one_tool_call_then_final_response(
 
 def test_agent_loop_multi_step_with_two_tool_rounds(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """Model performs two rounds of tool calls before producing a final reply."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -2263,14 +2270,15 @@ def test_agent_loop_multi_step_with_two_tool_rounds(
 
 def test_agent_loop_max_steps_guardrail(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """When max_agent_steps is reached, a safe fallback reply is returned."""
     from unclaw.core.runtime import _MAX_STEPS_FALLBACK_REPLY
 
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -2335,12 +2343,13 @@ def test_agent_loop_max_steps_guardrail(
 
 def test_agent_loop_tool_failure_path(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """When a tool fails, its error is fed back to the model as context."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -2434,11 +2443,12 @@ def test_agent_loop_tool_failure_path(
 
 def test_agent_loop_wraps_adversarial_tool_output_as_untrusted_data(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -2573,13 +2583,14 @@ def test_agent_loop_wraps_adversarial_tool_output_as_untrusted_data(
 
 def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """Verify that run_search_command delegates to run_user_turn (the shared
     runtime path) and that the optional stream_output_func is forwarded."""
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -2698,25 +2709,6 @@ def _build_search_tool_registry(search_result: ToolResult) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(SEARCH_WEB_DEFINITION, lambda _call: search_result)
     return registry
-
-
-def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
-    profile = settings.models[profile_name]
-    settings.models[profile_name] = profile.__class__(
-        name=profile.name,
-        provider=profile.provider,
-        model_name=profile.model_name,
-        temperature=profile.temperature,
-        thinking_supported=profile.thinking_supported,
-        tool_mode=tool_mode,
-    )
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
 
 
 class _RuntimeFakeStreamResponse:

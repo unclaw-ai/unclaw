@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 import pytest
@@ -22,8 +21,8 @@ _MICROSECOND_UTC_RE = re.compile(
 )
 
 
-def test_system_prompt_is_loaded_from_config_prompts(tmp_path: Path) -> None:
-    project_root = _create_temp_project(tmp_path)
+def test_system_prompt_is_loaded_from_config_prompts(make_temp_project) -> None:
+    project_root = make_temp_project()
     prompt_path = project_root / "config" / "prompts" / "system.txt"
     prompt_text = "You are the test prompt. Keep replies short."
     prompt_path.write_text(prompt_text + "\n", encoding="utf-8")
@@ -63,9 +62,9 @@ def test_default_system_prompt_includes_compact_agent_behavior_rules() -> None:
 
 
 def test_runtime_persistence_timestamps_use_microsecond_utc_precision(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
 
@@ -95,9 +94,9 @@ def test_runtime_persistence_timestamps_use_microsecond_utc_precision(
 
 
 def test_switch_session_keeps_only_one_active_session_without_touching_timestamps(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
 
@@ -242,9 +241,3 @@ def test_main_help_keeps_canonical_logs_commands_and_safe_update_wording() -> No
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    project_root = tmp_path / "project"
-    shutil.copytree(_repo_root() / "config", project_root / "config")
-    return project_root

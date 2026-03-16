@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,9 +24,9 @@ pytestmark = pytest.mark.reliability
 
 def test_run_user_turn_stays_stable_across_repeated_turns_with_long_history(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -152,9 +151,9 @@ def test_run_user_turn_stays_stable_across_repeated_turns_with_long_history(
 
 def test_run_user_turn_stays_stable_across_repeated_turns_with_unicode_heavy_history(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
@@ -296,11 +295,12 @@ def test_run_user_turn_stays_stable_across_repeated_turns_with_unicode_heavy_his
 
 def test_search_backed_follow_up_stays_grounded_in_a_longer_session(
     monkeypatch,
-    tmp_path: Path,
+    make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    set_profile_tool_mode(settings, "main", tool_mode="native")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
@@ -500,9 +500,9 @@ def test_search_backed_follow_up_stays_grounded_in_a_longer_session(
 
 
 def test_session_persistence_stays_consistent_with_two_near_concurrent_writers(
-    tmp_path: Path,
+    make_temp_project,
 ) -> None:
-    project_root = _create_temp_project(tmp_path)
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
 
@@ -583,22 +583,3 @@ def _non_system_message_pairs(messages: list[LLMMessage]) -> list[tuple[str, str
         for message in messages
         if message.role is not LLMRole.SYSTEM
     ]
-
-
-def _set_profile_tool_mode(settings, profile_name: str, *, tool_mode: str) -> None:
-    profile = settings.models[profile_name]
-    settings.models[profile_name] = profile.__class__(
-        name=profile.name,
-        provider=profile.provider,
-        model_name=profile.model_name,
-        temperature=profile.temperature,
-        thinking_supported=profile.thinking_supported,
-        tool_mode=tool_mode,
-    )
-
-
-def _create_temp_project(tmp_path: Path) -> Path:
-    source_root = Path(__file__).resolve().parents[1]
-    project_root = tmp_path / "project"
-    shutil.copytree(source_root / "config", project_root / "config")
-    return project_root
