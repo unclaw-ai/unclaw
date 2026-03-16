@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from datetime import date as real_date
 from pathlib import Path
@@ -270,6 +271,98 @@ def test_run_user_turn_preserves_unicode_chat_content_across_runtime_and_persist
             user_input,
             assistant_reply,
         ]
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_streams_and_persists_reply_without_leaked_think_tags(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        return _RuntimeFakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:00Z",
+                    "message": {"content": "<think>Need "},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:01Z",
+                    "message": {"content": "private reasoning"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:02Z",
+                    "message": {"content": "</think>"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:03Z",
+                    "message": {"content": "</thi"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:04Z",
+                    "message": {"content": "nk>Hel"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:05Z",
+                    "message": {"content": "lo"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:06Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr("unclaw.llm.ollama_provider.urlopen", fake_urlopen)
+
+    try:
+        session = session_manager.ensure_current_session()
+        user_input = "Say hello."
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+        streamed_chunks: list[str] = []
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            stream_output_func=streamed_chunks.append,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert reply == "Hello"
+        assert "".join(streamed_chunks) == "Hello"
+        assert all("<think" not in chunk for chunk in streamed_chunks)
+        assert all("</think>" not in chunk for chunk in streamed_chunks)
+
+        messages = session_manager.list_messages(session.id)
+        assert messages[-1].role is MessageRole.ASSISTANT
+        assert messages[-1].content == "Hello"
     finally:
         session_manager.close()
 
@@ -2624,6 +2717,23 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
     return project_root
+
+
+class _RuntimeFakeStreamResponse:
+    def __init__(self, payloads: tuple[dict[str, object], ...]) -> None:
+        self._lines = [
+            json.dumps(payload, sort_keys=True).encode("utf-8") + b"\n"
+            for payload in payloads
+        ]
+
+    def __enter__(self) -> _RuntimeFakeStreamResponse:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
 
 
 def _freeze_search_grounding_date(monkeypatch) -> None:

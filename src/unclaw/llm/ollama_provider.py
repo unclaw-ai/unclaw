@@ -22,6 +22,9 @@ from unclaw.llm.base import (
 )
 from unclaw.tools.contracts import ToolCall, ToolDefinition
 
+_OPEN_THINK_TAG = "<think>"
+_CLOSE_THINK_TAG = "</think>"
+
 
 class OllamaProvider(BaseLLMProvider):
     """Synchronous provider backed by the local Ollama HTTP API."""
@@ -174,6 +177,7 @@ class OllamaProvider(BaseLLMProvider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         streamed_chunks: list[dict[str, Any]] = []
+        sanitizer = _ThinkTagLeakSanitizer()
 
         for chunk_payload in self._request_stream_json(
             method="POST",
@@ -205,8 +209,10 @@ class OllamaProvider(BaseLLMProvider):
 
             content_delta = _extract_message_text(message, key="content")
             if content_delta is not None:
-                content_parts.append(content_delta)
-                content_callback(content_delta)
+                sanitized_delta = sanitizer.feed(content_delta)
+                if sanitized_delta:
+                    content_parts.append(sanitized_delta)
+                    content_callback(sanitized_delta)
 
             reasoning_delta = _extract_message_reasoning(message)
             if reasoning_delta is not None:
@@ -214,6 +220,11 @@ class OllamaProvider(BaseLLMProvider):
 
         if not streamed_chunks:
             raise LLMResponseError("Ollama streaming chat returned no chunks.")
+
+        final_delta = sanitizer.finish()
+        if final_delta:
+            content_parts.append(final_delta)
+            content_callback(final_delta)
 
         reasoning = "".join(reasoning_parts)
         return LLMResponse(
@@ -349,7 +360,7 @@ def _extract_content(payload: dict[str, Any]) -> str:
     if content is None:
         raise LLMResponseError("Ollama response did not include message content.")
 
-    return content
+    return _strip_leaked_think_tags(content)
 
 
 def _extract_reasoning(payload: dict[str, Any]) -> str | None:
@@ -373,6 +384,176 @@ def _extract_message_text(message: dict[str, Any], *, key: str) -> str | None:
     if not isinstance(value, str):
         return None
     return value
+
+
+def _strip_leaked_think_tags(content: str) -> str:
+    """Strip leaked leading <think> reasoning blocks from assistant-visible text.
+
+    The fix is intentionally narrow:
+    - remove leading reasoning blocks like ``<think>...</think>``
+    - remove stray closing tags like ``</think>``
+    - remove a trailing stray ``<think>`` marker
+    - leave unrelated XML/HTML-like content untouched
+    """
+
+    sanitizer = _ThinkTagLeakSanitizer()
+    sanitized = sanitizer.feed(content) + sanitizer.finish()
+    return _strip_trailing_open_think_tag(sanitized)
+
+
+class _ThinkTagLeakSanitizer:
+    """Incrementally drop leaked think-tag content from assistant-visible text."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._mode = "prefix"
+        self._removed_prefix_leakage = False
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+
+        self._buffer += text
+        output_parts: list[str] = []
+
+        while self._buffer:
+            if self._mode == "inside_block":
+                close_index = self._buffer.lower().find(_CLOSE_THINK_TAG)
+                if close_index == -1:
+                    self._buffer = _keep_partial_tag_suffix(
+                        self._buffer,
+                        _CLOSE_THINK_TAG,
+                    )
+                    break
+                self._buffer = self._buffer[close_index + len(_CLOSE_THINK_TAG) :]
+                self._mode = "prefix"
+                continue
+
+            if self._mode == "prefix":
+                stripped = self._buffer.lstrip()
+                if not stripped:
+                    break
+                lowered = stripped.lower()
+                if lowered.startswith(_OPEN_THINK_TAG):
+                    self._buffer = stripped[len(_OPEN_THINK_TAG) :]
+                    self._mode = "inside_block"
+                    self._removed_prefix_leakage = True
+                    continue
+                if lowered.startswith(_CLOSE_THINK_TAG):
+                    self._buffer = stripped[len(_CLOSE_THINK_TAG) :]
+                    self._removed_prefix_leakage = True
+                    continue
+                if _is_partial_tag(stripped, _OPEN_THINK_TAG) or _is_partial_tag(
+                    stripped,
+                    _CLOSE_THINK_TAG,
+                ):
+                    self._buffer = stripped
+                    break
+                if self._removed_prefix_leakage:
+                    self._buffer = stripped
+                self._mode = "visible"
+                continue
+
+            emitted, remainder = _consume_visible_text(self._buffer, final=False)
+            if emitted:
+                output_parts.append(emitted)
+            self._buffer = remainder
+            break
+
+        return "".join(output_parts)
+
+    def finish(self) -> str:
+        output_parts: list[str] = []
+
+        while self._buffer:
+            if self._mode == "inside_block":
+                self._buffer = ""
+                break
+
+            if self._mode == "prefix":
+                stripped = self._buffer.lstrip()
+                if not stripped:
+                    self._mode = "visible"
+                    continue
+                lowered = stripped.lower()
+                if lowered.startswith(_OPEN_THINK_TAG):
+                    self._buffer = stripped[len(_OPEN_THINK_TAG) :]
+                    self._mode = "inside_block"
+                    self._removed_prefix_leakage = True
+                    continue
+                if lowered.startswith(_CLOSE_THINK_TAG):
+                    self._buffer = stripped[len(_CLOSE_THINK_TAG) :]
+                    self._removed_prefix_leakage = True
+                    continue
+                if _is_partial_tag(stripped, _OPEN_THINK_TAG) or _is_partial_tag(
+                    stripped,
+                    _CLOSE_THINK_TAG,
+                ):
+                    self._buffer = ""
+                    break
+                if self._removed_prefix_leakage:
+                    self._buffer = stripped
+                self._mode = "visible"
+                continue
+
+            emitted, remainder = _consume_visible_text(self._buffer, final=True)
+            if emitted:
+                output_parts.append(emitted)
+            self._buffer = remainder
+            break
+
+        return "".join(output_parts)
+
+
+def _consume_visible_text(text: str, *, final: bool) -> tuple[str, str]:
+    """Strip stray closing tags from visible text, keeping partial suffixes."""
+
+    output_parts: list[str] = []
+    remaining = text
+
+    while remaining:
+        close_index = remaining.lower().find(_CLOSE_THINK_TAG)
+        if close_index == -1:
+            suffix = "" if final else _keep_partial_tag_suffix(
+                remaining,
+                _CLOSE_THINK_TAG,
+            )
+            if suffix:
+                output_parts.append(remaining[: -len(suffix)])
+                return "".join(output_parts), suffix
+            output_parts.append(remaining)
+            return "".join(output_parts), ""
+
+        output_parts.append(remaining[:close_index])
+        remaining = remaining[close_index + len(_CLOSE_THINK_TAG) :]
+
+    return "".join(output_parts), ""
+
+
+def _keep_partial_tag_suffix(text: str, tag: str) -> str:
+    lower_text = text.lower()
+    lower_tag = tag.lower()
+    max_size = min(len(text), len(tag) - 1)
+    for size in range(max_size, 0, -1):
+        if lower_text.endswith(lower_tag[:size]):
+            return text[-size:]
+    return ""
+
+
+def _is_partial_tag(text: str, tag: str) -> bool:
+    lowered = text.lower()
+    if len(lowered) >= len(tag):
+        return False
+    return tag.lower().startswith(lowered)
+
+
+def _strip_trailing_open_think_tag(text: str) -> str:
+    trimmed = text.rstrip()
+    if not trimmed.lower().endswith(_OPEN_THINK_TAG):
+        return text
+
+    tag_index = len(trimmed) - len(_OPEN_THINK_TAG)
+    return text[:tag_index] + text[len(trimmed) :]
 
 
 def _tool_definition_to_ollama(tool: ToolDefinition) -> dict[str, Any]:

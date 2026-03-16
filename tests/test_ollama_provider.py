@@ -83,6 +83,36 @@ def test_chat_forces_think_off_for_profiles_without_thinking_support(monkeypatch
     assert response.reasoning is None
 
 
+def test_chat_strips_leaked_think_block_from_non_streaming_content(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        return _FakeJsonResponse(
+            json.dumps(
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-13T12:00:00Z",
+                    "done_reason": "stop",
+                    "message": {
+                        "content": (
+                            "<think>Need private reasoning.</think>\n\n"
+                            "Visible answer."
+                        ),
+                    },
+                }
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+    )
+
+    assert response.content == "Visible answer."
+
+
 def test_chat_streams_real_incremental_content_when_callback_is_provided(
     monkeypatch,
 ) -> None:
