@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -174,15 +175,15 @@ def write_local_secrets(settings: Settings, secrets: LocalSecrets) -> None:
         secrets.telegram_bot_token
     )
     payload["telegram"] = telegram_payload
-    path.write_text(
+    _write_local_secrets_payload(
+        path,
         yaml.safe_dump(
             payload,
             sort_keys=False,
             allow_unicode=False,
         ),
-        encoding="utf-8",
     )
-    _ensure_local_secrets_permissions(path)
+    ensure_local_secrets_permissions(path)
 
 
 def resolve_telegram_bot_token(
@@ -236,7 +237,41 @@ def _load_optional_yaml_mapping(path: Path) -> dict[str, Any]:
     return dict(payload)
 
 
-def _ensure_local_secrets_permissions(path: Path) -> None:
+def _write_local_secrets_payload(path: Path, rendered_payload: str) -> None:
+    """Write the local secrets payload with a strict temp-file path on POSIX."""
+
+    if os.name != "posix":
+        path.write_text(rendered_payload, encoding="utf-8")
+        return
+
+    temp_fd, temp_path_raw = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temp_path = Path(temp_path_raw)
+    try:
+        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+            temp_fd = -1
+            handle.write(rendered_payload)
+        os.replace(temp_path, path)
+    finally:
+        if temp_fd != -1:
+            os.close(temp_fd)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def ensure_local_secrets_permissions(path: Path) -> None:
+    """Enforce owner-only permissions for local secret-bearing files on POSIX."""
+
+    if os.name != "posix":
+        return
     try:
         os.chmod(path, _LOCAL_SECRETS_MODE)
     except OSError:

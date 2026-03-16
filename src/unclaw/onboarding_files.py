@@ -8,7 +8,13 @@ from pathlib import Path
 import yaml
 
 from unclaw.errors import ConfigurationError
-from unclaw.local_secrets import LocalSecrets, local_secrets_path, write_local_secrets
+from unclaw.local_secrets import (
+    LOCAL_SECRETS_FILE_NAME,
+    LocalSecrets,
+    ensure_local_secrets_permissions,
+    local_secrets_path,
+    write_local_secrets,
+)
 from unclaw.onboarding_types import ModelProfileDraft, OnboardingPlan, PROFILE_ORDER
 from unclaw.settings import Settings
 
@@ -188,6 +194,8 @@ def _backup_existing_files(paths: list[Path]) -> None:
         backup_path = path.with_name(f"{path.name}.bak")
         try:
             shutil.copy2(path, backup_path)
+            if path.name == LOCAL_SECRETS_FILE_NAME:
+                ensure_local_secrets_permissions(backup_path)
         except OSError as exc:
             raise ConfigurationError(
                 f"Could not create a backup before overwriting {path}: {exc}"

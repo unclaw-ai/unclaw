@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,7 +85,11 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
     assert any("allow-latest" in line for line in outputs)
-    assert stat.S_IMODE((project_root / "config" / "secrets.yaml").stat().st_mode) == 0o600
+    if os.name == "posix":
+        assert (
+            stat.S_IMODE((project_root / "config" / "secrets.yaml").stat().st_mode)
+            == 0o600
+        )
 
 
 def test_advanced_onboarding_can_choose_installed_and_custom_models(
@@ -332,6 +337,48 @@ def test_onboarding_creates_backups_before_overwriting_existing_files(
     ) == original_contents["secrets"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_onboarding_restricts_secret_backup_permissions_to_owner_only(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
+    settings = load_settings(project_root=project_root)
+    secrets_path = project_root / "config" / "secrets.yaml"
+    secrets_path.write_text(
+        yaml.safe_dump(
+            {"telegram": {"bot_token": "123456789:AAOldTelegramBotTokenValue"}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    secrets_path.chmod(0o644)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+
+    responses = iter(["", "", "2", "", ""])
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _message: None,
+    )
+
+    assert result == 0
+    assert (
+        stat.S_IMODE((project_root / "config" / "secrets.yaml.bak").stat().st_mode)
+        == 0o600
+    )
+
+
 def test_recommended_model_profiles_match_target_defaults() -> None:
     assert recommended_model_profiles() == {
         "fast": ModelProfileDraft(
@@ -405,6 +452,24 @@ def test_write_local_secrets_rewrites_permissions_to_owner_only(
         LocalSecrets(telegram_bot_token=EXAMPLE_TELEGRAM_TOKEN),
     )
 
+    if os.name == "posix":
+        assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes only")
+def test_write_local_secrets_creates_new_file_with_owner_only_permissions(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
+    settings = load_settings(project_root=project_root)
+    secrets_path = project_root / "config" / "secrets.yaml"
+
+    write_local_secrets(
+        settings,
+        LocalSecrets(telegram_bot_token=EXAMPLE_TELEGRAM_TOKEN),
+    )
+
+    assert secrets_path.exists()
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
 
 def _read_yaml(path: Path) -> dict[str, object]:
