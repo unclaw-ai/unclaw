@@ -54,6 +54,28 @@ Unclaw takes the opposite path:
 - Private and local network fetches are blocked by default.
 - Memory is session-oriented summaries, not rich user/project memory.
 
+## Transparency: web search and local logs
+
+### How grounded web search works today
+
+- `search_web` sends the query to DuckDuckGo's HTML endpoint (`https://html.duckduckgo.com/html/`), parses result titles and snippets, deduplicates and ranks up to 20 initial results, then fetches a bounded set of public pages to extract evidence.
+- Retrieval is synchronous and bounded: at most 30 fetched pages, crawl depth 2, at most 3 child links added per fetched page, and at most 12,000 extracted characters kept per fetched search page before synthesis.
+- The current search path only works with public pages it can fetch directly. It does not use browser automation, JavaScript rendering, authenticated sessions, or private sites. Search quality therefore depends on DuckDuckGo HTML markup and on readable text being present in the fetched page response.
+
+### Web safety boundaries
+
+- Both `/search` and `/fetch` only support direct HTTP and HTTPS targets.
+- By default the fetch policy blocks `localhost`, `.localhost`, metadata-style hosts, literal private or local IPs, and DNS resolutions that land on loopback, link-local, private, reserved, multicast, or unspecified addresses. Redirect targets are checked again under the same rules.
+- `fetch_url_text` can be reconfigured locally with `security.tools.fetch.allow_private_networks: true` in `config/app.yaml`. The grounded `search_web` path stays public-web-only and does not use that override.
+
+### What local logs and traces record today
+
+- The tracer publishes runtime events in-process and, in the normal CLI and Telegram startup paths, persists them locally in two places: the SQLite `events` table in `data/app.db` and the JSONL runtime log at `data/logs/runtime.log`.
+- Runtime trace payloads include timestamps, session IDs, route and model selections, tool names and arguments, success or failure state, durations, Telegram chat IDs for Telegram-only events, and reply or output lengths. This means local search queries, file paths, and fetched URLs can appear in local traces.
+- By default reasoning text is not persisted. The tracer records `reasoning_length` only. If you set `logging.include_reasoning_text: true`, raw reasoning text is stored in the same local event payloads and becomes visible in `unclaw logs full`.
+- `unclaw logs` reads the local JSONL runtime log, not the SQLite `events` table. If `logging.file_enabled` is off, that file stops updating even though local event publishing and local event persistence still exist.
+- Successful grounded search turns also store a compact tool-history message in session history for follow-up grounding: supported facts, uncertain details, and source URLs rather than full fetched page dumps.
+
 ---
 
 ## What Unclaw is today

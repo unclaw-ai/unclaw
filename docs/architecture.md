@@ -225,6 +225,11 @@ Logs and traces must expose:
 
 The engineering trace may be richer than the user trace, but both should remain coherent.
 
+Current transparency notes:
+- In the shipped CLI and Telegram entrypoints, the tracer publishes events to an in-process event bus, writes local JSON lines to `data/logs/runtime.log` when file logging is enabled, and persists the same event metadata into the local SQLite `events` table.
+- Runtime traces record metadata such as route, model/profile, tool names and arguments, durations, and success or failure status. They do not store full assistant replies or raw fetched page bodies in the runtime log stream.
+- Reasoning text is excluded by default. Only reasoning length is persisted unless `logging.include_reasoning_text` is explicitly enabled.
+
 ---
 
 ## Target runtime flow
@@ -287,6 +292,11 @@ The runtime must not assume that one approach works for every model family.
 Web search is already part of the shared runtime path for `/search` and for normal turns routed into web-backed mode.
 
 Today the search stack is split across focused modules for search, fetch, retrieval, synthesis, HTML parsing, text processing, and safety. The remaining limits are that retrieval is still synchronous, public-web-only by default, and dependent on DuckDuckGo HTML plus bounded page fetching.
+
+Current transparency notes:
+- Discovery uses DuckDuckGo's HTML endpoint, not a browser or a general crawling backend.
+- The current search budget is bounded in code: up to 20 initial search results, up to 30 fetched pages, crawl depth 2, up to 3 child links per fetched page, and extracted page text clipped before synthesis.
+- The search path always enforces public-web SSRF checks and redirect revalidation. The separate manual fetch tool can be reconfigured to allow private-network access, but grounded `search_web` stays on the public-web path.
 
 The preferred long-term structure is:
 - discovery/search,
