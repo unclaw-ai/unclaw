@@ -8,11 +8,11 @@
 
 <p align="center">No cloud. No lock-in. No unnecessary framework bloat.</p>
 
-Unclaw is a lightweight runtime for local AI models, built to become a **real autonomous personal agent** that runs on your own machine.
+Unclaw is a lightweight runtime for local AI models.
 
-Today, it already gives you a solid local runtime with terminal usage, Telegram remote access, local tools, session persistence, logs, and safer defaults.
+Today it is a local-first assistant runtime with terminal and Telegram access, local tools, session persistence, grounded web search, and local logs.
 
-The direction is simple: **turn a strong local chatbot MVP into a serious local-first AI agent** — while staying lightweight, private, secure, and usable on normal personal hardware.
+It also contains the plumbing for a bounded tool-calling loop, but the shipped profiles still keep tool use conservative and mostly command-driven by default.
 
 ---
 
@@ -33,34 +33,26 @@ Unclaw takes the opposite path:
 
 ## Project status
 
-### What already works
+### Implemented now
 
-- [x] Local runtime with Ollama
-- [x] Interactive terminal via `unclaw start`
-- [x] Telegram remote control
-- [x] Multiple local model profiles
-- [x] Session persistence and local memory foundations
-- [x] Local file tools
-- [x] Web fetch / search foundations
-- [x] Runtime logs and tracing
-- [x] Guided onboarding
-- [x] Safer local defaults
+- Local Ollama runtime with `fast`, `main`, `deep`, and `codex` profiles
+- Interactive terminal via `unclaw start`
+- Telegram polling bot with local allowlist management
+- Session persistence plus deterministic session summaries
+- Slash commands for `/read`, `/ls`, `/fetch`, and grounded `/search`
+- Model-assisted routing between normal chat and web-backed search
+- Grounded search replies with compact sources and grounded follow-up turns
+- Ollama tool-call parsing and a bounded observation-action loop for profiles configured with `tool_mode: native`
+- Guided onboarding that rewrites local config files and can optionally start Ollama or pull missing models
+- Local logs and tracing
 
-### What is being built now
+### Important current limits
 
-- [ ] True autonomous agent behavior
-- [ ] Intelligent tool use without requiring slash commands
-- [ ] Better model-aware behavior for tool-friendly vs non-tool-friendly models
-- [ ] Cleaner agent architecture after MVP audit
-- [ ] Stronger search quality and grounding
-
-### What comes next
-
-- [ ] Easier install for non-technical users
-- [ ] More messaging channels (Signal, WhatsApp, ...)
-- [ ] Better document and app actions
-- [ ] Local research memory / caching
-- [ ] More capable personal assistant workflows
+- The shipped profiles in `config/models.yaml` and the onboarding-recommended lineup all use `tool_mode: json_plan`, so native model-callable tools are not enabled by default.
+- `/read`, `/ls`, and `/fetch` remain slash-command-driven in normal user flows.
+- Search is bounded and synchronous: DuckDuckGo HTML plus a small set of fetched public pages.
+- Private and local network fetches are blocked by default.
+- Memory is session-oriented summaries, not rich user/project memory.
 
 ---
 
@@ -68,10 +60,9 @@ Unclaw takes the opposite path:
 
 Unclaw is currently an **early but real MVP**.
 
-It is already useful.
-But it is **not pretending to be a finished autonomous agent yet**.
+For ordinary turns it usually does one model call. For web-backed turns it can route the request into grounded search, persist the retrieved context, and answer with compact sources. When a profile is configured with `tool_mode: native`, the runtime can continue through a bounded observation-action loop.
 
-That is exactly what the next transformation phase is about.
+The important limit is that this native tool loop is **not** the default shipped setup yet, so Unclaw should still be described as a local assistant runtime moving toward broader agent behavior, not as a finished autonomous agent.
 
 ---
 
@@ -143,6 +134,8 @@ Default lineup:
 - `deep` → `qwen3.5:9b`
 - `codex` → `qwen2.5-coder:7b`
 
+All four shipped profiles currently use `tool_mode: json_plan`. If you want to exercise native tool calling, you need to switch a profile to `tool_mode: native` and use a compatible Ollama model.
+
 ---
 
 ## Security mindset
@@ -151,7 +144,7 @@ Unclaw follows one rule:
 
 **safe defaults first, more power later by explicit choice.**
 
-Current protections already include deny-by-default Telegram access, local secrets handling, local file boundaries, and safer web access defaults.
+Current protections already include deny-by-default Telegram access, local secrets handling, allowed-root file access, public HTTP/HTTPS-only web access by default, private-network fetch blocking, and reasoning text excluded from logs by default.
 
 ---
 

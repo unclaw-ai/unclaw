@@ -5,10 +5,10 @@
 Unclaw must be developed in layers.
 
 But the sequencing matters:
-we should not keep adding surface features to a runtime that is still structurally closer to a chatbot with manual tools than to a real agent.
+we should not keep adding surface features to a runtime whose default user experience still lags behind the agent-oriented plumbing already present in code.
 
 The first major objective now is:
-**repair the MVP foundation so Unclaw becomes a serious local-first autonomous agent runtime baseline.**
+**finish the transition from strong local assistant runtime to a more generally agentic local-first runtime baseline.**
 
 This roadmap therefore distinguishes clearly between:
 - what exists,
@@ -60,10 +60,11 @@ Complete as a conversational MVP, but incomplete as an agent runtime.
 
 ### What exists
 - CLI chat,
+- Telegram polling,
 - session management,
 - model profiles,
 - local persistence,
-- basic routing,
+- model-assisted chat versus web-search routing,
 - live logging,
 - provider abstraction.
 
@@ -78,20 +79,20 @@ This phase produced a strong assistant foundation, but not yet a true autonomous
 Make the system useful beyond plain chat.
 
 ### Status
-Partially complete.
+Mostly complete.
 
 ### What exists
-- web search,
+- grounded web search,
 - URL fetch,
 - file reading,
 - file listing,
 - tool registry,
 - tool dispatcher,
+- split web-search modules,
 - traceable manual tool execution.
 
 ### Architectural limitation
-These tools are still too manual from the user perspective.
-Tool existence alone does not make the system agentic.
+These tools still lean too heavily on explicit slash commands from the user.
 
 ---
 
@@ -99,11 +100,26 @@ Tool existence alone does not make the system agentic.
 
 ### Goal
 This is now the most urgent phase.
-Transform Unclaw from a chatbot with manual tools into a serious local-first agent MVP.
+Turn the current shared runtime into a default experience that uses its tool and routing capabilities more broadly and more naturally.
 
 ### Priority
 Highest.
 Nothing is more important than this phase now.
+
+### Status
+In progress.
+
+### Already landed in code
+- Ollama tool definitions and tool-call parsing,
+- a bounded observation-action loop for profiles configured with `tool_mode: native`,
+- shared `/search` handling through the same runtime path as normal turns,
+- model-assisted routing between normal chat and web-backed search.
+
+### Still missing to finish this phase
+- enabling native tool calling in the shipped/default profile setup,
+- broader capability routing beyond web-backed search,
+- model-driven use of file and fetch tools in normal default flows,
+- a less command-heavy default UX for non-search tool use.
 
 ### Main objectives
 - connect models and tools properly,
@@ -123,16 +139,14 @@ Nothing is more important than this phase now.
 ### Example sub-phases
 
 #### 3.1 Tool-calling and runtime loop
-- add model/tool integration,
-- parse native or structured tool calls,
-- implement bounded multi-step execution,
+- keep model/tool integration working across supported Ollama models,
+- make the bounded multi-step loop viable in default shipped configurations,
 - persist and trace loop steps clearly.
 
 #### 3.2 Search stack repair
-- split the current search monolith,
-- make search discovery/fetch/synthesis cleaner,
-- harden against prompt injection,
-- improve answer shaping.
+- keep the split search stack maintainable,
+- harden search against prompt-injection attempts,
+- improve answer shaping and reliability under bounded retrieval.
 
 #### 3.3 Adaptive capability routing
 - reduce reliance on slash commands for normal behavior,
@@ -153,7 +167,7 @@ Nothing is more important than this phase now.
 Introduce memory that helps the runtime think better without bloating prompts.
 
 ### Status
-Basic session memory exists, but richer memory remains future work.
+Basic session state and deterministic session summaries exist, but richer memory remains future work.
 
 ### Scope
 - better session summaries,
@@ -277,8 +291,8 @@ Long-term, Unclaw should become:
 
 At this stage, the most important truth is simple:
 
-**do not keep piling features on top of a not-yet-agentic core.**
+**do not paper over the remaining gap between the current runtime and a default-agentic product.**
 
 The next serious milestone is not “more features”.
 It is:
-**turn the current MVP into a real autonomous local-first agent MVP.**
+**make the existing routing and tool loop capabilities real default behavior where the code already supports them.**

@@ -3,7 +3,7 @@
 ## 1. Project identity
 
 **Name:** Unclaw  
-**Tagline:** AI agents unleashed. Local-first. No cloud lock-in. No recurring fees. Built for real local models.  
+**Tagline:** Local-first AI runtime. No cloud lock-in. No recurring fees. Built for real local models.  
 **Emoji identity:** 🦐
 
 Unclaw is intended to become a **lightweight, secure, privacy-first, local-only AI agent runtime** designed for real use on consumer hardware.
@@ -31,18 +31,22 @@ Unclaw must feel like a real personal assistant that genuinely works locally.
 ### Current status
 The MVP already provides:
 - local model execution through Ollama,
-- terminal and Telegram interaction,
-- session persistence,
-- local file tools,
-- web research capabilities,
+- terminal CLI and a Telegram polling channel,
+- session persistence and deterministic session summaries,
+- local file read/list tools and URL fetch,
+- grounded web search and search-backed follow-up turns,
 - observability and logs,
+- model-assisted routing between normal chat and web-backed search,
+- guided onboarding that rewrites local project config files,
+- a bounded observation-action loop when a profile is configured for native tool calling,
 - and a relatively clean modular codebase.
 
-But the current MVP is still **not yet a true autonomous agent runtime**.
+But the current MVP is still **not yet a true autonomous agent runtime by default**.
 It is closer to:
-- a strong local-first assistant MVP,
-- with useful manual tools,
-- but without a complete agent loop.
+- a strong local-first assistant runtime,
+- with grounded search and some model-guided routing,
+- but with general tool use still mostly manual or route-specific in the shipped configuration,
+- and with default profiles still set to `tool_mode: json_plan`.
 
 ### Target status
 The target product is a runtime that can:
@@ -185,6 +189,10 @@ The runtime’s job is to:
 
 If a capability is only accessible through an explicit user command, it is not yet fully integrated into the runtime.
 
+Current implementation note:
+- The runtime already handles route selection, model/profile selection, grounded search turns, tracing, and a bounded native tool loop when available.
+- Default model-driven access to all tools is not enabled yet, and memory selection is still limited to session summaries.
+
 ---
 
 ## 8. MVP expectations
@@ -221,6 +229,9 @@ Unclaw must support at least two broad interaction styles:
 - **Fast mode**: short, lightweight, responsive, minimum overhead.
 - **Deep mode**: more deliberate, more context, more tool usage, more bounded multi-step execution.
 
+Current implementation note:
+- Today this mostly maps to profile choice plus optional thinking mode, not separate planning systems.
+
 ### 9.2 Adaptive routing
 Routing must not rely on a giant hand-maintained keyword list.
 The target architecture should support:
@@ -229,12 +240,18 @@ The target architecture should support:
 - small routing logic or structured model assistance when useful,
 - stronger fallback behavior when ambiguity remains.
 
+Current implementation note:
+- Today the model-assisted router only distinguishes normal chat from a web-backed search route.
+
 ### 9.3 Model-aware tool use
 Different local models have different strengths.
 Unclaw must support multiple execution modes such as:
 - native tool calling when reliable,
 - structured outputs when needed,
 - conservative fallback behavior for weaker models.
+
+Current implementation note:
+- The code supports native tool calling, but the shipped profiles and onboarding defaults still use `tool_mode: json_plan`.
 
 ### 9.4 Selective context
 Avoid the classic local-agent failure mode:
@@ -254,6 +271,9 @@ Target layers may include:
 - ephemeral memory,
 - execution memory,
 - research cache.
+
+Current implementation note:
+- The implemented memory layer today is session history plus deterministic session summaries.
 
 ### 9.6 Observability is part of the product
 Logs are not a developer afterthought.

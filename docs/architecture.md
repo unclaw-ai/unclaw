@@ -17,18 +17,20 @@ This document is both:
 
 ### Current MVP reality
 At the time of writing, the MVP is best described as:
-- a local-first conversational runtime,
-- with useful manual tools,
+- a local-first assistant runtime,
+- with terminal CLI, Telegram polling, slash tools, grounded web search, and local persistence,
+- model-assisted routing between normal chat and a web-backed search path,
+- a bounded observation-action loop that can run when the selected profile supports native tool calling,
 - strong observability,
 - local persistence,
 - and clean module boundaries,
-- **but not yet a true autonomous agent runtime**.
+- **but not yet a true autonomous agent runtime by default**.
 
 The current system still depends too heavily on:
-- explicit slash commands,
-- hardcoded tool flows,
-- single-turn model execution,
-- and manual user-driven tool invocation.
+- explicit slash commands for most tools,
+- default shipped profiles that use `tool_mode: json_plan` rather than native tool calling,
+- routing that is still limited to chat versus web-backed search,
+- and session-summary memory rather than richer memory selection.
 
 ### Target state
 The target system is:
@@ -250,6 +252,22 @@ This loop must stay:
 
 ---
 
+## Current runtime flow
+
+As implemented today, the shared runtime works like this:
+
+1. input arrives from the CLI or Telegram channel,
+2. explicit slash commands are handled by `CommandHandler`,
+3. plain turns go through `route_request()`,
+4. the current router chooses between normal chat/chat-with-thinking and a web-backed search route,
+5. on the shipped `json_plan` profiles, `search_web` is executed by the runtime for web-backed turns before the final model answer,
+6. on profiles configured with `tool_mode: native`, Ollama can return `tool_calls`, the runtime executes them, persists tool output, and loops up to a bounded step limit,
+7. the assistant reply is persisted and traced.
+
+This means Unclaw already has a real shared runtime path, but broad model-driven access to all built-in tools is still not the default user experience.
+
+---
+
 ## Tool execution strategy
 
 Unclaw must support multiple tool execution modes because local models differ a lot.
@@ -266,7 +284,9 @@ The runtime must not assume that one approach works for every model family.
 
 ## Search and research architecture direction
 
-Web search must be treated as a retrieval capability inside the agent loop, not as a standalone user-facing formatting engine.
+Web search is already part of the shared runtime path for `/search` and for normal turns routed into web-backed mode.
+
+Today the search stack is split across focused modules for search, fetch, retrieval, synthesis, HTML parsing, text processing, and safety. The remaining limits are that retrieval is still synchronous, public-web-only by default, and dependent on DuckDuckGo HTML plus bounded page fetching.
 
 The preferred long-term structure is:
 - discovery/search,
@@ -290,11 +310,10 @@ Important rules:
 This document must stay honest.
 
 At the time of writing, the main gaps between MVP and target architecture are:
-- no real autonomous tool loop yet,
-- routing still too limited,
-- tool selection not yet fully model-driven,
-- search stack too monolithic,
-- prompt-injection hardening still incomplete,
+- the shipped profiles and onboarding defaults still do not enable native tool calling,
+- routing is still limited to chat versus web-backed search,
+- file and URL tools are still primarily manual slash commands,
+- search is grounded and modular, but still synchronous and dependent on DuckDuckGo HTML,
 - memory still basic,
 - UX still exposes too much manual control for important capabilities.
 

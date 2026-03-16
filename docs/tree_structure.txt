@@ -1,149 +1,83 @@
 unclaw/
-├── README.md                       # Short project presentation
+├── README.md                       # Current project overview
 ├── LICENSE                         # Repository license
-├── .gitignore                      # Local files to ignore
-├── .env.example                    # Example environment variables
-├── pyproject.toml                  # Python package configuration and dependencies
-├── Makefile                        # Common development and test commands
-├── ruff.toml                       # Ruff linter configuration
-├── pytest.ini                      # Pytest configuration
-│
-├── docs/
-│   ├── project_brief.md            # Global source of truth for the project
-│   ├── vision.md                   # Product vision and positioning
-│   ├── architecture.md             # Target technical architecture
-│   ├── roadmap.md                  # Development plan by phases
-│   ├── engineering_guidelines.md   # Coding and contribution rules
-│   ├── tools.md                    # Tool and skill documentation
-│   ├── memory.md                   # Memory design documentation
-│   ├── logging.md                  # Logging and observability documentation
-│   └── tree_structure.txt          # Repository tree with short explanations
-│
+├── pyproject.toml                  # Packaging, dependencies, pytest config
+├── audit/                          # Audit artifacts used to scope narrow missions
 ├── config/
-│   ├── app.yaml                    # General application configuration
-│   ├── models.yaml                 # Model profiles and LLM settings
-│   ├── tools.yaml                  # Tool activation and tool settings
-│   ├── telegram.yaml               # Telegram channel configuration
+│   ├── app.yaml                    # App defaults, channels, logging, security
+│   ├── models.yaml                 # Model profiles, thinking support, tool_mode
+│   ├── telegram.yaml               # Telegram allowlist and polling config
 │   └── prompts/
-│       ├── system_core.md          # Main system prompt
-│       ├── router.md               # Router LLM prompt
-│       ├── planner.md              # Planner prompt
-│       ├── answer_fast.md          # Prompt for fast answers
-│       ├── answer_deep.md          # Prompt for deep answers
-│       ├── memory_select.md        # Prompt for memory selection
-│       └── memory_write.md         # Prompt for memory writing
-│
-├── data/
-│   ├── app.db                      # Local SQLite database
-│   ├── logs/                       # Runtime logs
-│   ├── sessions/                   # Session exports or saved states
-│   ├── cache/                      # Local temporary cache
-│   └── files/                      # Local files read or processed by the agent
-│
-├── scripts/
-│   ├── dev_bootstrap.py            # Local development environment bootstrap
-│   ├── init_db.py                  # Database initialization script
-│   ├── run_cli.py                  # Quick launcher for terminal mode
-│   ├── run_api.py                  # Quick launcher for local API mode
-│   ├── run_telegram.py             # Quick launcher for Telegram mode
-│   └── smoke_test.py               # Simple project health check
-│
+│       └── system.txt              # Main system prompt
+├── docs/
+│   ├── architecture.md             # Current-vs-target architecture notes
+│   ├── engineering_guidelines.md   # Engineering rules and constraints
+│   ├── project_brief.md            # Product brief with current-status notes
+│   ├── roadmap.md                  # Roadmap phases with current status markers
+│   ├── tree_structure.txt          # This high-level tree
+│   └── vision.md                   # Long-term product vision
 ├── src/
 │   └── unclaw/
-│       ├── __init__.py             # Main Python package
-│       ├── main.py                 # Main project entry point
-│       ├── settings.py             # Configuration loading and path resolution
-│       ├── constants.py            # Project-wide constants
-│       ├── bootstrap.py            # Startup preparation logic
-│       ├── errors.py               # Project exception hierarchy
-│       │
-│       ├── schemas/
-│       │   ├── chat.py             # Schemas for messages and responses
-│       │   ├── tool.py             # Schemas for tool calls
-│       │   ├── model.py            # Schemas for model profiles and capabilities
-│       │   ├── memory.py           # Schemas for memory objects
-│       │   ├── session.py          # Schemas for sessions and conversations
-│       │   └── events.py           # Schemas for logged runtime events
-│       │
-│       ├── db/
-│       │   ├── sqlite.py           # SQLite connection and database helpers
-│       │   ├── migrations.py       # Database schema creation and evolution
-│       │   └── repositories.py     # Structured persistence access layer
-│       │
-│       ├── core/
-│       │   ├── runtime.py          # Main execution pipeline for one user turn
-│       │   ├── orchestrator.py     # High-level coordination between components
-│       │   ├── router.py           # Request routing to fast, deep, or tool paths
-│       │   ├── planner.py          # Simple planning for multi-step tasks
-│       │   ├── executor.py         # Concrete execution of chosen actions
-│       │   ├── context_builder.py  # Builds the prompt context sent to the model
-│       │   ├── response_builder.py # Builds the final user-facing response
-│       │   ├── session_manager.py  # Session lifecycle and conversation switching
-│       │   ├── command_handler.py  # Slash command handling
-│       │   └── permissions.py      # Permission rules for actions and tools
-│       │
-│       ├── llm/
-│       │   ├── base.py             # Common interface for LLM providers
-│       │   ├── registry.py         # Registry of providers and model profiles
-│       │   ├── ollama_provider.py  # Ollama provider for local models
-│       │   ├── mlx_provider.py     # Future provider for MLX on Apple Silicon
-│       │   ├── llamacpp_provider.py# Future provider for llama.cpp
-│       │   ├── prompts.py          # Prompt loading and prompt helpers
-│       │   ├── structured_output.py# Helpers for structured JSON responses
-│       │   └── model_profiles.py   # Definitions for fast, main, and deep profiles
-│       │
-│       ├── memory/
-│       │   ├── manager.py          # Main entry point for memory operations
-│       │   ├── conversation.py     # Conversation memory management
-│       │   ├── user_memory.py      # Persistent user memory
-│       │   ├── project_memory.py   # Project-scoped memory
-│       │   ├── ephemeral.py        # Short-lived temporary memory
-│       │   ├── retrieval.py        # Retrieval of relevant memory items
-│       │   ├── scoring.py          # Memory relevance and priority scoring
-│       │   ├── summarizer.py       # Rolling session summaries
-│       │   └── writer.py           # Selective memory writing
-│       │
-│       ├── tools/
-│       │   ├── registry.py         # Central registry of tools
-│       │   ├── contracts.py        # Tool contracts and schemas
-│       │   ├── dispatcher.py       # Execution dispatch for selected tools
-│       │   ├── file_tools.py       # Local file reading and listing tools
-│       │   ├── web_tools.py        # Web search, fetch, and extraction tools
-│       │   ├── system_tools.py     # Future system action tools
-│       │   └── parser_fallback.py  # Fallback parsing for weak tool-using models
-│       │
+│       ├── bootstrap.py            # Startup/bootstrap glue
+│       ├── constants.py            # Shared constants
+│       ├── errors.py               # Shared exception types
+│       ├── main.py                 # `unclaw` CLI entrypoint
+│       ├── onboarding.py           # Guided local setup
+│       ├── settings.py             # Config loading and path resolution
+│       ├── startup.py              # Preflight checks and banners
+│       ├── update.py               # Local checkout update command
 │       ├── channels/
-│       │   ├── cli.py              # Main terminal interface
-│       │   ├── telegram_bot.py     # Telegram channel adapter
-│       │   └── api.py              # Local FastAPI interface
-│       │
+│       │   ├── cli.py              # Terminal channel
+│       │   ├── telegram_api.py     # Telegram HTTP client
+│       │   ├── telegram_bot.py     # Telegram polling channel
+│       │   └── telegram_config.py  # Telegram config and allowlist helpers
+│       ├── core/
+│       │   ├── capabilities.py     # Runtime capability summary injected into prompts
+│       │   ├── command_handler.py  # Slash command parsing and model/session controls
+│       │   ├── context_builder.py  # LLM context assembly
+│       │   ├── executor.py         # Built-in tool registry wiring
+│       │   ├── orchestrator.py     # Provider calls for turns and loop iterations
+│       │   ├── research_flow.py    # Shared grounded `/search` helpers
+│       │   ├── router.py           # Chat vs web_search routing
+│       │   ├── runtime.py          # Shared turn execution and bounded tool loop
+│       │   ├── search_grounding.py # Grounding and reply shaping for search-backed turns
+│       │   └── session_manager.py  # Session lifecycle and persistence bridge
+│       ├── db/
+│       │   ├── repositories.py     # SQLite CRUD repositories
+│       │   └── sqlite.py           # Database setup
+│       ├── llm/
+│       │   ├── base.py             # Provider contracts and capability flags
+│       │   ├── model_profiles.py   # Runtime profile resolution
+│       │   └── ollama_provider.py  # Ollama chat and tool-call integration
 │       ├── logs/
-│       │   ├── event_bus.py        # Internal event bus
-│       │   ├── tracer.py           # Structured execution tracing
-│       │   ├── console_stream.py   # Live log streaming in the terminal
-│       │   └── jsonl_sink.py       # JSONL log writer
-│       │
-│       ├── utils/
-│       │   ├── time.py             # Time and timestamp helpers
-│       │   ├── files.py            # File-related helpers
-│       │   ├── ids.py              # Identifier generation helpers
-│       │   ├── strings.py          # String manipulation helpers
-│       │   └── tokens.py           # Simple token and context budget helpers
-│       │
-│       └── compat/
-│           └── openclaw/
-│               ├── __init__.py     # Future compatibility package
-│               └── notes.md        # Future compatibility notes
-│
+│       │   ├── cli.py              # Log viewer
+│       │   ├── event_bus.py        # Trace event fanout
+│       │   └── tracer.py           # Structured runtime tracing
+│       ├── memory/
+│       │   ├── manager.py          # Session-memory facade
+│       │   └── summarizer.py       # Deterministic session summaries
+│       ├── schemas/
+│       │   ├── chat.py             # Stored chat-message schema
+│       │   ├── events.py           # Stored event schema
+│       │   └── session.py          # Session records and summaries
+│       └── tools/
+│           ├── contracts.py        # Tool contracts and search payload schema
+│           ├── dispatcher.py       # Tool dispatch
+│           ├── file_tools.py       # `/read` and `/ls`
+│           ├── registry.py         # Tool registry
+│           ├── web_fetch.py        # URL fetching
+│           ├── web_html.py         # HTML extraction
+│           ├── web_retrieval.py    # Bounded iterative search retrieval
+│           ├── web_safety.py       # Public-web / SSRF guards
+│           ├── web_search.py       # DuckDuckGo HTML integration
+│           ├── web_synthesis.py    # Search evidence synthesis
+│           ├── web_text.py         # Search text normalization/scoring
+│           └── web_tools.py        # Public web tool entrypoints
 └── tests/
-    ├── unit/
-    │   ├── test_router.py          # Unit tests for the router
-    │   ├── test_commands.py        # Unit tests for slash commands
-    │   ├── test_context_builder.py # Unit tests for context building
-    │   ├── test_tools.py           # Unit tests for tools
-    │   └── test_memory.py          # Unit tests for memory modules
-    │
-    └── integration/
-        ├── test_cli_flow.py        # Integration test for the terminal flow
-        ├── test_telegram_flow.py   # Integration test for the Telegram flow
-        └── test_agent_run.py       # Integration test for a full agent run
+    ├── test_e2e_flows.py           # CLI end-to-end flows
+    ├── test_onboarding.py          # Onboarding behavior
+    ├── test_ollama_provider.py     # Ollama provider behavior
+    ├── test_router.py              # Routing behavior
+    ├── test_runtime_integration.py # Shared runtime integration coverage
+    ├── test_telegram_bot.py        # Telegram channel behavior
+    └── ...                         # Other focused unit and integration tests
