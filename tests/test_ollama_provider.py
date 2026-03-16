@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import io
 import json
+import re
+from urllib.error import HTTPError, URLError
 
 import pytest
 
 from unclaw.llm import ollama_provider
-from unclaw.llm.base import LLMMessage, LLMRole, ModelCapabilities, ResolvedModelProfile
+from unclaw.llm.base import (
+    LLMConnectionError,
+    LLMMessage,
+    LLMProviderError,
+    LLMResponseError,
+    LLMRole,
+    ModelCapabilities,
+    ResolvedModelProfile,
+)
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 
@@ -397,6 +408,107 @@ def test_chat_handles_malformed_tool_calls_gracefully(monkeypatch) -> None:
     assert response.tool_calls is not None
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].tool_name == "valid_tool"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_chat_surfaces_explicit_connection_errors(monkeypatch, streaming) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        raise URLError("[Errno 111] Connection refused")
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+    streamed_chunks: list[str] = []
+
+    with pytest.raises(
+        LLMConnectionError,
+        match=re.escape(
+            "Could not connect to Ollama at http://127.0.0.1:11434. "
+            "Make sure the Ollama server is running."
+        ),
+    ):
+        provider.chat(
+            profile=_build_profile(thinking_supported=False),
+            messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+            content_callback=streamed_chunks.append if streaming else None,
+        )
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_chat_surfaces_explicit_timeout_errors(monkeypatch, streaming) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+    streamed_chunks: list[str] = []
+
+    with pytest.raises(
+        LLMConnectionError,
+        match=re.escape("Ollama request timed out after 7 seconds."),
+    ):
+        provider.chat(
+            profile=_build_profile(thinking_supported=False),
+            messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+            timeout_seconds=7.0,
+            content_callback=streamed_chunks.append if streaming else None,
+        )
+
+
+def test_chat_surfaces_compact_http_error_details(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        raise HTTPError(
+            url="http://127.0.0.1:11434/api/chat",
+            code=404,
+            msg="Not Found",
+            hdrs=None,
+            fp=io.BytesIO(b"{\"error\":\"model 'missing' not found\"}"),
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+
+    with pytest.raises(
+        LLMProviderError,
+        match=re.escape("Ollama request failed with HTTP 404: model 'missing' not found"),
+    ):
+        provider.chat(
+            profile=_build_profile(thinking_supported=False),
+            messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+        )
+
+
+def test_chat_surfaces_invalid_response_errors_cleanly(monkeypatch) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        del request, timeout
+        return _FakeJsonResponse(
+            json.dumps(
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-13T12:00:00Z",
+                    "done_reason": "stop",
+                    "message": {},
+                }
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+
+    with pytest.raises(
+        LLMResponseError,
+        match=re.escape("Ollama returned an invalid response."),
+    ):
+        provider.chat(
+            profile=_build_profile(thinking_supported=False),
+            messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+        )
 
 
 def _build_profile(

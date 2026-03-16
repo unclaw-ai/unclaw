@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from collections.abc import Iterator, Sequence
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -24,6 +25,7 @@ from unclaw.tools.contracts import ToolCall, ToolDefinition
 
 _OPEN_THINK_TAG = "<think>"
 _CLOSE_THINK_TAG = "</think>"
+_OLLAMA_INVALID_RESPONSE_ERROR = "Ollama returned an invalid response."
 
 
 class OllamaProvider(BaseLLMProvider):
@@ -266,26 +268,27 @@ class OllamaProvider(BaseLLMProvider):
             ) as response:
                 response_body = response.read().decode("utf-8")
         except HTTPError as exc:
-            detail = _read_error_body(exc)
-            raise LLMProviderError(
-                f"Ollama request failed with HTTP {exc.code}: {detail}"
-            ) from exc
+            raise _build_http_error(exc) from exc
         except URLError as exc:
-            raise LLMConnectionError(
-                f"Could not reach Ollama at {self._base_url}."
+            raise _build_connection_error(
+                exc,
+                base_url=self._base_url,
+                timeout_seconds=self._resolve_timeout(timeout_seconds),
             ) from exc
         except OSError as exc:
-            raise LLMConnectionError(
-                f"Could not reach Ollama at {self._base_url}."
+            raise _build_connection_error(
+                exc,
+                base_url=self._base_url,
+                timeout_seconds=self._resolve_timeout(timeout_seconds),
             ) from exc
 
         try:
             decoded_payload = json.loads(response_body)
         except json.JSONDecodeError as exc:
-            raise LLMResponseError("Ollama returned invalid JSON.") from exc
+            raise LLMResponseError(_OLLAMA_INVALID_RESPONSE_ERROR) from exc
 
         if not isinstance(decoded_payload, dict):
-            raise LLMResponseError("Ollama returned an unexpected JSON payload.")
+            raise LLMResponseError(_OLLAMA_INVALID_RESPONSE_ERROR)
 
         return decoded_payload
 
@@ -324,25 +327,24 @@ class OllamaProvider(BaseLLMProvider):
                         decoded_payload = json.loads(line)
                     except json.JSONDecodeError as exc:
                         raise LLMResponseError(
-                            "Ollama returned invalid JSON while streaming."
+                            _OLLAMA_INVALID_RESPONSE_ERROR
                         ) from exc
                     if not isinstance(decoded_payload, dict):
-                        raise LLMResponseError(
-                            "Ollama returned an unexpected JSON payload while streaming."
-                        )
+                        raise LLMResponseError(_OLLAMA_INVALID_RESPONSE_ERROR)
                     yield decoded_payload
         except HTTPError as exc:
-            detail = _read_error_body(exc)
-            raise LLMProviderError(
-                f"Ollama request failed with HTTP {exc.code}: {detail}"
-            ) from exc
+            raise _build_http_error(exc) from exc
         except URLError as exc:
-            raise LLMConnectionError(
-                f"Could not reach Ollama at {self._base_url}."
+            raise _build_connection_error(
+                exc,
+                base_url=self._base_url,
+                timeout_seconds=self._resolve_timeout(timeout_seconds),
             ) from exc
         except OSError as exc:
-            raise LLMConnectionError(
-                f"Could not reach Ollama at {self._base_url}."
+            raise _build_connection_error(
+                exc,
+                base_url=self._base_url,
+                timeout_seconds=self._resolve_timeout(timeout_seconds),
             ) from exc
 
     def _resolve_timeout(self, timeout_seconds: float | None) -> float:
@@ -354,11 +356,11 @@ class OllamaProvider(BaseLLMProvider):
 def _extract_content(payload: dict[str, Any]) -> str:
     message = payload.get("message")
     if not isinstance(message, dict):
-        raise LLMResponseError("Ollama response did not include a message object.")
+        raise LLMResponseError(_OLLAMA_INVALID_RESPONSE_ERROR)
 
     content = _extract_message_text(message, key="content")
     if content is None:
-        raise LLMResponseError("Ollama response did not include message content.")
+        raise LLMResponseError(_OLLAMA_INVALID_RESPONSE_ERROR)
 
     return _strip_leaked_think_tags(content)
 
@@ -623,3 +625,69 @@ def _read_error_body(error: HTTPError) -> str:
     if body:
         return body
     return error.reason if isinstance(error.reason, str) else "request failed"
+
+
+def _build_http_error(error: HTTPError) -> LLMProviderError:
+    detail = _summarize_http_error_detail(_read_error_body(error))
+    if detail:
+        return LLMProviderError(
+            f"Ollama request failed with HTTP {error.code}: {detail}"
+        )
+    return LLMProviderError(f"Ollama request failed with HTTP {error.code}.")
+
+
+def _summarize_http_error_detail(detail: str) -> str:
+    normalized_detail = " ".join(detail.split())
+    if not normalized_detail:
+        return ""
+
+    try:
+        payload = json.loads(normalized_detail)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict):
+        error_detail = payload.get("error")
+        if isinstance(error_detail, str):
+            normalized_detail = " ".join(error_detail.split())
+
+    if len(normalized_detail) > 160:
+        normalized_detail = normalized_detail[:157].rstrip() + "..."
+    return normalized_detail
+
+
+def _build_connection_error(
+    error: URLError | OSError,
+    *,
+    base_url: str,
+    timeout_seconds: float,
+) -> LLMConnectionError:
+    if _is_timeout_error(error):
+        return LLMConnectionError(
+            f"Ollama request timed out after {_format_timeout_seconds(timeout_seconds)} seconds."
+        )
+
+    return LLMConnectionError(
+        f"Could not connect to Ollama at {base_url}. Make sure the Ollama server is running."
+    )
+
+
+def _is_timeout_error(error: URLError | OSError) -> bool:
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return True
+
+    if not isinstance(error, URLError):
+        return False
+
+    reason = error.reason
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(reason, str):
+        return "timed out" in reason.lower()
+    return False
+
+
+def _format_timeout_seconds(timeout_seconds: float) -> str:
+    if timeout_seconds.is_integer():
+        return str(int(timeout_seconds))
+    return f"{timeout_seconds:g}"

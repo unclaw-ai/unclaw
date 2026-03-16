@@ -198,7 +198,7 @@ def run_user_turn(
             model_duration_ms=exc.duration_ms,
             error=str(exc),
         )
-        assistant_reply = RUNTIME_ERROR_REPLY
+        assistant_reply = _build_model_failure_reply(exc)
     except (
         ConfigurationError,
         LLMError,
@@ -457,3 +457,10 @@ def _execute_runtime_tool_call(
         tool_call=tool_call,
     )
     return tool_result
+
+
+def _build_model_failure_reply(error: ModelCallFailedError) -> str:
+    message = error.error.strip()
+    if message:
+        return message
+    return RUNTIME_ERROR_REPLY
