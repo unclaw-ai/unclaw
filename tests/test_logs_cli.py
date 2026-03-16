@@ -89,6 +89,7 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
     assert outputs[0] == "Unclaw logs"
     assert "Mode: simple" in outputs
     assert f"Runtime log: {log_path.resolve()}" in outputs
+    assert "Trace retention: 30 day(s) for `runtime.log` and SQLite runtime events." in outputs
     assert "Reasoning text: redacted by default unless explicitly enabled." in outputs
     assert "Recent activity:" in outputs
     assert any("model selected | main -> qwen3.5:4b | provider=ollama" in line for line in outputs)
@@ -138,6 +139,7 @@ def test_run_logs_full_shows_raw_lines_when_follow_is_disabled(tmp_path: Path) -
     assert outputs[0] == "Unclaw logs"
     assert "Mode: full" in outputs
     assert "View: raw JSON runtime log stream" in outputs
+    assert "Trace retention: 30 day(s) for `runtime.log` and SQLite runtime events." in outputs
     assert "Reasoning text: redacted by default unless explicitly enabled." in outputs
     assert "plain raw line" in outputs
     assert any('"event_type": "assistant.reply.persisted"' in line for line in outputs)
@@ -158,6 +160,7 @@ def test_run_logs_explains_how_to_generate_logs_when_file_is_missing(
 
     assert result == 0
     assert outputs[0] == "Unclaw logs"
+    assert "Trace retention: 30 day(s) for `runtime.log` and SQLite runtime events." in outputs
     assert "No runtime log file exists yet." in outputs
     assert (
         "Generate logs with `unclaw start` or `unclaw telegram`, then try again."
@@ -339,6 +342,21 @@ def test_run_logs_full_shows_reasoning_text_when_opted_in(tmp_path: Path) -> Non
     assert any('"reasoning_text": "chain"' in line for line in outputs)
 
 
+def test_run_logs_reports_when_trace_retention_is_disabled(tmp_path: Path) -> None:
+    project_root = _create_temp_project(tmp_path)
+    _set_logging_value(project_root, "retention_days", 0)
+
+    outputs: list[str] = []
+    result = run_logs(
+        project_root=project_root,
+        output_func=outputs.append,
+        follow=False,
+    )
+
+    assert result == 0
+    assert "Trace retention: disabled." in outputs
+
+
 def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"
@@ -347,12 +365,16 @@ def _create_temp_project(tmp_path: Path) -> Path:
 
 
 def _set_include_reasoning_text(project_root: Path, enabled: bool) -> None:
+    _set_logging_value(project_root, "include_reasoning_text", enabled)
+
+
+def _set_logging_value(project_root: Path, key: str, value: object) -> None:
     app_config_path = project_root / "config" / "app.yaml"
     payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
     logging_payload = payload.get("logging")
     assert isinstance(logging_payload, dict)
-    logging_payload["include_reasoning_text"] = enabled
+    logging_payload[key] = value
     app_config_path.write_text(
         yaml.safe_dump(payload, sort_keys=False),
         encoding="utf-8",

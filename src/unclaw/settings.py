@@ -47,6 +47,7 @@ class LoggingSettings:
     console_enabled: bool
     file_enabled: bool
     file_name: str
+    retention_days: int
     include_reasoning_text: bool
 
 
@@ -293,6 +294,11 @@ def _build_app_settings(
         console_enabled=_get_bool(logging_section, "console_enabled", True),
         file_enabled=_get_bool(logging_section, "file_enabled", True),
         file_name=_get_str(logging_section, "file_name", LOG_FILE_NAME),
+        retention_days=_get_non_negative_int(
+            logging_section,
+            "retention_days",
+            default=30,
+        ),
         include_reasoning_text=_get_bool(
             logging_section,
             "include_reasoning_text",
@@ -466,6 +472,24 @@ def _get_positive_float(
     if value <= 0:
         raise ConfigurationError(
             f"Configuration key '{key}' must be greater than zero."
+        )
+    return value
+
+
+def _get_non_negative_int(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    default: int | None = None,
+) -> int:
+    value = source.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be a non-negative integer."
+        )
+    if value < 0:
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be a non-negative integer."
         )
     return value
 

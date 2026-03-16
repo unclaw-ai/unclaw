@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
 import shutil
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
 
+from unclaw.bootstrap import bootstrap
+from unclaw.core.session_manager import SessionManager
+from unclaw.schemas.events import EventLevel
 from unclaw.settings import load_settings
 from unclaw.startup import CheckStatus, OllamaStatus, build_banner, build_startup_report
 
@@ -151,6 +156,124 @@ def test_build_banner_centers_brand_tagline() -> None:
     assert abs(left_padding - right_padding) <= 1
 
 
+def test_bootstrap_prunes_runtime_traces_older_than_retention_window(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_id: str
+    old_created_at = _utc_iso_days_ago(45)
+    recent_created_at = _utc_iso_days_ago(2)
+
+    session_manager = SessionManager.from_settings(settings)
+    try:
+        session = session_manager.create_session(make_current=False)
+        session_id = session.id
+        session_manager.event_repository.add_event(
+            session_id=session.id,
+            event_type="trace.old",
+            level=EventLevel.INFO,
+            message="Old trace",
+            created_at=old_created_at,
+        )
+        session_manager.event_repository.add_event(
+            session_id=session.id,
+            event_type="trace.recent",
+            level=EventLevel.INFO,
+            message="Recent trace",
+            created_at=recent_created_at,
+        )
+    finally:
+        session_manager.close()
+
+    log_path = settings.paths.log_file_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        _runtime_log_line(
+            event_type="trace.old",
+            created_at=old_created_at,
+            message="Old trace",
+        )
+        + "\n"
+        + _runtime_log_line(
+            event_type="trace.recent",
+            created_at=recent_created_at,
+            message="Recent trace",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    bootstrap(project_root=project_root)
+
+    reloaded_settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(reloaded_settings)
+    try:
+        persisted_events = session_manager.event_repository.list_recent_events(
+            session_id,
+            limit=10,
+        )
+    finally:
+        session_manager.close()
+
+    assert [event.event_type for event in persisted_events] == ["trace.recent"]
+    assert persisted_events[0].created_at == recent_created_at
+    assert log_path.read_text(encoding="utf-8").splitlines() == [
+        _runtime_log_line(
+            event_type="trace.recent",
+            created_at=recent_created_at,
+            message="Recent trace",
+        )
+    ]
+
+
+def test_bootstrap_keeps_old_runtime_traces_when_retention_is_disabled(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    _set_logging_value(project_root, "retention_days", 0)
+    settings = load_settings(project_root=project_root)
+    old_created_at = _utc_iso_days_ago(45)
+
+    session_manager = SessionManager.from_settings(settings)
+    try:
+        session = session_manager.create_session(make_current=False)
+        session_manager.event_repository.add_event(
+            session_id=session.id,
+            event_type="trace.old",
+            level=EventLevel.INFO,
+            message="Old trace",
+            created_at=old_created_at,
+        )
+        session_id = session.id
+    finally:
+        session_manager.close()
+
+    log_path = settings.paths.log_file_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    old_log_line = _runtime_log_line(
+        event_type="trace.old",
+        created_at=old_created_at,
+        message="Old trace",
+    )
+    log_path.write_text(old_log_line + "\n", encoding="utf-8")
+
+    bootstrap(project_root=project_root)
+
+    reloaded_settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(reloaded_settings)
+    try:
+        persisted_events = session_manager.event_repository.list_recent_events(
+            session_id,
+            limit=10,
+        )
+    finally:
+        session_manager.close()
+
+    assert [event.event_type for event in persisted_events] == ["trace.old"]
+    assert log_path.read_text(encoding="utf-8").splitlines() == [old_log_line]
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -159,3 +282,36 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(_repo_root() / "config", project_root / "config")
     return project_root
+
+
+def _set_logging_value(project_root: Path, key: str, value: object) -> None:
+    app_config_path = project_root / "config" / "app.yaml"
+    payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    logging_payload = payload.get("logging")
+    assert isinstance(logging_payload, dict)
+    logging_payload[key] = value
+    app_config_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _utc_iso_days_ago(days: int) -> str:
+    return (
+        datetime.now(tz=UTC) - timedelta(days=days)
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _runtime_log_line(*, event_type: str, created_at: str, message: str) -> str:
+    return json.dumps(
+        {
+            "created_at": created_at,
+            "event_type": event_type,
+            "level": "info",
+            "message": message,
+            "payload": {},
+            "session_id": None,
+        },
+        sort_keys=True,
+    )

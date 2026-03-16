@@ -289,6 +289,18 @@ class EventRepository:
         ).fetchall()
         return [_runtime_event_from_row(row) for row in rows]
 
+    def purge_events_before(self, *, created_before: str) -> int:
+        """Delete persisted runtime events older than one UTC timestamp."""
+        cursor = self.connection.execute(
+            """
+            DELETE FROM events
+            WHERE created_at < ?
+            """,
+            (created_before,),
+        )
+        self.connection.commit()
+        return max(cursor.rowcount, 0)
+
 
 def _session_record_from_row(row: sqlite3.Row) -> SessionRecord:
     return SessionRecord(

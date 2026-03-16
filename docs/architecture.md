@@ -227,6 +227,7 @@ The engineering trace may be richer than the user trace, but both should remain 
 
 Current transparency notes:
 - In the shipped CLI and Telegram entrypoints, the tracer publishes events to an in-process event bus, writes local JSON lines to `data/logs/runtime.log` when file logging is enabled, and persists the same event metadata into the local SQLite `events` table.
+- Those same startup paths also apply the configured `logging.retention_days` window to both trace stores. The default keeps 30 days of runtime traces; `0` disables automatic trace cleanup.
 - Runtime traces record metadata such as route, model/profile, tool names and arguments, durations, and success or failure status. They do not store full assistant replies or raw fetched page bodies in the runtime log stream.
 - Reasoning text is excluded by default. Only reasoning length is persisted unless `logging.include_reasoning_text` is explicitly enabled.
 

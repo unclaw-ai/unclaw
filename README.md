@@ -72,6 +72,7 @@ Unclaw takes the opposite path:
 
 - The tracer publishes runtime events in-process and, in the normal CLI and Telegram startup paths, persists them locally in two places: the SQLite `events` table in `data/app.db` and the JSONL runtime log at `data/logs/runtime.log`.
 - Runtime trace payloads include timestamps, session IDs, route and model selections, tool names and arguments, success or failure state, durations, Telegram chat IDs for Telegram-only events, and reply or output lengths. This means local search queries, file paths, and fetched URLs can appear in local traces.
+- On normal bootstrap/startup paths, Unclaw prunes runtime trace artifacts older than `logging.retention_days` from both the SQLite `events` table and `data/logs/runtime.log`. The default is 30 days; set `logging.retention_days: 0` to disable that automatic trace cleanup.
 - By default reasoning text is not persisted. The tracer records `reasoning_length` only. If you set `logging.include_reasoning_text: true`, raw reasoning text is stored in the same local event payloads and becomes visible in `unclaw logs full`.
 - `unclaw logs` reads the local JSONL runtime log, not the SQLite `events` table. If `logging.file_enabled` is off, that file stops updating even though local event publishing and local event persistence still exist.
 - Successful grounded search turns also store a compact tool-history message in session history for follow-up grounding: supported facts, uncertain details, and source URLs rather than full fetched page dumps.

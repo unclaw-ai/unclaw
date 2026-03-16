@@ -50,6 +50,7 @@ class LogView:
     log_path: Path
     log_exists: bool
     file_logging_enabled: bool
+    retention_days: int
     include_reasoning_text: bool
 
 
@@ -146,6 +147,7 @@ def build_log_view(settings: Settings, *, mode: str) -> LogView:
         log_path=log_path,
         log_exists=log_path.is_file(),
         file_logging_enabled=settings.app.logging.file_enabled,
+        retention_days=settings.app.logging.retention_days,
         include_reasoning_text=settings.app.logging.include_reasoning_text,
     )
 
@@ -165,6 +167,13 @@ def format_log_header(log_view: LogView, *, follow: bool) -> tuple[str, ...]:
     ]
     if follow:
         lines.append("Press Ctrl-C to stop.")
+    if log_view.retention_days > 0:
+        lines.append(
+            "Trace retention: "
+            f"{log_view.retention_days} day(s) for `runtime.log` and SQLite runtime events."
+        )
+    else:
+        lines.append("Trace retention: disabled.")
     if not log_view.file_logging_enabled:
         lines.append(
             "Note: `logging.file_enabled` is off, so this file may not update until it is enabled again."

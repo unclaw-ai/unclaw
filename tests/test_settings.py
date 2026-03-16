@@ -86,6 +86,24 @@ def test_load_settings_errors_when_logging_mode_is_invalid(tmp_path: Path) -> No
     )
 
 
+def test_load_settings_errors_when_logging_retention_is_negative(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["logging"]["retention_days"] = -1
+    _write_yaml(app_config_path, app_payload)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(project_root=project_root)
+
+    assert (
+        str(exc_info.value)
+        == "Configuration key 'retention_days' must be a non-negative integer."
+    )
+
+
 def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
     tmp_path: Path,
 ) -> None:
