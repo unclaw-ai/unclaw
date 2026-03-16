@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
@@ -347,15 +348,14 @@ def _run_agent_loop(
             )
         )
 
-        # Execute each tool call through the existing dispatcher.
-        for tool_call in tool_calls:
-            tool_result = _execute_runtime_tool_call(
-                session_manager=session_manager,
-                session_id=session_id,
-                tracer=tracer,
-                tool_registry=tool_registry,
-                tool_call=tool_call,
-            )
+        # Execute tool calls concurrently, then replay results in model order.
+        for tool_result in _execute_runtime_tool_calls(
+            session_manager=session_manager,
+            session_id=session_id,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_calls=tool_calls,
+        ):
             context_messages.append(
                 LLMMessage(
                     role=LLMRole.TOOL,
@@ -390,6 +390,80 @@ def _run_agent_loop(
 
     # max_steps reached without a final text reply.
     return _MAX_STEPS_FALLBACK_REPLY
+
+
+def _execute_runtime_tool_calls(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    tool_calls: Sequence[ToolCall],
+) -> tuple[ToolResult, ...]:
+    """Execute one tool-call batch while keeping context and persistence ordered."""
+    if len(tool_calls) == 1:
+        return (
+            _execute_runtime_tool_call(
+                session_manager=session_manager,
+                session_id=session_id,
+                tracer=tracer,
+                tool_registry=tool_registry,
+                tool_call=tool_calls[0],
+            ),
+        )
+
+    tool_started_at_by_index: list[float] = []
+    for tool_call in tool_calls:
+        tool_started_at_by_index.append(perf_counter())
+        tracer.trace_tool_started(
+            session_id=session_id,
+            tool_name=tool_call.tool_name,
+            arguments=tool_call.arguments,
+        )
+
+    future_completed_at_by_index: list[float | None] = [None] * len(tool_calls)
+    with ThreadPoolExecutor(max_workers=len(tool_calls)) as executor:
+        futures = [
+            executor.submit(
+                _dispatch_runtime_tool_call,
+                tool_registry=tool_registry,
+                tool_call=tool_call,
+            )
+            for tool_call in tool_calls
+        ]
+        future_index_map = {
+            future: index for index, future in enumerate(futures)
+        }
+
+        for future in as_completed(future_index_map):
+            future_completed_at_by_index[future_index_map[future]] = perf_counter()
+
+        tool_results: list[ToolResult] = []
+        for index, future in enumerate(futures):
+            tool_result = future.result()
+            finished_at = future_completed_at_by_index[index]
+            if finished_at is None:
+                finished_at = perf_counter()
+            _finalize_runtime_tool_call(
+                session_manager=session_manager,
+                session_id=session_id,
+                tracer=tracer,
+                tool_call=tool_calls[index],
+                tool_result=tool_result,
+                tool_duration_ms=max(
+                    0,
+                    round(
+                        (
+                            finished_at
+                            - tool_started_at_by_index[index]
+                        )
+                        * 1000
+                    ),
+                ),
+            )
+            tool_results.append(tool_result)
+
+    return tuple(tool_results)
 
 
 def _resolve_tool_definitions(
@@ -438,23 +512,54 @@ def _execute_runtime_tool_call(
     tool_call: ToolCall,
 ) -> ToolResult:
     """Execute one runtime-level tool call with shared tracing and persistence."""
-    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
-
-    dispatcher = ToolDispatcher(tool_registry)
     tool_started_at = perf_counter()
     tracer.trace_tool_started(
         session_id=session_id,
         tool_name=tool_call.tool_name,
         arguments=tool_call.arguments,
     )
-    tool_result = dispatcher.dispatch(tool_call)
+    tool_result = _dispatch_runtime_tool_call(
+        tool_registry=tool_registry,
+        tool_call=tool_call,
+    )
+    _finalize_runtime_tool_call(
+        session_manager=session_manager,
+        session_id=session_id,
+        tracer=tracer,
+        tool_call=tool_call,
+        tool_result=tool_result,
+        tool_duration_ms=elapsed_ms(tool_started_at),
+    )
+    return tool_result
+
+
+def _dispatch_runtime_tool_call(
+    *,
+    tool_registry: ToolRegistry,
+    tool_call: ToolCall,
+) -> ToolResult:
+    dispatcher = ToolDispatcher(tool_registry)
+    return dispatcher.dispatch(tool_call)
+
+
+def _finalize_runtime_tool_call(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tracer: Tracer,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    tool_duration_ms: int,
+) -> None:
+    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
+
     tracer.trace_tool_finished(
         session_id=session_id,
         tool_name=tool_result.tool_name,
         success=tool_result.success,
         output_length=len(tool_result.output_text),
         error=tool_result.error,
-        tool_duration_ms=elapsed_ms(tool_started_at),
+        tool_duration_ms=tool_duration_ms,
     )
     persist_tool_result(
         session_manager=session_manager,
@@ -462,7 +567,6 @@ def _execute_runtime_tool_call(
         result=tool_result,
         tool_call=tool_call,
     )
-    return tool_result
 
 
 def _build_model_failure_reply(error: ModelCallFailedError) -> str:
