@@ -146,6 +146,150 @@ def test_run_user_turn_stays_stable_across_repeated_turns_with_long_history(
         session_manager.close()
 
 
+def test_run_user_turn_stays_stable_across_repeated_turns_with_unicode_heavy_history(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    decomposed_cafe = "cafe\u0301"
+    reply_text = (
+        f"Réponse stable — café / {decomposed_cafe} / مرحبًا / こんにちは / 😀."
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            captured_messages.append(list(messages))
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=reply_text,
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        multilingual_fragments = (
+            ("café", "déjà vu"),
+            (decomposed_cafe, "mañana"),
+            ("مرحبًا", "أهلاً"),
+            ("こんにちは", "さようなら"),
+            ("😀", "🎉"),
+        )
+        for index in range(14):
+            left, right = multilingual_fragments[index % len(multilingual_fragments)]
+            session_manager.add_message(
+                MessageRole.USER,
+                f"Earlier question {index} — {left} / « {right} »",
+                session_id=session.id,
+            )
+            session_manager.add_message(
+                MessageRole.ASSISTANT,
+                f"Earlier answer {index} — {right} / {left}",
+                session_id=session.id,
+            )
+
+        first_prompt = (
+            f"Peux-tu résumer café / {decomposed_cafe} / مرحبًا / こんにちは / 😀 ?"
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        expected_first_history = session_manager.list_messages(session.id)[-20:]
+
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        second_prompt = (
+            f"Encore plus bref sur café / {decomposed_cafe} / مرحبًا / こんにちは / 😀."
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        expected_second_history = session_manager.list_messages(session.id)[-20:]
+
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert first_reply == reply_text
+        assert second_reply == reply_text
+        assert len(expected_first_history) == 20
+        assert len(expected_second_history) == 20
+
+        first_runtime_history = _non_system_message_pairs(captured_messages[0])
+        second_runtime_history = _non_system_message_pairs(captured_messages[1])
+
+        assert first_runtime_history == _chat_message_pairs(expected_first_history)
+        assert second_runtime_history == _chat_message_pairs(expected_second_history)
+        assert sum(1 for _, content in first_runtime_history if content == first_prompt) == 1
+        assert sum(1 for _, content in second_runtime_history if content == second_prompt) == 1
+        assert any(content == f"Earlier question 11 — {decomposed_cafe} / « mañana »" for _, content in first_runtime_history)
+
+        persisted_tail = session_manager.list_messages(session.id)[-4:]
+        assert [message.role for message in persisted_tail] == [
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+        ]
+        assert [message.content for message in persisted_tail] == [
+            first_prompt,
+            reply_text,
+            second_prompt,
+            reply_text,
+        ]
+    finally:
+        session_manager.close()
+
+
 def test_search_backed_follow_up_stays_grounded_in_a_longer_session(
     monkeypatch,
     tmp_path: Path,

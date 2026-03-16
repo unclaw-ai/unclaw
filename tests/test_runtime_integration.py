@@ -158,6 +158,119 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         session_manager.close()
 
 
+def test_run_user_turn_preserves_unicode_chat_content_across_runtime_and_persistence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured: dict[str, object] = {}
+    assistant_reply = "Bien sûr — café, « déjà vu », مرحبًا, こんにちは, and emoji 😄 stay intact."
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback, tools
+            captured["messages"] = list(messages)
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=assistant_reply,
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        earlier_user = "J’ai noté café, crème brûlée, naïveté et « déjà vu »."
+        earlier_assistant = "Mémo gardé : مرحبًا, こんにちは, and niño 😄."
+        user_input = "Peux-tu résumer café, « déjà vu », مرحبًا et こんにちは sans rien perdre ?"
+        session_manager.add_message(
+            MessageRole.USER,
+            earlier_user,
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            earlier_assistant,
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert reply == assistant_reply
+
+        provider_messages = captured["messages"]
+        assert isinstance(provider_messages, list)
+        non_system_pairs = [
+            (message.role, message.content)
+            for message in provider_messages
+            if isinstance(message, LLMMessage) and message.role is not LLMRole.SYSTEM
+        ]
+        assert non_system_pairs == [
+            (LLMRole.USER, earlier_user),
+            (LLMRole.ASSISTANT, earlier_assistant),
+            (LLMRole.USER, user_input),
+        ]
+
+        messages = session_manager.list_messages(session.id)
+        assert [message.role for message in messages] == [
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+        ]
+        assert [message.content for message in messages] == [
+            earlier_user,
+            earlier_assistant,
+            user_input,
+            assistant_reply,
+        ]
+    finally:
+        session_manager.close()
+
+
 def test_runtime_capability_summary_reports_available_and_missing_capabilities() -> None:
     registry = ToolRegistry()
     registry.register(
@@ -771,6 +884,137 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
             and "Search-backed answer contract:" in message.content
             for message in follow_up_messages
         )
+    finally:
+        session_manager.close()
+
+
+def test_run_search_command_preserves_unicode_grounding_and_sources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    _set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    query = "Qui est Zoë Faër ?"
+    final_reply = (
+        "Zoë Faër est une réalisatrice française basée à Montréal. "
+        "Elle a cofondé le studio Café Bleu ☕."
+    )
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=f"Search query: {query}\nSources fetched: 2 of 2 attempted\n",
+        payload={
+            "query": query,
+            "summary_points": [
+                "Zoë Faër est une réalisatrice française basée à Montréal.",
+                "Elle a cofondé le studio Café Bleu ☕.",
+            ],
+            "display_sources": [
+                {
+                    "title": "Le Monde Culture — portrait",
+                    "url": "https://example.com/le-monde-zoe-faer",
+                },
+                {
+                    "title": "東京レビュー — インタビュー",
+                    "url": "https://example.com/tokyo-review-zoe-faer",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Zoë Faër est une réalisatrice française basée à Montréal.",
+                    "score": 8.4,
+                    "support_count": 2,
+                    "source_titles": [
+                        "Le Monde Culture — portrait",
+                        "東京レビュー — インタビュー",
+                    ],
+                    "source_urls": [
+                        "https://example.com/le-monde-zoe-faer",
+                        "https://example.com/tokyo-review-zoe-faer",
+                    ],
+                },
+                {
+                    "text": "Elle a cofondé le studio Café Bleu ☕.",
+                    "score": 7.2,
+                    "support_count": 2,
+                    "source_titles": [
+                        "Le Monde Culture — portrait",
+                        "東京レビュー — インタビュー",
+                    ],
+                    "source_urls": [
+                        "https://example.com/le-monde-zoe-faer",
+                        "https://example.com/tokyo-review-zoe-faer",
+                    ],
+                },
+            ],
+        },
+    )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+    captured_messages: list[list[LLMMessage]] = []
+
+    FakeProvider = _build_search_agent_provider(
+        search_query=query,
+        final_reply=final_reply,
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        reply = run_search_command(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_call=ToolCall(
+                tool_name="search_web",
+                arguments={"query": query},
+            ),
+            tool_registry=tool_registry,
+        ).assistant_reply
+
+        assert reply == (
+            final_reply
+            + "\n\nSources:\n"
+            + "- Le Monde Culture — portrait: https://example.com/le-monde-zoe-faer\n"
+            + "- 東京レビュー — インタビュー: https://example.com/tokyo-review-zoe-faer"
+        )
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
+        assert "Search request: Qui est Zoë Faër ?" in stored_messages[1].content
+        assert "Zoë Faër est une réalisatrice française basée à Montréal." in stored_messages[1].content
+        assert "Elle a cofondé le studio Café Bleu ☕." in stored_messages[1].content
+        assert "Le Monde Culture — portrait: https://example.com/le-monde-zoe-faer" in stored_messages[1].content
+        assert "東京レビュー — インタビュー: https://example.com/tokyo-review-zoe-faer" in stored_messages[1].content
+        assert stored_messages[2].content == reply
+
+        assert len(captured_messages) == 2
+        tool_messages = [
+            message.content
+            for message in captured_messages[1]
+            if message.role is LLMRole.TOOL
+        ]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].startswith("UNTRUSTED TOOL OUTPUT:")
+        assert f"Search query: {query}" in tool_messages[0]
+        assert "Sources fetched: 2 of 2 attempted" in tool_messages[0]
     finally:
         session_manager.close()
 
