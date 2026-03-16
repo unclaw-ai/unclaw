@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
 
+from unclaw.async_utils import run_blocking
 from unclaw.tools.contracts import (
     SearchDisplaySourcePayload,
     SearchEvidencePayload,
@@ -186,6 +187,20 @@ def fetch_url_text(
     )
 
 
+async def fetch_url_text_async(
+    call: ToolCall,
+    *,
+    allow_private_networks: bool = False,
+) -> ToolResult:
+    """Expose the blocking URL fetch tool through an awaitable boundary."""
+
+    return await run_blocking(
+        fetch_url_text,
+        call,
+        allow_private_networks=allow_private_networks,
+    )
+
+
 def search_web(call: ToolCall) -> ToolResult:
     """Search the public web, iteratively fetch bounded sources, and summarize evidence."""
     tool_name = SEARCH_WEB_DEFINITION.name
@@ -329,6 +344,12 @@ def search_web(call: ToolCall) -> ToolResult:
     )
 
 
+async def search_web_async(call: ToolCall) -> ToolResult:
+    """Expose the blocking web-search tool through an awaitable boundary."""
+
+    return await run_blocking(search_web, call)
+
+
 # --- Argument validation helpers ---
 
 
@@ -386,6 +407,8 @@ __all__ = [
     "FETCH_URL_TEXT_DEFINITION",
     "SEARCH_WEB_DEFINITION",
     "fetch_url_text",
+    "fetch_url_text_async",
     "search_web",
+    "search_web_async",
     "register_web_tools",
 ]

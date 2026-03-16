@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from unclaw.async_utils import run_blocking
 from unclaw.errors import UnclawError
 
 if TYPE_CHECKING:
@@ -117,6 +118,45 @@ class BaseLLMProvider(ABC):
     @abstractmethod
     def is_available(self, *, timeout_seconds: float | None = None) -> bool:
         """Return whether the provider looks reachable."""
+
+    async def chat_async(
+        self,
+        profile: ResolvedModelProfile,
+        messages: Sequence[LLMMessage],
+        *,
+        timeout_seconds: float | None = None,
+        thinking_enabled: bool = False,
+        content_callback: LLMContentCallback | None = None,
+        tools: Sequence[ToolDefinition] | None = None,
+    ) -> LLMResponse:
+        """Expose the blocking chat call through an awaitable boundary.
+
+        The synchronous implementation stays the source of truth. The optional
+        streaming callback still runs from the worker thread because it is
+        invoked by the wrapped blocking call.
+        """
+
+        return await run_blocking(
+            self.chat,
+            profile,
+            messages,
+            timeout_seconds=timeout_seconds,
+            thinking_enabled=thinking_enabled,
+            content_callback=content_callback,
+            tools=tools,
+        )
+
+    async def is_available_async(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
+        """Expose the blocking availability check through an awaitable boundary."""
+
+        return await run_blocking(
+            self.is_available,
+            timeout_seconds=timeout_seconds,
+        )
 
     def validate_profile(self, profile: ResolvedModelProfile) -> None:
         """Ensure the resolved profile belongs to this provider."""

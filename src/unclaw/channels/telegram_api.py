@@ -8,6 +8,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from unclaw.async_utils import run_blocking
 from unclaw.errors import UnclawError
 from unclaw.local_secrets import sanitize_telegram_text
 
@@ -35,6 +36,11 @@ class TelegramApiClient:
             raise TelegramApiError("Telegram returned an invalid bot profile payload.")
         return result
 
+    async def get_me_async(self) -> dict[str, Any]:
+        """Expose the blocking getMe request through an awaitable boundary."""
+
+        return await run_blocking(self.get_me)
+
     def get_updates(
         self,
         *,
@@ -53,6 +59,20 @@ class TelegramApiClient:
             raise TelegramApiError("Telegram returned an invalid updates payload.")
         return [update for update in result if isinstance(update, dict)]
 
+    async def get_updates_async(
+        self,
+        *,
+        offset: int | None,
+        timeout_seconds: int,
+    ) -> list[dict[str, Any]]:
+        """Expose the blocking getUpdates request through an awaitable boundary."""
+
+        return await run_blocking(
+            self.get_updates,
+            offset=offset,
+            timeout_seconds=timeout_seconds,
+        )
+
     def send_message(self, *, chat_id: int, text: str) -> None:
         self._request(
             "sendMessage",
@@ -60,6 +80,15 @@ class TelegramApiClient:
                 "chat_id": chat_id,
                 "text": text,
             },
+        )
+
+    async def send_message_async(self, *, chat_id: int, text: str) -> None:
+        """Expose the blocking sendMessage request through an awaitable boundary."""
+
+        await run_blocking(
+            self.send_message,
+            chat_id=chat_id,
+            text=text,
         )
 
     def _request(self, method: str, payload: dict[str, Any]) -> Any:

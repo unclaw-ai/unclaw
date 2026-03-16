@@ -8,6 +8,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from unclaw.async_utils import run_blocking
 from unclaw.llm.base import (
     BaseLLMProvider,
     LLMContentCallback,
@@ -143,6 +144,18 @@ class OllamaProvider(BaseLLMProvider):
             model_names.append(model_name.strip())
 
         return tuple(model_names)
+
+    async def list_models_async(
+        self,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[str, ...]:
+        """Expose the blocking model listing through an awaitable boundary."""
+
+        return await run_blocking(
+            self.list_models,
+            timeout_seconds=timeout_seconds,
+        )
 
     def _stream_chat(
         self,
