@@ -410,6 +410,146 @@ def test_chat_handles_malformed_tool_calls_gracefully(monkeypatch) -> None:
     assert response.tool_calls[0].tool_name == "valid_tool"
 
 
+def test_chat_streaming_preserves_tool_calls_in_response(monkeypatch) -> None:
+    """When Ollama streams tool_calls in chunks, _stream_chat must preserve
+    them in the returned LLMResponse so the runtime agent loop can see them."""
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _FakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:00Z",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "search_web",
+                                    "arguments": {"query": "python tutorial"},
+                                }
+                            }
+                        ],
+                    },
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:01Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    streamed_chunks: list[str] = []
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="search for python")],
+        content_callback=streamed_chunks.append,
+    )
+
+    assert response.tool_calls is not None
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0] == ToolCall(
+        tool_name="search_web", arguments={"query": "python tutorial"}
+    )
+    # raw_payload must include a "message" key with tool_calls for _extract_raw_tool_calls.
+    assert "message" in response.raw_payload
+    assert isinstance(response.raw_payload["message"]["tool_calls"], list)
+
+
+def test_chat_streaming_mixed_content_and_tool_calls(monkeypatch) -> None:
+    """Streaming with both text content and tool_calls preserves both."""
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _FakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:00Z",
+                    "message": {"content": "Let me "},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:01Z",
+                    "message": {"content": "search."},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:02Z",
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "search_web",
+                                    "arguments": {"query": "latest news"},
+                                }
+                            }
+                        ],
+                    },
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:03Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    streamed_chunks: list[str] = []
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="search for news")],
+        content_callback=streamed_chunks.append,
+    )
+
+    assert response.content == "Let me search."
+    assert streamed_chunks == ["Let me ", "search."]
+    assert response.tool_calls is not None
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].tool_name == "search_web"
+
+
+def test_chat_streaming_no_tool_calls_returns_none(monkeypatch) -> None:
+    """Streaming plain text without tool_calls returns tool_calls=None."""
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _FakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:00Z",
+                    "message": {"content": "Just text"},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-16T10:00:01Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    streamed_chunks: list[str] = []
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+        content_callback=streamed_chunks.append,
+    )
+
+    assert response.tool_calls is None
+    assert response.content == "Just text"
+    assert "message" not in response.raw_payload
+
+
 @pytest.mark.parametrize("streaming", [False, True])
 def test_chat_surfaces_explicit_connection_errors(monkeypatch, streaming) -> None:
     def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]

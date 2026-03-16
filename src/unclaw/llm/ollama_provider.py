@@ -179,6 +179,7 @@ class OllamaProvider(BaseLLMProvider):
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         streamed_chunks: list[dict[str, Any]] = []
+        raw_tool_calls: list[dict[str, Any]] = []
         sanitizer = _ThinkTagLeakSanitizer()
 
         for chunk_payload in self._request_stream_json(
@@ -220,6 +221,10 @@ class OllamaProvider(BaseLLMProvider):
             if reasoning_delta is not None:
                 reasoning_parts.append(reasoning_delta)
 
+            chunk_tool_calls = message.get("tool_calls")
+            if isinstance(chunk_tool_calls, list):
+                raw_tool_calls.extend(chunk_tool_calls)
+
         if not streamed_chunks:
             raise LLMResponseError("Ollama streaming chat returned no chunks.")
 
@@ -229,14 +234,29 @@ class OllamaProvider(BaseLLMProvider):
             content_callback(final_delta)
 
         reasoning = "".join(reasoning_parts)
+        content = "".join(content_parts)
+
+        # Parse accumulated tool_calls using the same logic as non-streaming.
+        tool_calls = _extract_tool_calls(
+            {"message": {"tool_calls": raw_tool_calls}}
+        ) if raw_tool_calls else None
+
+        # Build raw_payload with a synthetic "message" entry so that
+        # _extract_raw_tool_calls() in the runtime agent loop can find
+        # the native tool_calls payload for re-sending.
+        raw_payload: dict[str, Any] = {"stream_chunks": streamed_chunks}
+        if raw_tool_calls:
+            raw_payload["message"] = {"tool_calls": raw_tool_calls}
+
         return LLMResponse(
             provider=self.provider_name,
             model_name=model_name,
-            content="".join(content_parts),
+            content=content,
             created_at=created_at,
             finish_reason=finish_reason,
             reasoning=reasoning if reasoning.strip() else None,
-            raw_payload={"stream_chunks": streamed_chunks},
+            tool_calls=tool_calls,
+            raw_payload=raw_payload,
         )
 
     def _request_json(

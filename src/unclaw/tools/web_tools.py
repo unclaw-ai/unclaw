@@ -76,9 +76,9 @@ SEARCH_WEB_DEFINITION = ToolDefinition(
     ),
     permission_level=ToolPermissionLevel.NETWORK,
     arguments={
-        "query": "Plain-language search query.",
-        "max_results": "Optional maximum number of initial search results to consider, between 1 and 20.",
-        "timeout_seconds": "Optional request timeout in seconds.",
+        "query": "string",
+        "max_results": "int",
+        "timeout_seconds": "int",
     },
 )
 

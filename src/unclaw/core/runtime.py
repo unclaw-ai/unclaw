@@ -132,6 +132,7 @@ def run_user_turn(
                 user_input=user_input,
                 route=route,
                 assistant_reply_transform=assistant_reply_transform,
+                search_results_ready=tool_definitions is None,
             )
             system_context_notes = (*system_context_notes, *route_context_notes)
 
@@ -258,6 +259,7 @@ def _prepare_web_search_route(
     user_input: str,
     route: Any,
     assistant_reply_transform: Callable[[str], str] | None,
+    search_results_ready: bool,
 ) -> tuple[tuple[str, ...], Callable[[str], str] | None, ToolCall | None]:
     from unclaw.core.research_flow import (
         apply_search_grounding_from_history,
@@ -272,7 +274,7 @@ def _prepare_web_search_route(
     system_context_notes = (
         build_web_search_route_note(
             query=search_query,
-            search_results_ready=True,
+            search_results_ready=search_results_ready,
         ),
     )
 
@@ -284,13 +286,17 @@ def _prepare_web_search_route(
             session_id=session_id,
         )
 
+    explicit_search_call: ToolCall | None = None
+    if search_results_ready:
+        explicit_search_call = ToolCall(
+            tool_name="search_web",
+            arguments={"query": search_query},
+        )
+
     return (
         system_context_notes,
         _compose_reply_transforms(_grounding_transform, assistant_reply_transform),
-        ToolCall(
-            tool_name="search_web",
-            arguments={"query": search_query},
-        ),
+        explicit_search_call,
     )
 
 

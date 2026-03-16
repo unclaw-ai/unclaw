@@ -3,9 +3,63 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
+
+
+def _coerce_argument(value: Any, expected_type: str) -> Any:
+    """Coerce simple primitive argument types emitted by LLMs.
+
+    LLMs frequently emit numbers as strings ("5" instead of 5).
+    This function converts safe primitive types before tool execution.
+    """
+
+    if expected_type == "int":
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except ValueError:
+                pass
+
+    if expected_type == "float":
+        if isinstance(value, float):
+            return value
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                pass
+
+    if expected_type == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.lower()
+            if lowered in ("true", "1"):
+                return True
+            if lowered in ("false", "0"):
+                return False
+
+    # default: return unchanged
+    return value
+
+
+def _coerce_arguments(arguments: dict[str, Any], schema: dict[str, str]) -> dict[str, Any]:
+    """Apply type coercion based on tool argument schema."""
+    coerced: dict[str, Any] = {}
+
+    for name, value in arguments.items():
+        expected_type = schema.get(name)
+        if expected_type:
+            coerced[name] = _coerce_argument(value, expected_type)
+        else:
+            coerced[name] = value
+
+    return coerced
 
 
 @dataclass(slots=True)
@@ -22,13 +76,36 @@ class ToolDispatcher:
                 error=f"Unknown tool '{call.tool_name}'.",
             )
 
+        # -----------------------------
+        # Type coercion layer
+        # -----------------------------
+        try:
+            schema = dict(registered_tool.definition.arguments)
+            coerced_arguments = _coerce_arguments(call.arguments, schema)
+
+            call = ToolCall(
+                tool_name=call.tool_name,
+                arguments=coerced_arguments,
+            )
+
+        except Exception as exc:
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error=f"Failed to process tool arguments: {exc}",
+            )
+
+        # -----------------------------
+        # Tool execution
+        # -----------------------------
         try:
             result = registered_tool.handler(call)
+
         except (ValueError, OSError) as exc:
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Tool '{call.tool_name}' failed: {exc}",
             )
+
         except Exception as exc:  # Defensive boundary for unexpected tool crashes.
             return ToolResult.failure(
                 tool_name=call.tool_name,
