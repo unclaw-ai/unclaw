@@ -24,7 +24,7 @@ from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMRespons
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
-from unclaw.tools.contracts import ToolDefinition
+from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 
 if TYPE_CHECKING:
@@ -46,6 +46,7 @@ def run_user_turn(
     event_bus: EventBus | None = None,
     stream_output_func: LLMContentCallback | None = None,
     tool_registry: ToolRegistry | None = None,
+    explicit_tool_call: ToolCall | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
     max_agent_steps: int = _MAX_AGENT_STEPS_DEFAULT,
 ) -> str:
@@ -104,6 +105,15 @@ def run_user_turn(
             route_kind=route.kind.value,
             model_profile_name=route.model_profile_name,
         )
+
+        if explicit_tool_call is not None and tool_definitions is None:
+            _execute_runtime_tool_call(
+                session_manager=session_manager,
+                session_id=session.id,
+                tracer=active_tracer,
+                tool_registry=active_tool_registry,
+                tool_call=explicit_tool_call,
+            )
 
         orchestrator = Orchestrator(
             settings=session_manager.settings,
@@ -203,10 +213,7 @@ def _run_agent_loop(
     max_steps: int,
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
-    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
-
     context_messages: list[LLMMessage] = list(first_response.context_messages)
-    dispatcher = ToolDispatcher(tool_registry)
     current_response = first_response
 
     for _step in range(max_steps):
@@ -225,25 +232,11 @@ def _run_agent_loop(
 
         # Execute each tool call through the existing dispatcher.
         for tool_call in tool_calls:
-            tool_started_at = perf_counter()
-            tracer.trace_tool_started(
-                session_id=session_id,
-                tool_name=tool_call.tool_name,
-                arguments=tool_call.arguments,
-            )
-            tool_result = dispatcher.dispatch(tool_call)
-            tracer.trace_tool_finished(
-                session_id=session_id,
-                tool_name=tool_result.tool_name,
-                success=tool_result.success,
-                output_length=len(tool_result.output_text),
-                error=tool_result.error,
-                tool_duration_ms=_elapsed_ms(tool_started_at),
-            )
-            persist_tool_result(
+            tool_result = _execute_runtime_tool_call(
                 session_manager=session_manager,
                 session_id=session_id,
-                result=tool_result,
+                tracer=tracer,
+                tool_registry=tool_registry,
                 tool_call=tool_call,
             )
             context_messages.append(
@@ -317,6 +310,42 @@ def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...]
     if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
         return None
     return tuple(raw_tool_calls)
+
+
+def _execute_runtime_tool_call(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    tool_call: ToolCall,
+) -> ToolResult:
+    """Execute one runtime-level tool call with shared tracing and persistence."""
+    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
+
+    dispatcher = ToolDispatcher(tool_registry)
+    tool_started_at = perf_counter()
+    tracer.trace_tool_started(
+        session_id=session_id,
+        tool_name=tool_call.tool_name,
+        arguments=tool_call.arguments,
+    )
+    tool_result = dispatcher.dispatch(tool_call)
+    tracer.trace_tool_finished(
+        session_id=session_id,
+        tool_name=tool_result.tool_name,
+        success=tool_result.success,
+        output_length=len(tool_result.output_text),
+        error=tool_result.error,
+        tool_duration_ms=_elapsed_ms(tool_started_at),
+    )
+    persist_tool_result(
+        session_manager=session_manager,
+        session_id=session_id,
+        result=tool_result,
+        tool_call=tool_call,
+    )
+    return tool_result
 
 
 def _elapsed_ms(started_at: float) -> int:

@@ -13,7 +13,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.local_secrets import mask_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
-from unclaw.llm.base import LLMResponse
+from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
@@ -756,6 +756,173 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
         assert "Grounding rules:" in messages[1].content
         assert "Supported facts:" in messages[1].content
         assert "Search query:" not in messages[1].content
+        assert "Evidence kept:" not in messages[1].content
+        assert messages[2].content == api_client.sent_messages[0][1]
+    finally:
+        session_manager.close()
+
+
+def test_telegram_search_non_native_uses_runtime_tool_path_without_channel_preexecution(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    api_client = FakeApiClient()
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+
+    try:
+        session = session_manager.create_session(title="Telegram chat 42")
+        command_handler = telegram_bot.CommandHandler(
+            settings=settings,
+            session_manager=session_manager,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            allow_exit=False,
+        )
+
+        search_tool_result = ToolResult.ok(
+            tool_name="search_web",
+            output_text=(
+                "Search query: latest news about Ollama\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": "latest news about Ollama",
+                "summary_points": [
+                    "Ollama shipped a new update with improved search grounding."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Ollama Blog",
+                        "url": "https://ollama.com/blog/search-update",
+                    },
+                    {
+                        "title": "Release Notes",
+                        "url": "https://example.com/releases/ollama-search",
+                    },
+                ],
+            },
+        )
+        search_registry = ToolRegistry()
+        search_registry.register(SEARCH_WEB_DEFINITION, lambda _call: search_tool_result)
+        captured_messages: list[list[object]] = []
+
+        class FakeOllamaProvider:
+            provider_name = "ollama"
+
+            def __init__(
+                self,
+                *,
+                base_url: str = "http://127.0.0.1:11434",
+                default_timeout_seconds: float = 60.0,
+            ) -> None:
+                del base_url, default_timeout_seconds
+
+            def chat(  # type: ignore[no-untyped-def]
+                self,
+                profile,
+                messages,
+                *,
+                timeout_seconds=None,
+                thinking_enabled=False,
+                content_callback=None,
+                tools=None,
+            ):
+                del profile, timeout_seconds, thinking_enabled, content_callback
+                assert tools is None
+                captured_messages.append(list(messages))
+                assert any(
+                    message.role is LLMRole.TOOL
+                    and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
+                    for message in messages
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="Ollama shipped a new update with improved search grounding.",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                )
+
+        monkeypatch.setattr(
+            "unclaw.core.orchestrator.OllamaProvider",
+            FakeOllamaProvider,
+        )
+
+        def unexpected_execute(_tool_call):
+            raise AssertionError(
+                "Telegram channel should not pre-execute /search via ToolExecutor.execute()."
+            )
+
+        channel = telegram_bot.TelegramBotChannel(
+            settings=settings,
+            config=telegram_bot.TelegramConfig(
+                bot_token_env_var="TELEGRAM_BOT_TOKEN",
+                polling_timeout_seconds=30,
+                allowed_chat_ids=frozenset({42}),
+            ),
+            session_manager=session_manager,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=unexpected_execute,
+                registry=search_registry,
+            ),
+            api_client=api_client,
+            session_store=SimpleNamespace(bind_chat=lambda **kwargs: None),
+        )
+
+        monkeypatch.setattr(
+            telegram_bot.TelegramBotChannel,
+            "_activate_chat_session",
+            lambda self, chat_id: session_manager.load_session(session.id),
+        )
+        monkeypatch.setattr(
+            telegram_bot.TelegramBotChannel,
+            "_get_command_handler",
+            lambda self, chat_id: command_handler,
+        )
+
+        channel._handle_update(
+            {
+                "message": {
+                    "chat": {"id": 42},
+                    "date": 100,
+                    "text": "/search latest news about Ollama",
+                }
+            }
+        )
+
+        assert api_client.sent_messages == [
+            (
+                42,
+                "Ollama shipped a new update with improved search grounding.\n\n"
+                "Sources:\n"
+                "- Ollama Blog: https://ollama.com/blog/search-update\n"
+                "- Release Notes: https://example.com/releases/ollama-search",
+            )
+        ]
+        assert captured_messages
+
+        messages = session_manager.list_messages(session.id)
+        assert [message.role for message in messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
+        assert "Grounding rules:" in messages[1].content
+        assert "Supported facts:" in messages[1].content
         assert "Evidence kept:" not in messages[1].content
         assert messages[2].content == api_client.sent_messages[0][1]
     finally:

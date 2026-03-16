@@ -607,6 +607,176 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
         session_manager.close()
 
 
+def test_run_search_command_non_native_profile_executes_search_inside_runtime_and_keeps_follow_up_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=(
+            "Search query: latest news about Ollama\n"
+            "Sources fetched: 2 of 2 attempted\n"
+            "Evidence kept: 4\n"
+        ),
+        payload={
+            "query": "latest news about Ollama",
+            "summary_points": [
+                "Ollama shipped a new update with improved search grounding."
+            ],
+            "display_sources": [
+                {
+                    "title": "Ollama Blog",
+                    "url": "https://ollama.com/blog/search-update",
+                },
+                {
+                    "title": "Release Notes",
+                    "url": "https://example.com/releases/ollama-search",
+                },
+            ],
+        },
+    )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    captured_messages: list[list[LLMMessage]] = []
+    captured_tools: list[object | None] = []
+    reply_texts = iter(
+        [
+            "Ollama shipped a new update with improved search grounding.",
+            "Shorter recap.",
+        ]
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback
+            captured_tools.append(tools)
+            captured_messages.append(list(messages))
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=next(reply_texts),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        search_reply = run_search_command(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_call=ToolCall(
+                tool_name="search_web",
+                arguments={"query": "latest news about Ollama"},
+            ),
+            tool_registry=tool_registry,
+        ).assistant_reply
+
+        assert "Ollama shipped a new update with improved search grounding." in search_reply
+        assert "Sources:" in search_reply
+        assert "https://ollama.com/blog/search-update" in search_reply
+        assert "https://example.com/releases/ollama-search" in search_reply
+        assert captured_tools == [None]
+        assert any(
+            message.role is LLMRole.SYSTEM
+            and "Search-backed answer contract:" in message.content
+            for message in captured_messages[0]
+        )
+        assert any(
+            message.role is LLMRole.TOOL
+            and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
+            for message in captured_messages[0]
+        )
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
+        assert "Grounding rules:" in stored_messages[1].content
+        assert "Supported facts:" in stored_messages[1].content
+        assert "Evidence kept:" not in stored_messages[1].content
+
+        first_turn_event_types = [event.event_type for event in published_events]
+        assert first_turn_event_types == [
+            "runtime.started",
+            "route.selected",
+            "tool.started",
+            "tool.finished",
+            "model.called",
+            "model.succeeded",
+            "assistant.reply.persisted",
+        ]
+
+        session_manager.add_message(
+            MessageRole.USER,
+            "Summarize that more briefly.",
+            session_id=session.id,
+        )
+
+        follow_up_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Summarize that more briefly.",
+            tracer=tracer,
+        )
+
+        assert follow_up_reply == "Shorter recap."
+        assert captured_tools == [None, None]
+        assert any(
+            message.role is LLMRole.TOOL
+            and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
+            for message in captured_messages[-1]
+        )
+        assert any(
+            message.role is LLMRole.SYSTEM
+            and "Search-backed answer contract:" in message.content
+            for message in captured_messages[-1]
+        )
+    finally:
+        session_manager.close()
+
+
 def test_run_search_command_removes_stale_relative_dates_from_search_backed_replies(
     monkeypatch,
     tmp_path: Path,

@@ -98,12 +98,9 @@ def run_search_command(
     """Route /search through the shared runtime path without pre-executing.
 
     The search query is shaped into a user-intent request and fed into
-    ``run_user_turn()``.  If the active model supports native tool calling,
-    the agent loop will execute ``search_web`` autonomously and the grounding
-    transform will apply post-processing from the tool result in session
-    history.  For models without native tool calling (e.g. json_plan), the
-    model answers from its own knowledge — this is an honest temporary
-    limitation until those profiles are upgraded.
+    ``run_user_turn()``. For profiles without native tool calling, the runtime
+    executes the explicit ``search_web`` request itself before the shared model
+    answer step. Native tool-calling profiles keep the common agent loop path.
     """
     query = _read_tool_call_query(tool_call)
     session = session_manager.ensure_current_session()
@@ -132,6 +129,7 @@ def run_search_command(
         tracer=tracer,
         tool_registry=tool_registry,
         stream_output_func=stream_output_func,
+        explicit_tool_call=tool_call,
         assistant_reply_transform=_grounding_transform,
     )
     return ResearchTurnResult(assistant_reply=assistant_reply)
@@ -278,14 +276,16 @@ def _read_tool_call_query(tool_call: ToolCall) -> str:
 def _build_search_user_request(query: str) -> str:
     """Shape a raw search query into an explicit user-intent request.
 
-    The shaped request tells the model that the user explicitly asked for a
-    web search, so models with native tool calling will invoke ``search_web``
-    through the agent loop.
+    The shaped request works for both runtime-executed explicit searches and
+    native tool-calling profiles. When search output is already present in the
+    conversation, the model should answer from that grounded context instead of
+    pretending it still needs to search.
     """
     return (
-        f"Search the web for: {query}\n\n"
-        "Use the search_web tool to find relevant, up-to-date information "
-        "and provide a detailed, grounded answer with sources."
+        f"The user explicitly invoked /search for: {query}\n\n"
+        "If search results are not already present in this conversation, use "
+        "the search_web tool to find relevant, up-to-date information. Then "
+        "answer from the retrieved evidence and include compact sources."
     )
 
 
