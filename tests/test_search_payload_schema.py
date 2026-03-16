@@ -17,6 +17,7 @@ from unclaw.core.research_flow import (
 from unclaw.core.search_grounding import (
     build_search_grounding_context,
     build_search_tool_history_summary,
+    parse_search_tool_history,
     shape_search_backed_reply,
 )
 from unclaw.tools.contracts import (
@@ -140,6 +141,107 @@ def test_search_tool_history_summary_from_typed_payload() -> None:
     )
     assert len(lines) > 0
     assert any("test query" in line.lower() for line in lines)
+
+
+def test_search_tool_history_summary_round_trips_through_history_parser() -> None:
+    """Grounding history formatting remains parseable after refactors."""
+    payload = _build_minimal_payload()
+    payload["query"] = "who is Casey Hart"
+    payload["summary_points"] = [
+        "Casey Hart is a robotics engineer.",
+        "One profile lists the handle @caseyhart.",
+    ]
+    payload["display_sources"] = [
+        SearchDisplaySourcePayload(
+            title="Company Bio",
+            url="https://example.com/casey",
+        ),
+        SearchDisplaySourcePayload(
+            title="Community Profile",
+            url="https://example.com/casey-community",
+        ),
+    ]
+    payload["synthesized_findings"] = [
+        SearchFindingPayload(
+            text="Casey Hart is a robotics engineer.",
+            score=8.1,
+            support_count=2,
+            source_titles=["Company Bio", "Community Profile"],
+            source_urls=[
+                "https://example.com/casey",
+                "https://example.com/casey-community",
+            ],
+        ),
+        SearchFindingPayload(
+            text="One profile lists the handle @caseyhart.",
+            score=4.2,
+            support_count=1,
+            source_titles=["Community Profile"],
+            source_urls=["https://example.com/casey-community"],
+        ),
+    ]
+    payload["results"] = [
+        SearchResultSourcePayload(
+            title="Company Bio",
+            url="https://example.com/casey",
+            takeaway="Official biography.",
+            depth=0,
+            fetched=True,
+            evidence_count=1,
+            fetch_error=None,
+            used_snippet_fallback=False,
+            usefulness=8.5,
+        ),
+        SearchResultSourcePayload(
+            title="Community Profile",
+            url="https://example.com/casey-community",
+            takeaway="One community profile with a social handle mention.",
+            depth=0,
+            fetched=True,
+            evidence_count=1,
+            fetch_error=None,
+            used_snippet_fallback=False,
+            usefulness=4.0,
+        ),
+    ]
+    payload["evidence"] = [
+        SearchEvidencePayload(
+            text="Casey Hart was born on 1990-07-12.",
+            url="https://example.com/casey",
+            source_title="Company Bio",
+            score=7.2,
+            depth=0,
+            query_relevance=6.0,
+            evidence_quality=5.0,
+            novelty=1.0,
+            supporting_urls=["https://example.com/casey"],
+            supporting_titles=["Company Bio"],
+        ),
+    ]
+
+    lines = build_search_tool_history_summary(
+        payload=payload,
+        query="who is Casey Hart",
+        current_date=date(2026, 3, 15),
+    )
+    content = "\n".join(("Tool: search_web", "Outcome: success", "", *lines))
+
+    parsed = parse_search_tool_history(content)
+
+    assert parsed is not None
+    assert parsed.query == "who is Casey Hart"
+    assert parsed.current_date == date(2026, 3, 15)
+    assert parsed.birth_date == date(1990, 7, 12)
+    assert tuple(finding.text for finding in parsed.supported_findings) == (
+        "Casey Hart is a robotics engineer.",
+    )
+    assert tuple(finding.text for finding in parsed.uncertain_findings) == (
+        "One profile lists the handle @caseyhart.",
+    )
+    assert parsed.display_sources == (
+        ("Company Bio", "https://example.com/casey"),
+        ("Community Profile", "https://example.com/casey-community"),
+    )
 
 
 def test_shape_search_backed_reply_from_typed_payload() -> None:

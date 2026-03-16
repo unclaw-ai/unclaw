@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import re
 import unicodedata
@@ -118,6 +118,26 @@ class SearchGroundingContext:
     birth_date: date | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ParsedSearchPayload:
+    query: str
+    raw_findings: tuple[SearchGroundingFinding, ...]
+    display_sources: tuple[tuple[str, str], ...]
+    source_quality_by_url: Mapping[str, float]
+    birth_date: date | None
+
+
+@dataclass(slots=True)
+class _SearchToolHistoryState:
+    current_date: date
+    query: str = ""
+    supported_findings: list[SearchGroundingFinding] = field(default_factory=list)
+    uncertain_findings: list[SearchGroundingFinding] = field(default_factory=list)
+    display_sources: list[tuple[str, str]] = field(default_factory=list)
+    birth_date: date | None = None
+    section: str = ""
+
+
 def build_search_answer_contract(*, current_date: date | None = None) -> str:
     """Build the system note for grounded search-backed answering."""
     resolved_date = current_date or date.today()
@@ -171,37 +191,26 @@ def build_search_grounding_context(
     if not isinstance(payload, Mapping):
         return None
 
-    resolved_query = _read_query(payload, fallback=query)
-    source_quality_by_url = _build_source_quality_index(payload)
-    raw_findings = _read_findings(payload)
-    if not raw_findings and not resolved_query and not _read_display_sources(payload):
+    parsed_payload = _parse_search_payload(payload, fallback_query=query)
+    if parsed_payload is None:
         return None
 
-    birth_date = _extract_birth_date(payload)
-    normalized_findings = tuple(
-        _classify_finding(
-            raw_finding,
-            source_quality_by_url=source_quality_by_url,
-            birth_date=birth_date,
-        )
-        for raw_finding in raw_findings
+    normalized_findings = _classify_findings(
+        parsed_payload.raw_findings,
+        source_quality_by_url=parsed_payload.source_quality_by_url,
+        birth_date=parsed_payload.birth_date,
     )
-    supported_findings = tuple(
-        finding
-        for finding in normalized_findings
-        if finding.confidence in {"strong", "supported"}
-    )
-    uncertain_findings = tuple(
-        finding for finding in normalized_findings if finding.confidence == "uncertain"
+    supported_findings, uncertain_findings = _partition_findings_by_confidence(
+        normalized_findings
     )
 
     return SearchGroundingContext(
-        query=resolved_query,
+        query=parsed_payload.query,
         current_date=current_date or date.today(),
         supported_findings=supported_findings,
         uncertain_findings=uncertain_findings,
-        display_sources=_read_display_sources(payload),
-        birth_date=birth_date,
+        display_sources=parsed_payload.display_sources,
+        birth_date=parsed_payload.birth_date,
     )
 
 
@@ -220,53 +229,11 @@ def build_search_tool_history_summary(
     if grounding is None:
         return ()
 
-    lines: list[str] = []
-    if grounding.query:
-        lines.append(f"Search request: {grounding.query}")
-    lines.extend(
-        (
-            f"Grounding date: {grounding.current_date.isoformat()}",
-            "",
-            "Grounding rules:",
-            "- Treat Supported facts as the evidence-backed facts for this search.",
-            "- If a detail appears only under Uncertain details, it is not confirmed.",
-            (
-                "- Do not invent relative dates. Give age only if it can be computed "
-                "from a retrieved birth date and the grounding date above."
-            ),
-            "",
-            "Supported facts:",
-        )
-    )
-
-    if grounding.supported_findings:
-        for finding in grounding.supported_findings[:_MAX_COMPOSED_FACTS + 2]:
-            lines.append(
-                f"- [{finding.confidence}; {finding.support_count} source"
-                f"{'' if finding.support_count == 1 else 's'}] {finding.text}"
-            )
-    else:
-        lines.append("- No firm details were confirmed across the retrieved sources.")
-
-    if grounding.uncertain_findings:
-        lines.extend(("", "Uncertain details:"))
-        for finding in grounding.uncertain_findings[:3]:
-            lines.append(
-                f"- [uncertain; {finding.support_count} source"
-                f"{'' if finding.support_count == 1 else 's'}] {finding.text}"
-            )
-
-    if grounding.birth_date is not None:
-        lines.extend(("", f"Retrieved birth date: {grounding.birth_date.isoformat()}"))
-
-    if grounding.display_sources:
-        lines.extend(("", "Sources:"))
-        for title, url in grounding.display_sources:
-            if title:
-                lines.append(f"- {title}: {url}")
-            else:
-                lines.append(f"- {url}")
-
+    lines = _build_tool_history_header_lines(grounding)
+    lines.extend(_build_supported_history_lines(grounding))
+    lines.extend(_build_uncertain_history_lines(grounding))
+    lines.extend(_build_birth_date_history_lines(grounding))
+    lines.extend(_build_source_history_lines(grounding))
     return tuple(lines)
 
 
@@ -308,75 +275,17 @@ def parse_search_tool_history(content: str) -> SearchGroundingContext | None:
     if not content.startswith(_SEARCH_TOOL_PREFIX):
         return None
 
-    query = ""
-    current_date_value = date.today()
-    supported_findings: list[SearchGroundingFinding] = []
-    uncertain_findings: list[SearchGroundingFinding] = []
-    display_sources: list[tuple[str, str]] = []
-    birth_date: date | None = None
-    section = ""
-
+    state = _SearchToolHistoryState(current_date=date.today())
     for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("Search request:"):
-            query = stripped.partition(":")[2].strip()
-            continue
-        if stripped.startswith("Grounding date:"):
-            parsed_date = _parse_iso_date(stripped.partition(":")[2].strip())
-            if parsed_date is not None:
-                current_date_value = parsed_date
-            continue
-        if stripped.startswith("Retrieved birth date:"):
-            birth_date = _parse_iso_date(stripped.partition(":")[2].strip())
-            continue
-        if stripped == "Supported facts:":
-            section = "supported"
-            continue
-        if stripped == "Uncertain details:":
-            section = "uncertain"
-            continue
-        if stripped == "Sources:":
-            section = "sources"
-            continue
-        if not stripped:
-            continue
-
-        if section in {"supported", "uncertain"}:
-            match = _FINDING_BULLET_PATTERN.match(stripped)
-            if match is None:
-                continue
-            finding = SearchGroundingFinding(
-                text=match.group("text").strip(),
-                support_count=max(int(match.group("support")), 1),
-                score=0.0,
-                source_titles=(),
-                source_urls=(),
-                confidence=match.group("label").casefold(),
-            )
-            if section == "supported":
-                supported_findings.append(finding)
-            else:
-                uncertain_findings.append(finding)
-            continue
-
-        if section == "sources":
-            source_match = _SOURCE_BULLET_PATTERN.match(stripped)
-            if source_match is None:
-                continue
-            display_sources.append(
-                (
-                    source_match.group("title").strip(),
-                    source_match.group("url").strip(),
-                )
-            )
+        _parse_search_tool_history_line(line.strip(), state)
 
     return SearchGroundingContext(
-        query=query,
-        current_date=current_date_value,
-        supported_findings=tuple(supported_findings),
-        uncertain_findings=tuple(uncertain_findings),
-        display_sources=tuple(display_sources),
-        birth_date=birth_date,
+        query=state.query,
+        current_date=state.current_date,
+        supported_findings=tuple(state.supported_findings),
+        uncertain_findings=tuple(state.uncertain_findings),
+        display_sources=tuple(state.display_sources),
+        birth_date=state.birth_date,
     )
 
 
@@ -413,6 +322,26 @@ def _read_query(payload: Mapping[str, Any], *, fallback: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return fallback.strip()
+
+
+def _parse_search_payload(
+    payload: Mapping[str, Any],
+    *,
+    fallback_query: str,
+) -> _ParsedSearchPayload | None:
+    resolved_query = _read_query(payload, fallback=fallback_query)
+    raw_findings = _read_findings(payload)
+    display_sources = _read_display_sources(payload)
+    if not raw_findings and not resolved_query and not display_sources:
+        return None
+
+    return _ParsedSearchPayload(
+        query=resolved_query,
+        raw_findings=raw_findings,
+        display_sources=display_sources,
+        source_quality_by_url=_build_source_quality_index(payload),
+        birth_date=_extract_birth_date(payload, findings=raw_findings),
+    )
 
 
 def _read_findings(payload: Mapping[str, Any]) -> tuple[SearchGroundingFinding, ...]:
@@ -459,6 +388,36 @@ def _read_findings(payload: Mapping[str, Any]) -> tuple[SearchGroundingFinding, 
         if isinstance(item, str) and item.strip()
     ]
     return tuple(fallback_findings)
+
+
+def _classify_findings(
+    findings: Sequence[SearchGroundingFinding],
+    *,
+    source_quality_by_url: Mapping[str, float],
+    birth_date: date | None,
+) -> tuple[SearchGroundingFinding, ...]:
+    return tuple(
+        _classify_finding(
+            finding,
+            source_quality_by_url=source_quality_by_url,
+            birth_date=birth_date,
+        )
+        for finding in findings
+    )
+
+
+def _partition_findings_by_confidence(
+    findings: Sequence[SearchGroundingFinding],
+) -> tuple[tuple[SearchGroundingFinding, ...], tuple[SearchGroundingFinding, ...]]:
+    supported_findings = tuple(
+        finding
+        for finding in findings
+        if finding.confidence in {"strong", "supported"}
+    )
+    uncertain_findings = tuple(
+        finding for finding in findings if finding.confidence == "uncertain"
+    )
+    return supported_findings, uncertain_findings
 
 
 def _read_string_tuple(value: Any) -> tuple[str, ...]:
@@ -568,11 +527,28 @@ def _finding_requires_extra_caution(text: str, *, birth_date: date | None) -> bo
     return False
 
 
-def _extract_birth_date(payload: Mapping[str, Any]) -> date | None:
-    candidate_texts: list[str] = []
-    for finding in _read_findings(payload):
-        candidate_texts.append(finding.text)
+def _extract_birth_date(
+    payload: Mapping[str, Any],
+    *,
+    findings: Sequence[SearchGroundingFinding] | None = None,
+) -> date | None:
+    candidate_texts = _collect_birth_date_candidate_texts(
+        payload,
+        findings=findings,
+    )
+    for text in candidate_texts:
+        parsed_date = _extract_birth_date_from_text(text)
+        if parsed_date is not None:
+            return parsed_date
+    return None
 
+
+def _collect_birth_date_candidate_texts(
+    payload: Mapping[str, Any],
+    *,
+    findings: Sequence[SearchGroundingFinding] | None = None,
+) -> tuple[str, ...]:
+    candidate_texts = [finding.text for finding in findings or _read_findings(payload)]
     raw_evidence = payload.get("evidence")
     if isinstance(raw_evidence, list):
         for entry in raw_evidence:
@@ -581,12 +557,7 @@ def _extract_birth_date(payload: Mapping[str, Any]) -> date | None:
             text = entry.get("text")
             if isinstance(text, str) and text.strip():
                 candidate_texts.append(text.strip())
-
-    for text in candidate_texts:
-        parsed_date = _extract_birth_date_from_text(text)
-        if parsed_date is not None:
-            return parsed_date
-    return None
+    return tuple(candidate_texts)
 
 
 def _extract_birth_date_from_text(text: str) -> date | None:
@@ -627,19 +598,16 @@ def _reply_needs_rewrite(
     grounding: SearchGroundingContext,
     query: str,
 ) -> bool:
-    if _STALE_AS_OF_PATTERN.search(reply_text):
-        return True
-    if _contains_unconfirmed_handle_claim(reply_text, grounding=grounding):
-        return True
-    if _contains_unsupported_age_claim(reply_text, grounding=grounding):
-        return True
-    if _contains_unqualified_uncertain_finding(reply_text, grounding=grounding):
-        return True
-    if _query_is_person_profile(query) and _contains_low_value_filler(reply_text):
-        return True
-    if _contains_unnecessary_hedging(reply_text):
-        return True
-    return False
+    return any(
+        (
+            _STALE_AS_OF_PATTERN.search(reply_text) is not None,
+            _contains_unconfirmed_handle_claim(reply_text, grounding=grounding),
+            _contains_unsupported_age_claim(reply_text, grounding=grounding),
+            _contains_unqualified_uncertain_finding(reply_text, grounding=grounding),
+            _query_is_person_profile(query) and _contains_low_value_filler(reply_text),
+            _contains_unnecessary_hedging(reply_text),
+        )
+    )
 
 
 def _contains_unconfirmed_handle_claim(
@@ -649,10 +617,7 @@ def _contains_unconfirmed_handle_claim(
 ) -> bool:
     if not (_HANDLE_HINT_PATTERN.search(reply_text) or _HANDLE_TERM_PATTERN.search(reply_text)):
         return False
-    strong_text = " ".join(finding.text for finding in grounding.supported_findings)
-    return not (
-        _HANDLE_HINT_PATTERN.search(strong_text) or _HANDLE_TERM_PATTERN.search(strong_text)
-    )
+    return not _supported_findings_include_handle_details(grounding.supported_findings)
 
 
 def _contains_unsupported_age_claim(
@@ -730,21 +695,15 @@ def _compose_grounded_answer(
             return age_answer
 
     supported_facts = _select_supported_facts(grounding)
-    if not supported_facts and grounding.uncertain_findings:
-        return _compose_uncertain_only_answer(grounding)
-    if not supported_facts:
-        return "I couldn't confirm any strong details from the retrieved sources."
-
-    if _query_is_person_profile(query):
-        return _compose_person_answer(
+    if supported_facts:
+        return _compose_supported_answer(
+            query=query,
             supported_facts=supported_facts,
             grounding=grounding,
         )
-
-    sentences = [fact.text.rstrip(".") + "." for fact in supported_facts[:_MAX_COMPOSED_FACTS]]
     if grounding.uncertain_findings:
-        sentences.append(_compose_uncertainty_note(grounding))
-    return " ".join(sentences).strip()
+        return _compose_uncertain_only_answer(grounding)
+    return "I couldn't confirm any strong details from the retrieved sources."
 
 
 def _compose_age_answer(grounding: SearchGroundingContext) -> str | None:
@@ -768,18 +727,14 @@ def _compose_person_answer(
     supported_facts: Sequence[SearchGroundingFinding],
     grounding: SearchGroundingContext,
 ) -> str:
-    selected_facts = list(supported_facts[:_MAX_COMPOSED_FACTS])
-    sentences = [fact.text.rstrip(".") + "." for fact in selected_facts]
-    if grounding.uncertain_findings:
-        sentences.append(_compose_uncertainty_note(grounding))
-    return " ".join(sentences).strip()
+    return _compose_fact_answer(
+        facts=supported_facts[:_MAX_COMPOSED_FACTS],
+        grounding=grounding,
+    )
 
 
 def _compose_uncertain_only_answer(grounding: SearchGroundingContext) -> str:
-    if any(
-        _HANDLE_HINT_PATTERN.search(finding.text) or _HANDLE_TERM_PATTERN.search(finding.text)
-        for finding in grounding.uncertain_findings
-    ):
+    if _findings_include_handle_details(grounding.uncertain_findings):
         return (
             "I found some biographical details, but I did not see consistent support "
             "for specific social handles or usernames."
@@ -791,10 +746,7 @@ def _compose_uncertain_only_answer(grounding: SearchGroundingContext) -> str:
 
 
 def _compose_uncertainty_note(grounding: SearchGroundingContext) -> str:
-    if any(
-        _HANDLE_HINT_PATTERN.search(finding.text) or _HANDLE_TERM_PATTERN.search(finding.text)
-        for finding in grounding.uncertain_findings
-    ):
+    if _findings_include_handle_details(grounding.uncertain_findings):
         return (
             "Some profile details, including possible social handles, were not "
             "consistently confirmed."
@@ -834,6 +786,221 @@ def _select_supported_facts(
             break
 
     return tuple(selected)
+
+
+def _build_tool_history_header_lines(
+    grounding: SearchGroundingContext,
+) -> list[str]:
+    lines: list[str] = []
+    if grounding.query:
+        lines.append(f"Search request: {grounding.query}")
+    lines.extend(
+        (
+            f"Grounding date: {grounding.current_date.isoformat()}",
+            "",
+            "Grounding rules:",
+            "- Treat Supported facts as the evidence-backed facts for this search.",
+            "- If a detail appears only under Uncertain details, it is not confirmed.",
+            (
+                "- Do not invent relative dates. Give age only if it can be computed "
+                "from a retrieved birth date and the grounding date above."
+            ),
+            "",
+            "Supported facts:",
+        )
+    )
+    return lines
+
+
+def _build_supported_history_lines(grounding: SearchGroundingContext) -> list[str]:
+    if not grounding.supported_findings:
+        return ["- No firm details were confirmed across the retrieved sources."]
+    return [
+        _format_history_finding_bullet(finding)
+        for finding in grounding.supported_findings[:_MAX_COMPOSED_FACTS + 2]
+    ]
+
+
+def _build_uncertain_history_lines(grounding: SearchGroundingContext) -> list[str]:
+    if not grounding.uncertain_findings:
+        return []
+    return [
+        "",
+        "Uncertain details:",
+        *(
+            _format_history_finding_bullet(finding, confidence="uncertain")
+            for finding in grounding.uncertain_findings[:3]
+        ),
+    ]
+
+
+def _build_birth_date_history_lines(grounding: SearchGroundingContext) -> list[str]:
+    if grounding.birth_date is None:
+        return []
+    return ["", f"Retrieved birth date: {grounding.birth_date.isoformat()}"]
+
+
+def _build_source_history_lines(grounding: SearchGroundingContext) -> list[str]:
+    if not grounding.display_sources:
+        return []
+    return [
+        "",
+        "Sources:",
+        *(_format_source_bullet(title, url) for title, url in grounding.display_sources),
+    ]
+
+
+def _format_history_finding_bullet(
+    finding: SearchGroundingFinding,
+    *,
+    confidence: str | None = None,
+) -> str:
+    resolved_confidence = confidence or finding.confidence
+    return (
+        f"- [{resolved_confidence}; {finding.support_count} source"
+        f"{'' if finding.support_count == 1 else 's'}] {finding.text}"
+    )
+
+
+def _format_source_bullet(title: str, url: str) -> str:
+    if title:
+        return f"- {title}: {url}"
+    return f"- {url}"
+
+
+def _parse_search_tool_history_line(
+    stripped: str,
+    state: _SearchToolHistoryState,
+) -> None:
+    if not stripped:
+        return
+    if _parse_search_tool_history_metadata(stripped, state):
+        return
+    if _parse_search_tool_history_section(stripped, state):
+        return
+    if state.section in {"supported", "uncertain"}:
+        finding = _parse_history_finding_line(stripped)
+        if finding is None:
+            return
+        if state.section == "supported":
+            state.supported_findings.append(finding)
+        else:
+            state.uncertain_findings.append(finding)
+        return
+    if state.section == "sources":
+        source = _parse_history_source_line(stripped)
+        if source is not None:
+            state.display_sources.append(source)
+
+
+def _parse_search_tool_history_metadata(
+    stripped: str,
+    state: _SearchToolHistoryState,
+) -> bool:
+    if stripped.startswith("Search request:"):
+        state.query = stripped.partition(":")[2].strip()
+        return True
+    if stripped.startswith("Grounding date:"):
+        parsed_date = _parse_iso_date(stripped.partition(":")[2].strip())
+        if parsed_date is not None:
+            state.current_date = parsed_date
+        return True
+    if stripped.startswith("Retrieved birth date:"):
+        state.birth_date = _parse_iso_date(stripped.partition(":")[2].strip())
+        return True
+    return False
+
+
+def _parse_search_tool_history_section(
+    stripped: str,
+    state: _SearchToolHistoryState,
+) -> bool:
+    if stripped == "Supported facts:":
+        state.section = "supported"
+        return True
+    if stripped == "Uncertain details:":
+        state.section = "uncertain"
+        return True
+    if stripped == "Sources:":
+        state.section = "sources"
+        return True
+    return False
+
+
+def _parse_history_finding_line(stripped: str) -> SearchGroundingFinding | None:
+    match = _FINDING_BULLET_PATTERN.match(stripped)
+    if match is None:
+        return None
+    return SearchGroundingFinding(
+        text=match.group("text").strip(),
+        support_count=max(int(match.group("support")), 1),
+        score=0.0,
+        source_titles=(),
+        source_urls=(),
+        confidence=match.group("label").casefold(),
+    )
+
+
+def _parse_history_source_line(stripped: str) -> tuple[str, str] | None:
+    source_match = _SOURCE_BULLET_PATTERN.match(stripped)
+    if source_match is None:
+        return None
+    return (
+        source_match.group("title").strip(),
+        source_match.group("url").strip(),
+    )
+
+
+def _supported_findings_include_handle_details(
+    findings: Sequence[SearchGroundingFinding],
+) -> bool:
+    return _text_contains_handle_details(" ".join(finding.text for finding in findings))
+
+
+def _findings_include_handle_details(
+    findings: Sequence[SearchGroundingFinding],
+) -> bool:
+    return any(_text_contains_handle_details(finding.text) for finding in findings)
+
+
+def _text_contains_handle_details(text: str) -> bool:
+    return bool(
+        _HANDLE_HINT_PATTERN.search(text) or _HANDLE_TERM_PATTERN.search(text)
+    )
+
+
+def _compose_supported_answer(
+    *,
+    query: str,
+    supported_facts: Sequence[SearchGroundingFinding],
+    grounding: SearchGroundingContext,
+) -> str:
+    if _query_is_person_profile(query):
+        return _compose_person_answer(
+            supported_facts=supported_facts,
+            grounding=grounding,
+        )
+    return _compose_fact_answer(
+        facts=supported_facts[:_MAX_COMPOSED_FACTS],
+        grounding=grounding,
+    )
+
+
+def _compose_fact_answer(
+    *,
+    facts: Sequence[SearchGroundingFinding],
+    grounding: SearchGroundingContext,
+) -> str:
+    sentences = _finding_sentences(facts)
+    if grounding.uncertain_findings:
+        sentences.append(_compose_uncertainty_note(grounding))
+    return " ".join(sentences).strip()
+
+
+def _finding_sentences(
+    findings: Sequence[SearchGroundingFinding],
+) -> list[str]:
+    return [finding.text.rstrip(".") + "." for finding in findings]
 
 
 def _looks_like_identity_fact(text: str) -> bool:
