@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -66,6 +68,7 @@ from unclaw.startup import build_banner, build_startup_report, format_startup_re
 LOGGER = logging.getLogger(__name__)
 _POLL_RETRY_DELAY_SECONDS = 3.0
 _MAX_PENDING_MESSAGES_PER_CHAT = 2
+_PENDING_UPDATE_WAIT_INTERVAL_SECONDS = 0.01
 
 # Backward-compatible aliases for names that moved to focused Telegram modules.
 # These are referenced by tests and other modules via telegram_bot.<name>.
@@ -94,6 +97,41 @@ class TelegramChatRateLimitState:
 
 
 @dataclass(slots=True)
+class _TelegramChatWorker:
+    """Serialize one Telegram chat on its own background thread."""
+
+    chat_id: int
+    channel_factory: Callable[[], TelegramBotChannel]
+    _channel: TelegramBotChannel | None = field(default=None, init=False, repr=False)
+    _executor: ThreadPoolExecutor = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"telegram-chat-{self.chat_id}",
+        )
+
+    def submit_update(self, update: dict[str, Any]) -> Future[None]:
+        return self._executor.submit(self._run_update, update)
+
+    def close(self) -> None:
+        if self._channel is not None:
+            try:
+                self._executor.submit(self._channel.close).result()
+            except Exception:
+                LOGGER.exception(
+                    "Failed to close Telegram chat worker for chat=%s.",
+                    self.chat_id,
+                )
+        self._executor.shutdown(wait=True)
+
+    def _run_update(self, update: dict[str, Any]) -> None:
+        if self._channel is None:
+            self._channel = self.channel_factory()
+        self._channel._handle_update(update)
+
+
+@dataclass(slots=True)
 class TelegramBotChannel:
     """Bridge Telegram messages into the shared local runtime."""
 
@@ -105,12 +143,35 @@ class TelegramBotChannel:
     tool_executor: ToolExecutor
     api_client: TelegramApiClient
     session_store: TelegramChatSessionStore
+    event_bus: EventBus | None = None
+    session_manager_factory: type[SessionManager] | None = None
+    memory_manager_factory: Callable[..., SessionMemoryChannelInterface] | None = None
+    tracer_factory: Callable[..., Tracer] | None = None
+    tool_executor_factory: Any | None = None
+    session_store_factory: Callable[..., TelegramChatSessionStore] | None = None
     command_handlers: dict[int, CommandHandler] = field(default_factory=dict)
     rate_limit_states: dict[int, TelegramChatRateLimitState] = field(
         default_factory=dict
     )
+    chat_workers: dict[int, _TelegramChatWorker] = field(default_factory=dict)
     max_pending_messages_per_chat: int = _MAX_PENDING_MESSAGES_PER_CHAT
     clock: Callable[[], float] = time.time
+    owns_session_manager: bool = False
+    _chat_workers_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
+    _pending_update_futures: set[Future[None]] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
+    _pending_update_futures_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+    )
 
     def run(self) -> None:
         bot_profile = self.api_client.get_me()
@@ -130,6 +191,20 @@ class TelegramBotChannel:
             format_telegram_access_mode(self.config),
         )
 
+        if self._supports_isolated_chat_workers():
+            self._run_polling_loop_concurrent()
+            return
+
+        self._run_polling_loop_sync()
+
+    def close(self) -> None:
+        if self.chat_workers:
+            self._wait_for_pending_updates(timeout_seconds=None)
+            self._close_chat_workers()
+        if self.owns_session_manager:
+            self.session_manager.close()
+
+    def _run_polling_loop_sync(self) -> None:
         next_update_offset: int | None = None
         while True:
             try:
@@ -153,6 +228,176 @@ class TelegramBotChannel:
                     LOGGER.error("Telegram transport failed for one update: %s", exc)
                 except Exception:
                     LOGGER.exception("Unexpected Telegram update failure.")
+
+    def _run_polling_loop_concurrent(self) -> None:
+        next_update_offset: int | None = None
+        try:
+            while True:
+                try:
+                    updates = self.api_client.get_updates(
+                        offset=next_update_offset,
+                        timeout_seconds=self.config.polling_timeout_seconds,
+                    )
+                except TelegramApiError as exc:
+                    LOGGER.error("Telegram polling failed: %s", exc)
+                    time.sleep(_POLL_RETRY_DELAY_SECONDS)
+                    continue
+
+                for update in updates:
+                    update_id = update.get("update_id")
+                    if isinstance(update_id, int):
+                        next_update_offset = update_id + 1
+
+                    chat_id = self._read_update_chat_id(update)
+                    if chat_id is None or not self.config.is_chat_allowed(chat_id):
+                        try:
+                            self._handle_update(update)
+                        except TelegramApiError as exc:
+                            LOGGER.error(
+                                "Telegram transport failed for one update: %s",
+                                exc,
+                            )
+                        except Exception:
+                            LOGGER.exception("Unexpected Telegram update failure.")
+                        continue
+
+                    self._submit_update(chat_id=chat_id, update=update)
+        finally:
+            self._wait_for_pending_updates(timeout_seconds=None)
+            self._close_chat_workers()
+
+    def _read_update_chat_id(self, update: dict[str, Any]) -> int | None:
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return None
+
+        chat = message.get("chat")
+        if not isinstance(chat, dict):
+            return None
+
+        chat_id = chat.get("id")
+        return chat_id if isinstance(chat_id, int) else None
+
+    def _submit_update(self, *, chat_id: int, update: dict[str, Any]) -> None:
+        worker = self._get_or_create_chat_worker(chat_id)
+        future = worker.submit_update(update)
+        with self._pending_update_futures_lock:
+            self._pending_update_futures.add(future)
+        future.add_done_callback(
+            lambda completed, chat_id=chat_id: self._finalize_update_future(
+                chat_id=chat_id,
+                future=completed,
+            )
+        )
+
+    def _get_or_create_chat_worker(self, chat_id: int) -> _TelegramChatWorker:
+        with self._chat_workers_lock:
+            worker = self.chat_workers.get(chat_id)
+            if worker is not None:
+                return worker
+
+            worker = _TelegramChatWorker(
+                chat_id=chat_id,
+                channel_factory=lambda chat_id=chat_id: self._build_chat_worker_channel(
+                    chat_id
+                ),
+            )
+            self.chat_workers[chat_id] = worker
+            return worker
+
+    def _build_chat_worker_channel(self, chat_id: int) -> TelegramBotChannel:
+        del chat_id
+
+        if not self._supports_isolated_chat_workers():
+            return self
+
+        assert self.session_manager_factory is not None
+        assert self.memory_manager_factory is not None
+        assert self.tracer_factory is not None
+        assert self.tool_executor_factory is not None
+        assert self.session_store_factory is not None
+
+        session_manager = self.session_manager_factory.from_settings(self.settings)
+        memory_manager = self.memory_manager_factory(session_manager=session_manager)
+        tracer = self.tracer_factory(
+            event_bus=self.event_bus or EventBus(),
+            event_repository=session_manager.event_repository,
+            include_reasoning_text=self.tracer.include_reasoning_text,
+        )
+        tracer.runtime_log_path = self.tracer.runtime_log_path
+        tool_executor = self.tool_executor_factory.with_default_tools(self.settings)
+        session_store = self.session_store_factory(session_manager.connection)
+        session_store.initialize()
+
+        return TelegramBotChannel(
+            settings=self.settings,
+            config=self.config,
+            session_manager=session_manager,
+            memory_manager=memory_manager,
+            tracer=tracer,
+            tool_executor=tool_executor,
+            api_client=self.api_client,
+            session_store=session_store,
+            max_pending_messages_per_chat=self.max_pending_messages_per_chat,
+            clock=self.clock,
+            owns_session_manager=True,
+        )
+
+    def _supports_isolated_chat_workers(self) -> bool:
+        return all(
+            factory is not None
+            for factory in (
+                self.session_manager_factory,
+                self.memory_manager_factory,
+                self.tracer_factory,
+                self.tool_executor_factory,
+                self.session_store_factory,
+            )
+        )
+
+    def _finalize_update_future(
+        self,
+        *,
+        chat_id: int,
+        future: Future[None],
+    ) -> None:
+        try:
+            future.result()
+        except TelegramApiError as exc:
+            LOGGER.error("Telegram transport failed for chat=%s: %s", chat_id, exc)
+        except Exception:
+            LOGGER.exception(
+                "Unexpected Telegram update failure for chat=%s.",
+                chat_id,
+            )
+        finally:
+            with self._pending_update_futures_lock:
+                self._pending_update_futures.discard(future)
+
+    def _wait_for_pending_updates(
+        self,
+        *,
+        timeout_seconds: float | None,
+    ) -> None:
+        deadline = (
+            None
+            if timeout_seconds is None
+            else time.monotonic() + timeout_seconds
+        )
+        while True:
+            with self._pending_update_futures_lock:
+                if not self._pending_update_futures:
+                    return
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Timed out while waiting for Telegram updates.")
+            time.sleep(_PENDING_UPDATE_WAIT_INTERVAL_SECONDS)
+
+    def _close_chat_workers(self) -> None:
+        with self._chat_workers_lock:
+            workers = tuple(self.chat_workers.values())
+            self.chat_workers.clear()
+        for worker in workers:
+            worker.close()
 
     def _handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message")

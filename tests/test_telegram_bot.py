@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1004,6 +1006,253 @@ def test_telegram_command_result_session_id_overrides_global_current_session(
 
     assert bound_sessions == [(42, "new-chat-session")]
     assert api_client.sent_messages == [(42, "Switched.")]
+
+
+def test_concurrent_dispatch_allows_different_chats_to_progress_independently(
+    monkeypatch,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, _, _ = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(1, 2),
+    )
+    started = {1: threading.Event(), 2: threading.Event()}
+    release = threading.Event()
+    completed: list[int] = []
+
+    class FakeWorkerChannel:
+        def __init__(self, chat_id: int) -> None:
+            self.chat_id = chat_id
+
+        def _handle_update(self, update: dict[str, object]) -> None:
+            del update
+            started[self.chat_id].set()
+            assert release.wait(1.0)
+            completed.append(self.chat_id)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_build_chat_worker_channel",
+        lambda self, chat_id: FakeWorkerChannel(chat_id),
+    )
+
+    try:
+        channel._submit_update(
+            chat_id=1,
+            update={"message": {"chat": {"id": 1}, "text": "one"}},
+        )
+        channel._submit_update(
+            chat_id=2,
+            update={"message": {"chat": {"id": 2}, "text": "two"}},
+        )
+
+        assert started[1].wait(1.0)
+        assert started[2].wait(1.0)
+
+        release.set()
+        channel._wait_for_pending_updates(timeout_seconds=1.0)
+    finally:
+        channel.close()
+
+    assert sorted(completed) == [1, 2]
+
+
+def test_concurrent_dispatch_serializes_same_chat_updates(
+    monkeypatch,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, _, _ = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(42,),
+    )
+    first_started = threading.Event()
+    allow_first_to_finish = threading.Event()
+    second_started = threading.Event()
+    state_lock = threading.Lock()
+    order: list[str] = []
+    active_calls = 0
+    overlap_detected = False
+
+    class FakeWorkerChannel:
+        def _handle_update(self, update: dict[str, object]) -> None:
+            nonlocal active_calls, overlap_detected
+            message = update["message"]
+            assert isinstance(message, dict)
+            text = message["text"]
+            assert isinstance(text, str)
+
+            with state_lock:
+                active_calls += 1
+                if active_calls > 1:
+                    overlap_detected = True
+                order.append(text)
+
+            try:
+                if text == "one":
+                    first_started.set()
+                    assert allow_first_to_finish.wait(1.0)
+                else:
+                    second_started.set()
+            finally:
+                with state_lock:
+                    active_calls -= 1
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_build_chat_worker_channel",
+        lambda self, chat_id: FakeWorkerChannel(),
+    )
+
+    try:
+        channel._submit_update(
+            chat_id=42,
+            update={"message": {"chat": {"id": 42}, "text": "one"}},
+        )
+        assert first_started.wait(1.0)
+
+        channel._submit_update(
+            chat_id=42,
+            update={"message": {"chat": {"id": 42}, "text": "two"}},
+        )
+        assert second_started.wait(0.1) is False
+
+        allow_first_to_finish.set()
+        channel._wait_for_pending_updates(timeout_seconds=1.0)
+    finally:
+        channel.close()
+
+    assert order == ["one", "two"]
+    assert overlap_detected is False
+    assert second_started.is_set()
+
+
+def test_concurrent_dispatch_logs_one_chat_failure_without_blocking_others(
+    monkeypatch,
+    caplog,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, _, _ = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(1, 2),
+    )
+    completed: list[int] = []
+
+    class FakeWorkerChannel:
+        def __init__(self, chat_id: int) -> None:
+            self.chat_id = chat_id
+
+        def _handle_update(self, update: dict[str, object]) -> None:
+            del update
+            if self.chat_id == 1:
+                raise RuntimeError("boom")
+            completed.append(self.chat_id)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_build_chat_worker_channel",
+        lambda self, chat_id: FakeWorkerChannel(chat_id),
+    )
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="unclaw.channels.telegram_bot"):
+            channel._submit_update(
+                chat_id=1,
+                update={"message": {"chat": {"id": 1}, "text": "boom"}},
+            )
+            channel._submit_update(
+                chat_id=2,
+                update={"message": {"chat": {"id": 2}, "text": "ok"}},
+            )
+            channel._wait_for_pending_updates(timeout_seconds=1.0)
+    finally:
+        channel.close()
+
+    assert completed == [2]
+    assert "Unexpected Telegram update failure for chat=1." in caplog.text
+
+
+def test_concurrent_dispatch_preserves_existing_command_handling(
+    monkeypatch,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, api_client, tracer = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(42,),
+    )
+    bound_sessions: list[tuple[int, str]] = []
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_activate_chat_session",
+        lambda self, chat_id: SimpleNamespace(
+            id=f"sess-{chat_id}",
+            title=f"Telegram chat {chat_id}",
+        ),
+    )
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_get_command_handler",
+        lambda self, chat_id: SimpleNamespace(
+            handle=lambda _text: CommandResult(
+                status=CommandStatus.OK,
+                lines=("Telegram help",),
+            )
+        ),
+    )
+
+    def _build_worker(self, chat_id: int) -> telegram_bot.TelegramBotChannel:
+        return telegram_bot.TelegramBotChannel(
+            settings=self.settings,
+            config=self.config,
+            session_manager=SimpleNamespace(current_session_id=None),
+            memory_manager=SimpleNamespace(),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(list_tools=lambda: []),
+            api_client=api_client,
+            session_store=SimpleNamespace(
+                bind_chat=lambda *, chat_id, session_id: bound_sessions.append(
+                    (chat_id, session_id)
+                )
+            ),
+            clock=self.clock,
+        )
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_build_chat_worker_channel",
+        _build_worker,
+    )
+
+    try:
+        channel._submit_update(
+            chat_id=42,
+            update={
+                "message": {
+                    "chat": {"id": 42},
+                    "date": 100,
+                    "text": "/help",
+                }
+            },
+        )
+        channel._wait_for_pending_updates(timeout_seconds=1.0)
+    finally:
+        channel.close()
+
+    assert api_client.sent_messages == [(42, "Telegram help")]
+    assert bound_sessions == [(42, "sess-42")]
 
 
 def _build_channel(

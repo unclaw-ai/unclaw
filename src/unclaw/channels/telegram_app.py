@@ -39,6 +39,7 @@ def start_telegram_app(
     """Bootstrap and run the Telegram polling channel."""
 
     session_manager: Any = None
+    bot: Any = None
     try:
         settings = dependencies.bootstrap(project_root=project_root)
         telegram_config = dependencies.load_telegram_config(settings)
@@ -128,6 +129,12 @@ def start_telegram_app(
             tool_executor=tool_executor,
             api_client=api_client,
             session_store=session_store,
+            event_bus=event_bus,
+            session_manager_factory=dependencies.session_manager_factory,
+            memory_manager_factory=dependencies.memory_manager_factory,
+            tracer_factory=dependencies.tracer_factory,
+            tool_executor_factory=dependencies.tool_executor_factory,
+            session_store_factory=dependencies.session_store_factory,
         )
         bot.run()
         return 0
@@ -138,6 +145,8 @@ def start_telegram_app(
         print(f"Failed to start Unclaw Telegram bot: {exc}", file=sys.stderr)
         return 1
     finally:
+        if bot is not None and hasattr(bot, "close"):
+            bot.close()
         if session_manager is not None:
             session_manager.close()
 
