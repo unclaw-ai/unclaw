@@ -464,31 +464,38 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         memory_manager=SimpleNamespace(),
     )
 
-    search_tool_result = ToolResult.ok(
-        tool_name="search_web",
-        output_text=(
-            "Search query: Marine Leleu biographie\n"
-            "Sources fetched: 2 of 2 attempted\n"
-            "Evidence kept: 4\n"
-        ),
-        payload={
-            "query": "Marine Leleu biographie",
-            "summary_points": [
-                "Marine Leleu is a French endurance athlete and content creator."
-            ],
-            "display_sources": [
-                {
-                    "title": "Marine Leleu",
-                    "url": "https://example.com/marine-leleu",
-                },
-                {
-                    "title": "Athlete Profile",
-                    "url": "https://example.com/athletes/marine-leleu",
-                },
-            ],
-        },
-    )
-    tool_registry = _build_search_tool_registry(search_tool_result)
+    captured_search_calls: list[ToolCall] = []
+    tool_registry = ToolRegistry()
+
+    def _search_tool(call: ToolCall) -> ToolResult:
+        captured_search_calls.append(call)
+        query = str(call.arguments.get("query", ""))
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text=(
+                f"Search query: {query}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": query,
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete and content creator."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Marine Leleu",
+                        "url": "https://example.com/marine-leleu",
+                    },
+                    {
+                        "title": "Athlete Profile",
+                        "url": "https://example.com/athletes/marine-leleu",
+                    },
+                ],
+            },
+        )
+
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
 
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
@@ -523,7 +530,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
                 return LLMResponse(
                     provider="ollama",
                     model_name="qwen3.5:4b",
-                    content='{"route":"web_search","search_query":"Marine Leleu biographie"}',
+                    content='{"route":"web_search","search_query":"biographie de Marine Le Pen"}',
                     created_at="2026-03-16T10:00:00Z",
                     finish_reason="stop",
                 )
@@ -563,6 +570,10 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         assert "Sources:" in reply
         assert "https://example.com/marine-leleu" in reply
         assert "https://example.com/athletes/marine-leleu" in reply
+        assert len(captured_search_calls) == 1
+        assert captured_search_calls[0].arguments["query"] == user_input
+        assert "Marine Leleu" in captured_search_calls[0].arguments["query"]
+        assert "Marine Le Pen" not in captured_search_calls[0].arguments["query"]
         assert captured_tools == [None]
         assert any(
             message.role is LLMRole.SYSTEM

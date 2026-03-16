@@ -116,7 +116,10 @@ def route_request(
     return RouteDecision(
         kind=RouteKind.WEB_SEARCH,
         model_profile_name=model_profile_name,
-        search_query=classifier_decision.search_query or normalized_user_input,
+        # Preserve the user's original wording for the actual search execution.
+        # The classifier decides whether web grounding is needed; it does not
+        # get to substitute the requested entity or topic.
+        search_query=normalized_user_input,
     )
 
 

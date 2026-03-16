@@ -9,11 +9,12 @@ from unclaw.llm.base import LLMResponse
 from unclaw.settings import load_settings
 
 
-def test_route_request_uses_web_search_route_for_clearly_web_backed_request(
+def test_route_request_uses_web_search_route_but_preserves_user_text_as_query(
     monkeypatch,
 ) -> None:
     settings = _load_repo_settings()
     capability_summary = _build_capability_summary(settings)
+    user_input = "fais une recherche en ligne sur Marine Leleu et fais moi sa biographie"
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -41,7 +42,7 @@ def test_route_request_uses_web_search_route_for_clearly_web_backed_request(
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
-                content='{"route":"web_search","search_query":"Marine Leleu biographie"}',
+                content='{"route":"web_search","search_query":"biographie de Marine Le Pen"}',
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
@@ -51,13 +52,66 @@ def test_route_request_uses_web_search_route_for_clearly_web_backed_request(
     route = route_request(
         settings=settings,
         model_profile_name="main",
-        user_input="fais une recherche en ligne sur Marine Leleu et fais moi sa biographie",
+        user_input=user_input,
         thinking_enabled=False,
         capability_summary=capability_summary,
     )
 
     assert route.kind is RouteKind.WEB_SEARCH
-    assert route.search_query == "Marine Leleu biographie"
+    assert route.search_query == user_input
+    assert "Marine Leleu" in route.search_query
+    assert "Marine Le Pen" not in route.search_query
+
+
+def test_route_request_keeps_weather_request_on_web_search_route_with_user_text(
+    monkeypatch,
+) -> None:
+    settings = _load_repo_settings()
+    capability_summary = _build_capability_summary(settings)
+    user_input = "Quelle est la météo à Paris aujourd'hui ?"
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content='{"route":"web_search","search_query":"météo Paris aujourd\\u0027hui"}',
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+
+    route = route_request(
+        settings=settings,
+        model_profile_name="main",
+        user_input=user_input,
+        thinking_enabled=False,
+        capability_summary=capability_summary,
+    )
+
+    assert route.kind is RouteKind.WEB_SEARCH
+    assert route.search_query == user_input
 
 
 def test_route_request_keeps_plain_local_request_on_chat_route(
