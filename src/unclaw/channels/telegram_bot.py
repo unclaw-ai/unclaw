@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,8 +11,8 @@ from typing import Any
 
 from unclaw.bootstrap import bootstrap
 from unclaw.channels.telegram_api import TelegramApiClient, TelegramApiError
+from unclaw.channels.telegram_app import TelegramAppDependencies, start_telegram_app
 from unclaw.channels.telegram_config import (
-    TelegramAuthorizationUpdate,
     TelegramChatSessionStore,
     TelegramConfig,
     allow_telegram_chat,
@@ -25,7 +24,22 @@ from unclaw.channels.telegram_config import (
     print_authorized_chat_list,
     revoke_telegram_chat,
 )
-from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
+from unclaw.channels.telegram_formatting import (
+    MESSAGE_LIMIT,
+    NON_TEXT_MESSAGE_REPLY,
+    RATE_LIMITED_CHAT_MESSAGE,
+    format_command_result,
+    format_tool_list,
+    format_tool_result,
+    normalize_telegram_command,
+    read_message_timestamp,
+    split_message_chunks,
+)
+from unclaw.channels.telegram_management import (
+    TelegramManagementDependencies,
+    run_management_command,
+)
+from unclaw.core.command_handler import CommandHandler, CommandResult
 from unclaw.core.executor import ToolExecutor
 from unclaw.core.research_flow import (
     is_search_tool_call,
@@ -35,7 +49,7 @@ from unclaw.core.research_flow import (
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.core.timing import elapsed_ms
-from unclaw.errors import ConfigurationError, UnclawError
+from unclaw.errors import UnclawError
 from unclaw.local_secrets import resolve_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -48,23 +62,27 @@ from unclaw.schemas.chat import MessageRole
 from unclaw.schemas.session import SessionRecord
 from unclaw.settings import Settings
 from unclaw.startup import build_banner, build_startup_report, format_startup_report
-from unclaw.tools.contracts import ToolDefinition, ToolResult
 
 LOGGER = logging.getLogger(__name__)
 _POLL_RETRY_DELAY_SECONDS = 3.0
-_MESSAGE_LIMIT = 4000
 _MAX_PENDING_MESSAGES_PER_CHAT = 2
-_RATE_LIMITED_CHAT_MESSAGE = (
-    "Too many messages arrived before the previous reply finished. "
-    "Please wait for the next reply, then send another message."
-)
 
-# Backward-compatible aliases for names that moved to telegram_config.
+# Backward-compatible aliases for names that moved to focused Telegram modules.
 # These are referenced by tests and other modules via telegram_bot.<name>.
+_MESSAGE_LIMIT = MESSAGE_LIMIT
+_RATE_LIMITED_CHAT_MESSAGE = RATE_LIMITED_CHAT_MESSAGE
 _format_telegram_access_mode = format_telegram_access_mode
 _print_authorized_chat_list = print_authorized_chat_list
 _format_authorized_chat_count = format_authorized_chat_count
 _build_unauthorized_chat_message = build_unauthorized_chat_message
+_read_message_timestamp = read_message_timestamp
+_normalize_telegram_command = normalize_telegram_command
+_format_command_result = format_command_result
+_format_tool_list = format_tool_list
+_format_tool_result = format_tool_result
+_split_message_chunks = split_message_chunks
+_run_management_command = run_management_command
+_start_telegram_app = start_telegram_app
 
 
 @dataclass(slots=True)
@@ -165,7 +183,7 @@ class TelegramBotChannel:
         if not isinstance(text, str) or not text.strip():
             self._send_reply(
                 chat_id=chat_id,
-                text="Please send a text message or a slash command.",
+                text=NON_TEXT_MESSAGE_REPLY,
             )
             return
 
@@ -431,239 +449,37 @@ def main(
             project_root=project_root,
             command=command,
             chat_id=chat_id,
-        )
-
-    session_manager: SessionManager | None = None
-    try:
-        settings = bootstrap(project_root=project_root)
-        telegram_config = load_telegram_config(settings)
-        startup_report = build_startup_report(
-            settings,
-            channel_name="telegram",
-            channel_enabled=settings.app.channels.telegram_enabled,
-            required_profile_names=(settings.app.default_model_profile,),
-            optional_profile_names=tuple(
-                profile_name
-                for profile_name in settings.models
-                if profile_name != settings.app.default_model_profile
+            dependencies=TelegramManagementDependencies(
+                bootstrap=bootstrap,
+                allow_telegram_chat=allow_telegram_chat,
+                revoke_telegram_chat=revoke_telegram_chat,
+                find_latest_rejected_chat_id=find_latest_rejected_chat_id,
+                load_telegram_config=load_telegram_config,
+                print_authorized_chat_list=print_authorized_chat_list,
+                format_authorized_chat_count=format_authorized_chat_count,
             ),
-            telegram_token_env_var=telegram_config.bot_token_env_var,
-            telegram_allowed_chat_ids=telegram_config.allowed_chat_ids,
         )
-        print(
-            build_banner(
-                title="Unclaw Telegram",
-                subtitle="Local-first bot channel backed by your local model runtime.",
-                rows=(
-                    ("mode", "telegram"),
-                    (
-                        "default",
-                        (
-                            f"{settings.app.default_model_profile} -> "
-                            f"{settings.default_model.model_name}"
-                        ),
-                    ),
-                    ("logging", settings.app.logging.mode),
-                    ("polling", f"{telegram_config.polling_timeout_seconds}s"),
-                    ("access", format_telegram_access_mode(telegram_config)),
-                ),
-            )
-        )
-        print(format_startup_report(startup_report))
-        if not telegram_config.allowed_chat_ids:
-            print(
-                "Tip: when your own Telegram chat is rejected, run "
-                "`unclaw telegram allow-latest` on this machine."
-            )
-        if startup_report.has_errors:
-            return 1
 
-        resolved_bot_token = resolve_telegram_bot_token(
-            settings,
-            bot_token_env_var=telegram_config.bot_token_env_var,
-        )
-        if resolved_bot_token is None:
-            raise ConfigurationError(
-                "Telegram bot token is missing. "
-                "Run `unclaw onboard` and paste it into the local project secrets "
-                "file, or use the advanced fallback "
-                f"{telegram_config.bot_token_env_var} environment variable."
-            )
-
-        session_manager = SessionManager.from_settings(settings)
-        memory_manager = MemoryManager(session_manager=session_manager)
-        event_bus = EventBus()
-        tracer = Tracer(
-            event_bus=event_bus,
-            event_repository=session_manager.event_repository,
-            include_reasoning_text=settings.app.logging.include_reasoning_text,
-        )
-        tracer.runtime_log_path = (
-            settings.paths.log_file_path if settings.app.logging.file_enabled else None
-        )
-        tracer.trace_model_profile_selected(
-            session_id=None,
-            model_profile_name=settings.app.default_model_profile,
-            provider=settings.default_model.provider,
-            model_name=settings.default_model.model_name,
-            reason="startup",
-        )
-        tool_executor = ToolExecutor.with_default_tools(settings)
-        api_client = TelegramApiClient(bot_token=resolved_bot_token.value)
-        session_store = TelegramChatSessionStore(session_manager.connection)
-        session_store.initialize()
-
-        bot = TelegramBotChannel(
-            settings=settings,
-            config=telegram_config,
-            session_manager=session_manager,
-            memory_manager=memory_manager,
-            tracer=tracer,
-            tool_executor=tool_executor,
-            api_client=api_client,
-            session_store=session_store,
-        )
-        bot.run()
-        return 0
-    except KeyboardInterrupt:
-        print("\nStopping Unclaw Telegram bot.")
-        return 0
-    except UnclawError as exc:
-        print(f"Failed to start Unclaw Telegram bot: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        if session_manager is not None:
-            session_manager.close()
-
-
-def _run_management_command(
-    *,
-    project_root: Path | None,
-    command: str,
-    chat_id: int | None,
-) -> int:
-    try:
-        settings = bootstrap(project_root=project_root)
-        match command:
-            case "allow":
-                if chat_id is None:
-                    raise ConfigurationError(
-                        "Telegram allow requires one numeric chat id."
-                    )
-                update = allow_telegram_chat(settings, chat_id)
-                if update.was_authorized and not update.file_changed:
-                    print(f"Telegram chat {chat_id} is already authorized.")
-                elif update.was_authorized:
-                    print(
-                        "Telegram access list was normalized without adding a new "
-                        f"chat. Chat {chat_id} remains authorized."
-                    )
-                else:
-                    print(
-                        f"Authorized Telegram chat {chat_id}. "
-                        f"{format_authorized_chat_count(update.allowed_chat_ids)}"
-                    )
-                return 0
-            case "allow-latest":
-                latest_chat_id = find_latest_rejected_chat_id(settings)
-                if latest_chat_id is None:
-                    print(
-                        "No rejected Telegram chat is stored locally yet. "
-                        "Send one message to the bot first, then rerun "
-                        "`unclaw telegram allow-latest`."
-                    )
-                    return 1
-                update = allow_telegram_chat(settings, latest_chat_id)
-                if update.was_authorized and not update.file_changed:
-                    print(
-                        f"The latest rejected Telegram chat ({latest_chat_id}) is "
-                        "already authorized."
-                    )
-                else:
-                    print(
-                        f"Authorized the latest rejected Telegram chat: {latest_chat_id}. "
-                        f"{format_authorized_chat_count(update.allowed_chat_ids)}"
-                    )
-                return 0
-            case "revoke":
-                if chat_id is None:
-                    raise ConfigurationError(
-                        "Telegram revoke requires one numeric chat id."
-                    )
-                update = revoke_telegram_chat(settings, chat_id)
-                if update.was_authorized:
-                    print(
-                        f"Revoked Telegram chat {chat_id}. "
-                        f"{format_authorized_chat_count(update.allowed_chat_ids)}"
-                    )
-                else:
-                    print(f"Telegram chat {chat_id} was not authorized.")
-                return 0
-            case "list":
-                config = load_telegram_config(settings)
-                print_authorized_chat_list(
-                    config.allowed_chat_ids,
-                    latest_rejected_chat_id=find_latest_rejected_chat_id(settings),
-                )
-                return 0
-            case _:
-                raise ConfigurationError(
-                    f"Unsupported Telegram command '{command}'."
-                )
-    except UnclawError as exc:
-        print(f"Failed to manage Unclaw Telegram access: {exc}", file=sys.stderr)
-        return 1
-
-
-def _read_message_timestamp(message: dict[str, Any]) -> int | None:
-    value = message.get("date")
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value
-
-
-def _normalize_telegram_command(text: str) -> str:
-    command, separator, remainder = text.partition(" ")
-    command_name, mention_separator, _mention = command.partition("@")
-    if not mention_separator:
-        return text
-    return f"{command_name}{separator}{remainder}".strip()
-
-
-def _format_command_result(result: CommandResult) -> str:
-    if not result.lines:
-        return ""
-
-    if result.status is CommandStatus.ERROR:
-        first_line, *other_lines = result.lines
-        lines = [f"Error: {first_line}", *other_lines]
-        return "\n".join(lines)
-
-    return "\n".join(result.lines)
-
-
-def _format_tool_list(tools: list[ToolDefinition]) -> str:
-    if not tools:
-        return "No built-in tools available."
-
-    lines = ["Built-in tools:"]
-    for tool in tools:
-        lines.append(
-            f"- {tool.name} [{tool.permission_level.value}] {tool.description}"
-        )
-    return "\n".join(lines)
-
-
-def _format_tool_result(result: ToolResult) -> str:
-    if result.success:
-        return result.output_text
-
-    if not result.output_text:
-        return f"Error: {result.error}"
-
-    lines = result.output_text.splitlines() or [result.output_text]
-    first_line, *other_lines = lines
-    return "\n".join([f"Error: {first_line}", *other_lines])
+    return _start_telegram_app(
+        project_root=project_root,
+        dependencies=TelegramAppDependencies(
+            bootstrap=bootstrap,
+            load_telegram_config=load_telegram_config,
+            build_startup_report=build_startup_report,
+            build_banner=build_banner,
+            format_startup_report=format_startup_report,
+            format_telegram_access_mode=format_telegram_access_mode,
+            resolve_telegram_bot_token=resolve_telegram_bot_token,
+            session_manager_factory=SessionManager,
+            memory_manager_factory=MemoryManager,
+            event_bus_factory=EventBus,
+            tracer_factory=Tracer,
+            tool_executor_factory=ToolExecutor,
+            api_client_factory=TelegramApiClient,
+            session_store_factory=TelegramChatSessionStore,
+            channel_factory=TelegramBotChannel,
+        ),
+    )
 
 
 def _refresh_memory_summary(
@@ -680,24 +496,5 @@ def _refresh_memory_summary(
         LOGGER.warning("Could not refresh session summary for %s: %s", session_id, exc)
 
 
-def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str]:
-    normalized = text.strip()
-    if not normalized:
-        return []
-
-    chunks: list[str] = []
-    remaining = normalized
-    while len(remaining) > limit:
-        split_at = remaining.rfind("\n", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = remaining.rfind(" ", 0, limit + 1)
-        if split_at < limit // 2:
-            split_at = limit
-
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-
-    chunks.append(remaining)
-    return chunks
 if __name__ == "__main__":
     raise SystemExit(main())
