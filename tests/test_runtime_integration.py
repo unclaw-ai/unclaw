@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date as real_date
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,6 +158,109 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         runtime_log = settings.paths.log_file_path.read_text(encoding="utf-8")
         assert '"event_type": "assistant.reply.persisted"' in runtime_log
         assert '"event_type": "model.succeeded"' in runtime_log
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_continues_when_event_bus_subscriber_raises(
+    monkeypatch,
+    make_temp_project,
+    caplog,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+
+    def _failing_handler(event: object) -> None:
+        del event
+        raise RuntimeError("subscriber boom")
+
+    event_bus.subscribe(_failing_handler)
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    tracer.runtime_log_path = settings.paths.log_file_path
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Local reply",
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Keep going even if one subscriber fails.",
+            session_id=session.id,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="unclaw.logs.event_bus"):
+            assistant_reply = run_user_turn(
+                session_manager=session_manager,
+                command_handler=command_handler,
+                user_input="Keep going even if one subscriber fails.",
+                tracer=tracer,
+            )
+
+        assert assistant_reply == "Local reply"
+        assert [event.event_type for event in published_events] == [
+            "runtime.started",
+            "route.selected",
+            "model.called",
+            "model.succeeded",
+            "assistant.reply.persisted",
+        ]
+
+        persisted_events = session_manager.event_repository.list_recent_events(
+            session.id,
+            limit=10,
+        )
+        assert any(
+            event.event_type == "assistant.reply.persisted"
+            for event in persisted_events
+        )
+        runtime_log = settings.paths.log_file_path.read_text(encoding="utf-8")
+        assert '"event_type": "assistant.reply.persisted"' in runtime_log
+        assert any(
+            record.message == "EventBus subscriber failed."
+            for record in caplog.records
+        )
     finally:
         session_manager.close()
 

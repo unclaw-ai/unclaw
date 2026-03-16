@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import yaml
@@ -8,6 +9,29 @@ import yaml
 from unclaw.logs.cli import render_simple_log_line, run_logs
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
+
+
+def test_event_bus_isolates_failing_subscribers_and_logs_the_error(caplog) -> None:
+    event_bus = EventBus()
+    received_events: list[object] = []
+
+    def _failing_handler(event: object) -> None:
+        del event
+        raise RuntimeError("broken subscriber")
+
+    event_bus.subscribe(_failing_handler)
+    event_bus.subscribe(received_events.append)
+
+    with caplog.at_level(logging.ERROR, logger="unclaw.logs.event_bus"):
+        event = {"event_type": "runtime.started"}
+        event_bus.publish(event)
+
+    assert received_events == [event]
+    assert any(
+        record.message == "EventBus subscriber failed."
+        and record.exc_info is not None
+        for record in caplog.records
+    )
 
 
 def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(

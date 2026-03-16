@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 type EventHandler = Callable[[object], None]
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -22,5 +25,7 @@ class EventBus:
     def publish(self, event: object) -> None:
         """Publish one event to all current subscribers."""
         for handler in tuple(self._subscribers):
-            handler(event)
-
+            try:
+                handler(event)
+            except Exception:
+                LOGGER.exception("EventBus subscriber failed.")
