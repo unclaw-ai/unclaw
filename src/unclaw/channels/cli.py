@@ -57,14 +57,21 @@ class _TerminalAssistantStream:
             print(f"Unclaw> {final_text}")
             return
 
-        streamed_text = "".join(self.chunks).strip()
-        if streamed_text == final_text:
+        streamed_text = "".join(self.chunks)
+        if streamed_text.strip() == final_text.strip():
             print()
             return
 
+        if final_text.startswith(streamed_text):
+            suffix = final_text[len(streamed_text):]
+            if suffix:
+                sys.stdout.write(suffix)
+            if not final_text.endswith("\n"):
+                sys.stdout.write("\n")
+            sys.stdout.flush()
+            return
+
         print()
-        print("[stream interrupted; showing the saved final reply]")
-        print(f"Unclaw> {final_text}")
 
 
 def main(project_root: Path | None = None) -> int:

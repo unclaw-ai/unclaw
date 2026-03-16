@@ -3789,6 +3789,8 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
         assert MessageRole.USER in roles
         assert MessageRole.TOOL in roles
         assert MessageRole.ASSISTANT in roles
+        assert stored_messages[-1].role is MessageRole.ASSISTANT
+        assert stored_messages[-1].content == result.assistant_reply
     finally:
         session_manager.close()
 

@@ -30,17 +30,21 @@ def test_terminal_assistant_stream_finishes_cleanly_when_stream_matches(capsys) 
     assert capsys.readouterr().out == "Unclaw> Hello\n"
 
 
-def test_terminal_assistant_stream_explains_interrupted_streams(capsys) -> None:
+def test_terminal_assistant_stream_appends_only_missing_suffix(capsys) -> None:
     stream = _TerminalAssistantStream()
 
-    stream.write("Partial")
+    stream.write("Saved")
     stream.finish("Saved reply")
 
-    assert capsys.readouterr().out == (
-        "Unclaw> Partial\n"
-        "[stream interrupted; showing the saved final reply]\n"
-        "Unclaw> Saved reply\n"
-    )
+    assert capsys.readouterr().out == "Unclaw> Saved reply\n"
+
+
+def test_terminal_assistant_stream_renders_final_reply_when_nothing_streamed(capsys) -> None:
+    stream = _TerminalAssistantStream()
+
+    stream.finish("Saved reply")
+
+    assert capsys.readouterr().out == "Unclaw> Saved reply\n"
 
 
 def test_cli_search_returns_a_natural_reply_with_compact_sources(
@@ -183,6 +187,13 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
         "Unclaw> Ollama shipped a new update with improved search grounding."
         in output
     )
+    assert (
+        output.count(
+            "Unclaw> Ollama shipped a new update with improved search grounding."
+        )
+        == 1
+    )
+    assert "[stream interrupted; showing the saved final reply]" not in output
     assert "Search query:" not in output
     assert "Sources fetched:" not in output
     assert "Evidence kept:" not in output
@@ -318,6 +329,13 @@ def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecuti
         "Unclaw> Ollama shipped a new update with improved search grounding."
         in output
     )
+    assert (
+        output.count(
+            "Unclaw> Ollama shipped a new update with improved search grounding."
+        )
+        == 1
+    )
+    assert "[stream interrupted; showing the saved final reply]" not in output
     assert "Search query:" not in output
     assert "Sources fetched:" not in output
     assert "Evidence kept:" not in output
