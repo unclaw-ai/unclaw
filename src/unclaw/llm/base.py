@@ -95,6 +95,7 @@ class ResolvedModelProfile:
     model_name: str
     temperature: float
     capabilities: ModelCapabilities
+    keep_alive: str | None = None
 
 
 class BaseLLMProvider(ABC):

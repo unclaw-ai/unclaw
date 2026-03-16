@@ -115,6 +115,7 @@ class ModelProfile:
     temperature: float
     thinking_supported: bool
     tool_mode: str
+    keep_alive: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,6 +374,7 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
             temperature=_get_float(raw_profile, "temperature"),
             thinking_supported=_get_bool(raw_profile, "thinking_supported"),
             tool_mode=_get_str(raw_profile, "tool_mode"),
+            keep_alive=_get_optional_str(raw_profile, "keep_alive"),
         )
 
     if not profiles:
@@ -438,6 +440,20 @@ def _get_str(
     if not isinstance(value, str) or not value.strip():
         raise ConfigurationError(f"Configuration key '{key}' must be a non-empty string.")
     return value
+
+
+def _get_optional_str(
+    source: Mapping[str, Any],
+    key: str,
+) -> str | None:
+    value = source.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be a non-empty string when provided."
+        )
+    return value.strip()
 
 
 def _get_bool(

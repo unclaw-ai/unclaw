@@ -19,6 +19,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.2,
         thinking_supported=False,
         tool_mode="json_plan",
+        keep_alive="10m",
     ),
     "main": ModelProfileDraft(
         provider="ollama",
@@ -26,6 +27,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.3,
         thinking_supported=True,
         tool_mode="json_plan",
+        keep_alive="30m",
     ),
     "deep": ModelProfileDraft(
         provider="ollama",
@@ -33,6 +35,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.2,
         thinking_supported=True,
         tool_mode="native",
+        keep_alive="10m",
     ),
     "codex": ModelProfileDraft(
         provider="ollama",
@@ -40,6 +43,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.1,
         thinking_supported=True,
         tool_mode="json_plan",
+        keep_alive="10m",
     ),
 }
 
@@ -54,6 +58,7 @@ def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
             temperature=draft.temperature,
             thinking_supported=draft.thinking_supported,
             tool_mode=draft.tool_mode,
+            keep_alive=draft.keep_alive,
         )
         for name, draft in _RECOMMENDED_PROFILES.items()
     }
@@ -123,13 +128,16 @@ def build_onboarding_file_payloads(
     assert isinstance(profiles_section, dict)
     for profile_name in PROFILE_ORDER:
         draft = plan.model_profiles[profile_name]
-        profiles_section[profile_name] = {
+        profile_payload = {
             "provider": draft.provider,
             "model_name": draft.model_name,
             "temperature": draft.temperature,
             "thinking_supported": draft.thinking_supported,
             "tool_mode": draft.tool_mode,
         }
+        if draft.keep_alive is not None:
+            profile_payload["keep_alive"] = draft.keep_alive
+        profiles_section[profile_name] = profile_payload
 
     telegram_payload: dict[str, object] = {
         "bot_token_env_var": plan.telegram_bot_token_env_var,

@@ -134,6 +134,25 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
 
     assert profile.capabilities.tool_mode == "native"
     assert profile.capabilities.supports_native_tool_calling is True
+    assert profile.keep_alive == "10m"
+
+
+def test_load_settings_allows_profile_keep_alive_to_be_absent(tmp_path: Path) -> None:
+    project_root = _create_temp_project(tmp_path)
+    models_config_path = project_root / "config" / "models.yaml"
+    models_payload = _read_yaml(models_config_path)
+    profiles = models_payload["profiles"]
+    assert isinstance(profiles, dict)
+    main_profile = profiles["main"]
+    assert isinstance(main_profile, dict)
+    main_profile.pop("keep_alive")
+    _write_yaml(models_config_path, models_payload)
+
+    settings = load_settings(project_root=project_root)
+    profile = resolve_model_profile(settings, "main")
+
+    assert settings.models["main"].keep_alive is None
+    assert profile.keep_alive is None
 
 
 def test_load_telegram_config_errors_when_yaml_is_malformed(tmp_path: Path) -> None:

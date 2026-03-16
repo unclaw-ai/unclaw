@@ -28,6 +28,7 @@ class ModelProfileDraft:
     temperature: float
     thinking_supported: bool
     tool_mode: str
+    keep_alive: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

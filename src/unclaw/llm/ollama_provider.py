@@ -65,6 +65,9 @@ class OllamaProvider(BaseLLMProvider):
             "think": thinking_requested,
         }
 
+        if profile.keep_alive is not None:
+            payload["keep_alive"] = profile.keep_alive
+
         if tools:
             payload["tools"] = [
                 _tool_definition_to_ollama(tool) for tool in tools

@@ -5,21 +5,25 @@ profiles:
     temperature: 0.2
     thinking_supported: false
     tool_mode: json_plan
+    keep_alive: 10m
   main:
     provider: ollama
     model_name: qwen3.5:4b
     temperature: 0.3
     thinking_supported: true
     tool_mode: json_plan
+    keep_alive: 30m
   deep:
     provider: ollama
     model_name: qwen3.5:9b
     temperature: 0.2
     thinking_supported: true
     tool_mode: native
+    keep_alive: 10m
   codex:
     provider: ollama
     model_name: qwen2.5-coder:7b
     temperature: 0.1
     thinking_supported: true
     tool_mode: json_plan
+    keep_alive: 10m
