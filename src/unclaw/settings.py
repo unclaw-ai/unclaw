@@ -63,6 +63,12 @@ class ThinkingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeGuardrailSettings:
+    tool_timeout_seconds: float
+    max_tool_calls_per_turn: int
+
+
+@dataclass(frozen=True, slots=True)
 class FileToolSecuritySettings:
     allowed_roots: tuple[str, ...]
 
@@ -103,6 +109,7 @@ class AppSettings:
     channels: ChannelSettings
     default_model_profile: str
     thinking: ThinkingSettings
+    runtime: RuntimeGuardrailSettings
     security: SecuritySettings
     providers: ProviderSettings
 
@@ -274,6 +281,7 @@ def _build_app_settings(
     channels_section = _get_mapping(payload, "channels")
     models_section = _get_mapping(payload, "models")
     thinking_section = _get_mapping(payload, "thinking")
+    runtime_section = _get_mapping(payload, "runtime")
     security_section = _get_mapping(payload, "security")
     tool_security_section = _get_mapping(security_section, "tools")
     file_security_section = _get_mapping(tool_security_section, "files")
@@ -313,6 +321,18 @@ def _build_app_settings(
     thinking_settings = ThinkingSettings(
         default_enabled=_get_bool(thinking_section, "default_enabled", False),
     )
+    runtime_settings = RuntimeGuardrailSettings(
+        tool_timeout_seconds=_get_positive_float(
+            runtime_section,
+            "tool_timeout_seconds",
+            default=15.0,
+        ),
+        max_tool_calls_per_turn=_get_non_negative_int(
+            runtime_section,
+            "max_tool_calls_per_turn",
+            default=8,
+        ),
+    )
     security_settings = SecuritySettings(
         tools=ToolSecuritySettings(
             files=FileToolSecuritySettings(
@@ -350,6 +370,7 @@ def _build_app_settings(
         channels=channel_settings,
         default_model_profile=_get_str(models_section, "default_profile"),
         thinking=thinking_settings,
+        runtime=runtime_settings,
         security=security_settings,
         providers=provider_settings,
     )

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from time import perf_counter
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+import threading
+from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any
 
 from unclaw.core.capabilities import build_runtime_capability_summary
@@ -37,6 +39,48 @@ _MAX_STEPS_FALLBACK_REPLY = (
     "I reached the maximum number of steps for this request. "
     "Here is what I found so far."
 )
+_TOOL_BUDGET_FALLBACK_REPLY = (
+    "I stopped after reaching the tool-call limit for this request."
+)
+_TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
+_TOOL_POLL_INTERVAL_SECONDS = 0.01
+
+
+@dataclass(slots=True)
+class RuntimeTurnCancellation:
+    """Minimal turn-local cancellation handle for runtime tool execution."""
+
+    _cancel_event: threading.Event = field(
+        default_factory=threading.Event,
+        init=False,
+        repr=False,
+    )
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+
+@dataclass(slots=True)
+class _RuntimeToolGuardState:
+    tool_timeout_seconds: float
+    max_tool_calls_per_turn: int
+    cancellation: RuntimeTurnCancellation | None = None
+    tool_calls_started: int = 0
+
+    def is_cancelled(self) -> bool:
+        return self.cancellation is not None and self.cancellation.is_cancelled()
+
+
+@dataclass(slots=True)
+class _PendingToolExecution:
+    tool_call: ToolCall
+    started_at: float
+    done_event: threading.Event
+    thread: threading.Thread | None = None
+    result: ToolResult | None = None
 
 
 def run_user_turn(
@@ -51,6 +95,7 @@ def run_user_turn(
     explicit_tool_call: ToolCall | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
     max_agent_steps: int = _MAX_AGENT_STEPS_DEFAULT,
+    turn_cancellation: RuntimeTurnCancellation | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -72,6 +117,15 @@ def run_user_turn(
     thinking_enabled = command_handler.thinking_enabled is True
     active_tool_registry = tool_registry or create_default_tool_registry(
         session_manager.settings
+    )
+    tool_guard_state = _RuntimeToolGuardState(
+        tool_timeout_seconds=(
+            session_manager.settings.app.runtime.tool_timeout_seconds
+        ),
+        max_tool_calls_per_turn=(
+            session_manager.settings.app.runtime.max_tool_calls_per_turn
+        ),
+        cancellation=turn_cancellation,
     )
 
     # Determine tool definitions for agent loop first, so the capability
@@ -99,6 +153,7 @@ def run_user_turn(
     active_assistant_reply_transform = assistant_reply_transform
     system_context_notes: tuple[str, ...] = ()
     runtime_explicit_tool_call = explicit_tool_call
+    assistant_reply: str | None = None
 
     try:
         memory_context_note = _build_session_memory_context_note(
@@ -140,56 +195,69 @@ def run_user_turn(
         if runtime_explicit_tool_call is not None and (
             route.kind is RouteKind.WEB_SEARCH or tool_definitions is None
         ):
-            _execute_runtime_tool_call(
-                session_manager=session_manager,
-                session_id=session.id,
-                tracer=active_tracer,
-                tool_registry=active_tool_registry,
-                tool_call=runtime_explicit_tool_call,
+            assistant_reply = _preflight_runtime_tool_batch(
+                tool_calls=(runtime_explicit_tool_call,),
+                tool_guard_state=tool_guard_state,
             )
+            if assistant_reply is None:
+                _execute_runtime_tool_calls(
+                    session_manager=session_manager,
+                    session_id=session.id,
+                    tracer=active_tracer,
+                    tool_registry=active_tool_registry,
+                    tool_calls=(runtime_explicit_tool_call,),
+                    tool_guard_state=tool_guard_state,
+                )
+                if tool_guard_state.is_cancelled():
+                    assistant_reply = _TURN_CANCELLED_REPLY
 
-        orchestrator = Orchestrator(
-            settings=session_manager.settings,
-            session_manager=session_manager,
-            tracer=active_tracer,
-        )
-        response = orchestrator.run_turn(
-            session_id=session.id,
-            user_message=user_input,
-            model_profile_name=route.model_profile_name,
-            capability_summary=capability_summary,
-            system_context_notes=system_context_notes,
-            thinking_enabled=thinking_enabled,
-            content_callback=stream_output_func,
-            tools=tool_definitions,
-        )
-        active_tracer.trace_model_succeeded(
-            session_id=session.id,
-            provider=response.response.provider,
-            model_name=response.response.model_name,
-            finish_reason=response.response.finish_reason,
-            output_length=len(response.response.content),
-            model_duration_ms=response.model_duration_ms,
-            reasoning=response.response.reasoning,
-        )
+        if assistant_reply is None and tool_guard_state.is_cancelled():
+            assistant_reply = _TURN_CANCELLED_REPLY
 
-        # --- Agent observation-action loop ---
-        if response.response.tool_calls and tool_definitions and max_agent_steps > 0:
-            assistant_reply = _run_agent_loop(
-                first_response=response,
-                orchestrator=orchestrator,
-                session_id=session.id,
+        if assistant_reply is None:
+            orchestrator = Orchestrator(
+                settings=session_manager.settings,
                 session_manager=session_manager,
                 tracer=active_tracer,
-                tool_registry=active_tool_registry,
-                tool_definitions=tool_definitions,
+            )
+            response = orchestrator.run_turn(
+                session_id=session.id,
+                user_message=user_input,
                 model_profile_name=route.model_profile_name,
+                capability_summary=capability_summary,
+                system_context_notes=system_context_notes,
                 thinking_enabled=thinking_enabled,
                 content_callback=stream_output_func,
-                max_steps=max_agent_steps,
+                tools=tool_definitions,
             )
-        else:
-            assistant_reply = response.response.content.strip() or EMPTY_RESPONSE_REPLY
+            active_tracer.trace_model_succeeded(
+                session_id=session.id,
+                provider=response.response.provider,
+                model_name=response.response.model_name,
+                finish_reason=response.response.finish_reason,
+                output_length=len(response.response.content),
+                model_duration_ms=response.model_duration_ms,
+                reasoning=response.response.reasoning,
+            )
+
+            # --- Agent observation-action loop ---
+            if response.response.tool_calls and tool_definitions and max_agent_steps > 0:
+                assistant_reply = _run_agent_loop(
+                    first_response=response,
+                    orchestrator=orchestrator,
+                    session_id=session.id,
+                    session_manager=session_manager,
+                    tracer=active_tracer,
+                    tool_registry=active_tool_registry,
+                    tool_definitions=tool_definitions,
+                    model_profile_name=route.model_profile_name,
+                    thinking_enabled=thinking_enabled,
+                    content_callback=stream_output_func,
+                    max_steps=max_agent_steps,
+                    tool_guard_state=tool_guard_state,
+                )
+            else:
+                assistant_reply = response.response.content.strip() or EMPTY_RESPONSE_REPLY
 
     except ModelCallFailedError as exc:
         active_tracer.trace_model_failed(
@@ -215,6 +283,8 @@ def run_user_turn(
             error=str(exc),
         )
         assistant_reply = RUNTIME_ERROR_REPLY
+
+    assert assistant_reply is not None
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
@@ -329,6 +399,7 @@ def _run_agent_loop(
     thinking_enabled: bool,
     content_callback: LLMContentCallback | None,
     max_steps: int,
+    tool_guard_state: _RuntimeToolGuardState,
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
     context_messages: list[LLMMessage] = list(first_response.context_messages)
@@ -338,6 +409,13 @@ def _run_agent_loop(
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
             return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
+
+        stop_reply = _preflight_runtime_tool_batch(
+            tool_calls=tool_calls,
+            tool_guard_state=tool_guard_state,
+        )
+        if stop_reply is not None:
+            return stop_reply
 
         # Append the assistant message (with tool_calls) to context.
         context_messages.append(
@@ -355,6 +433,7 @@ def _run_agent_loop(
             tracer=tracer,
             tool_registry=tool_registry,
             tool_calls=tool_calls,
+            tool_guard_state=tool_guard_state,
         ):
             context_messages.append(
                 LLMMessage(
@@ -364,6 +443,9 @@ def _run_agent_loop(
                     ),
                 )
             )
+
+        if tool_guard_state.is_cancelled():
+            return _TURN_CANCELLED_REPLY
 
         # Call the model again with extended context.
         current_response = orchestrator.call_model(
@@ -392,6 +474,21 @@ def _run_agent_loop(
     return _MAX_STEPS_FALLBACK_REPLY
 
 
+def _preflight_runtime_tool_batch(
+    *,
+    tool_calls: Sequence[ToolCall],
+    tool_guard_state: _RuntimeToolGuardState,
+) -> str | None:
+    if tool_guard_state.is_cancelled():
+        return _TURN_CANCELLED_REPLY
+    if (
+        tool_guard_state.tool_calls_started + len(tool_calls)
+        > tool_guard_state.max_tool_calls_per_turn
+    ):
+        return _TOOL_BUDGET_FALLBACK_REPLY
+    return None
+
+
 def _execute_runtime_tool_calls(
     *,
     session_manager: SessionManager,
@@ -399,71 +496,173 @@ def _execute_runtime_tool_calls(
     tracer: Tracer,
     tool_registry: ToolRegistry,
     tool_calls: Sequence[ToolCall],
+    tool_guard_state: _RuntimeToolGuardState,
 ) -> tuple[ToolResult, ...]:
     """Execute one tool-call batch while keeping context and persistence ordered."""
-    if len(tool_calls) == 1:
-        return (
-            _execute_runtime_tool_call(
-                session_manager=session_manager,
-                session_id=session_id,
-                tracer=tracer,
-                tool_registry=tool_registry,
-                tool_call=tool_calls[0],
+    pending_calls = _start_pending_tool_executions(
+        session_id=session_id,
+        tracer=tracer,
+        tool_registry=tool_registry,
+        tool_calls=tool_calls,
+        tool_guard_state=tool_guard_state,
+    )
+    if not pending_calls:
+        return ()
+
+    resolved_results = _collect_pending_tool_results(
+        pending_calls=pending_calls,
+        tool_guard_state=tool_guard_state,
+    )
+    tool_results: list[ToolResult] = []
+    for pending_call, tool_result, finished_at in resolved_results:
+        _finalize_runtime_tool_call(
+            session_manager=session_manager,
+            session_id=session_id,
+            tracer=tracer,
+            tool_call=pending_call.tool_call,
+            tool_result=tool_result,
+            tool_duration_ms=max(
+                0,
+                round((finished_at - pending_call.started_at) * 1000),
             ),
         )
+        tool_results.append(tool_result)
 
-    tool_started_at_by_index: list[float] = []
+    return tuple(tool_results)
+
+
+def _start_pending_tool_executions(
+    *,
+    session_id: str,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    tool_calls: Sequence[ToolCall],
+    tool_guard_state: _RuntimeToolGuardState,
+) -> list[_PendingToolExecution]:
+    pending_calls: list[_PendingToolExecution] = []
     for tool_call in tool_calls:
-        tool_started_at_by_index.append(perf_counter())
+        if tool_guard_state.is_cancelled():
+            break
+
+        started_at = perf_counter()
         tracer.trace_tool_started(
             session_id=session_id,
             tool_name=tool_call.tool_name,
             arguments=tool_call.arguments,
         )
+        done_event = threading.Event()
+        pending_call = _PendingToolExecution(
+            tool_call=tool_call,
+            started_at=started_at,
+            done_event=done_event,
+        )
+        pending_call.thread = threading.Thread(
+            target=_run_pending_tool_execution,
+            kwargs={
+                "pending_call": pending_call,
+                "tool_registry": tool_registry,
+            },
+            daemon=True,
+        )
+        pending_call.thread.start()
+        pending_calls.append(pending_call)
 
-    future_completed_at_by_index: list[float | None] = [None] * len(tool_calls)
-    with ThreadPoolExecutor(max_workers=len(tool_calls)) as executor:
-        futures = [
-            executor.submit(
-                _dispatch_runtime_tool_call,
-                tool_registry=tool_registry,
-                tool_call=tool_call,
-            )
-            for tool_call in tool_calls
-        ]
-        future_index_map = {
-            future: index for index, future in enumerate(futures)
-        }
+    tool_guard_state.tool_calls_started += len(pending_calls)
+    return pending_calls
 
-        for future in as_completed(future_index_map):
-            future_completed_at_by_index[future_index_map[future]] = perf_counter()
 
-        tool_results: list[ToolResult] = []
-        for index, future in enumerate(futures):
-            tool_result = future.result()
-            finished_at = future_completed_at_by_index[index]
-            if finished_at is None:
-                finished_at = perf_counter()
-            _finalize_runtime_tool_call(
-                session_manager=session_manager,
-                session_id=session_id,
-                tracer=tracer,
-                tool_call=tool_calls[index],
-                tool_result=tool_result,
-                tool_duration_ms=max(
-                    0,
-                    round(
-                        (
-                            finished_at
-                            - tool_started_at_by_index[index]
-                        )
-                        * 1000
+def _run_pending_tool_execution(
+    *,
+    pending_call: _PendingToolExecution,
+    tool_registry: ToolRegistry,
+) -> None:
+    try:
+        pending_call.result = _dispatch_runtime_tool_call(
+            tool_registry=tool_registry,
+            tool_call=pending_call.tool_call,
+        )
+    except Exception as exc:
+        pending_call.result = ToolResult.failure(
+            tool_name=pending_call.tool_call.tool_name,
+            error=(
+                f"Tool '{pending_call.tool_call.tool_name}' failed unexpectedly: {exc}"
+            ),
+        )
+    finally:
+        pending_call.done_event.set()
+
+
+def _collect_pending_tool_results(
+    *,
+    pending_calls: Sequence[_PendingToolExecution],
+    tool_guard_state: _RuntimeToolGuardState,
+) -> tuple[tuple[_PendingToolExecution, ToolResult, float], ...]:
+    resolved_by_index: list[tuple[ToolResult, float] | None] = [None] * len(pending_calls)
+    timeout_seconds = tool_guard_state.tool_timeout_seconds
+
+    while any(result is None for result in resolved_by_index):
+        cancellation_requested = tool_guard_state.is_cancelled()
+        now = perf_counter()
+        for index, pending_call in enumerate(pending_calls):
+            if resolved_by_index[index] is not None:
+                continue
+
+            if pending_call.done_event.is_set():
+                resolved_result = pending_call.result or ToolResult.failure(
+                    tool_name=pending_call.tool_call.tool_name,
+                    error=(
+                        f"Tool '{pending_call.tool_call.tool_name}' returned no result."
                     ),
-                ),
-            )
-            tool_results.append(tool_result)
+                )
+                resolved_by_index[index] = (resolved_result, perf_counter())
+                continue
 
-    return tuple(tool_results)
+            if cancellation_requested:
+                resolved_by_index[index] = (
+                    _build_cancelled_tool_result(pending_call.tool_call),
+                    now,
+                )
+                continue
+
+            if now - pending_call.started_at >= timeout_seconds:
+                resolved_by_index[index] = (
+                    _build_timed_out_tool_result(
+                        pending_call.tool_call,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    now,
+                )
+
+        if any(result is None for result in resolved_by_index):
+            sleep(_TOOL_POLL_INTERVAL_SECONDS)
+
+    return tuple(
+        (pending_call, resolved_result, finished_at)
+        for pending_call, resolved in zip(pending_calls, resolved_by_index, strict=True)
+        if resolved is not None
+        for resolved_result, finished_at in (resolved,)
+    )
+
+
+def _build_timed_out_tool_result(
+    tool_call: ToolCall,
+    *,
+    timeout_seconds: float,
+) -> ToolResult:
+    return ToolResult.failure(
+        tool_name=tool_call.tool_name,
+        error=(
+            f"Tool '{tool_call.tool_name}' timed out after "
+            f"{timeout_seconds:g} seconds."
+        ),
+    )
+
+
+def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
+    return ToolResult.failure(
+        tool_name=tool_call.tool_name,
+        error=f"Tool '{tool_call.tool_name}' was cancelled.",
+    )
 
 
 def _resolve_tool_definitions(
@@ -501,36 +700,6 @@ def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...]
     if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
         return None
     return tuple(raw_tool_calls)
-
-
-def _execute_runtime_tool_call(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    tracer: Tracer,
-    tool_registry: ToolRegistry,
-    tool_call: ToolCall,
-) -> ToolResult:
-    """Execute one runtime-level tool call with shared tracing and persistence."""
-    tool_started_at = perf_counter()
-    tracer.trace_tool_started(
-        session_id=session_id,
-        tool_name=tool_call.tool_name,
-        arguments=tool_call.arguments,
-    )
-    tool_result = _dispatch_runtime_tool_call(
-        tool_registry=tool_registry,
-        tool_call=tool_call,
-    )
-    _finalize_runtime_tool_call(
-        session_manager=session_manager,
-        session_id=session_id,
-        tracer=tracer,
-        tool_call=tool_call,
-        tool_result=tool_result,
-        tool_duration_ms=elapsed_ms(tool_started_at),
-    )
-    return tool_result
 
 
 def _dispatch_runtime_tool_call(

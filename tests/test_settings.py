@@ -110,6 +110,35 @@ def test_load_settings_errors_when_logging_retention_is_negative(
     )
 
 
+def test_load_settings_reads_runtime_guardrail_config(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.runtime.tool_timeout_seconds == 15.0
+    assert settings.app.runtime.max_tool_calls_per_turn == 8
+
+
+def test_load_settings_errors_when_runtime_tool_budget_is_negative(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["runtime"]["max_tool_calls_per_turn"] = -1
+    _write_yaml(app_config_path, app_payload)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(project_root=project_root)
+
+    assert (
+        str(exc_info.value)
+        == "Configuration key 'max_tool_calls_per_turn' must be a non-negative integer."
+    )
+
+
 def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
     make_temp_project,
 ) -> None:

@@ -17,7 +17,7 @@ from unclaw.core.capabilities import (
 )
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
-from unclaw.core.runtime import run_user_turn
+from unclaw.core.runtime import RuntimeTurnCancellation, run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import (
     LLMConnectionError,
@@ -3565,6 +3565,489 @@ def test_agent_loop_max_steps_guardrail(
         )
 
         assert reply == _MAX_STEPS_FALLBACK_REPLY
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_marks_timed_out_tool_as_failure_and_continues(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    assert isinstance(app_payload, dict)
+    runtime_payload = app_payload.setdefault("runtime", {})
+    assert isinstance(runtime_payload, dict)
+    runtime_payload["tool_timeout_seconds"] = 0.05
+    app_config_path.write_text(
+        yaml.safe_dump(app_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url="http://127.0.0.1:11434",
+            default_timeout_seconds=60.0,
+        ):
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com/slow"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {
+                                            "url": "https://example.com/slow"
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            tool_messages = [
+                message.content
+                for message in messages
+                if message.role is LLMRole.TOOL
+            ]
+            assert len(tool_messages) == 1
+            assert "timed out after 0.05 seconds" in tool_messages[0]
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The fetch tool timed out, so I could not inspect the page.",
+                created_at="2026-03-13T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: (
+            time.sleep(0.20)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="This body should arrive too late.",
+            )
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Fetch the slow page.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Fetch the slow page.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "The fetch tool timed out, so I could not inspect the page."
+        assert call_count == 2
+
+        tool_finished_events = [
+            event for event in published_events if event.event_type == "tool.finished"
+        ]
+        assert len(tool_finished_events) == 1
+        assert tool_finished_events[0].payload["success"] is False
+        assert (
+            tool_finished_events[0].payload["error"]
+            == "Tool 'fetch_url_text' timed out after 0.05 seconds."
+        )
+
+        stored_tool_messages = [
+            message.content
+            for message in session_manager.list_messages(session.id)
+            if message.role is MessageRole.TOOL
+        ]
+        assert len(stored_tool_messages) == 1
+        assert stored_tool_messages[0].startswith("Tool: fetch_url_text\nOutcome: error")
+        assert "timed out after 0.05 seconds" in stored_tool_messages[0]
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_cancellation_stops_additional_tool_execution(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    from unclaw.core.runtime import _TURN_CANCELLED_REPLY
+
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    tool_started = threading.Event()
+    release_tool = threading.Event()
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url="http://127.0.0.1:11434",
+            default_timeout_seconds=60.0,
+        ):
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count > 1:
+                raise AssertionError("cancelled turns must not call the model again")
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+                tool_calls=(
+                    ToolCall(
+                        tool_name="fetch_url_text",
+                        arguments={"url": "https://example.com/cancel"},
+                    ),
+                ),
+                raw_payload={
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url_text",
+                                    "arguments": {
+                                        "url": "https://example.com/cancel"
+                                    },
+                                }
+                            }
+                        ],
+                    }
+                },
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    def _blocking_tool(call: ToolCall) -> ToolResult:
+        del call
+        tool_started.set()
+        release_tool.wait(timeout=1.0)
+        return ToolResult.ok(
+            tool_name="fetch_url_text",
+            output_text="This body should not be treated as success.",
+        )
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(FETCH_URL_TEXT_DEFINITION, _blocking_tool)
+    turn_cancellation = RuntimeTurnCancellation()
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Cancel the fetch.",
+            session_id=session.id,
+        )
+
+        canceller_thread = threading.Thread(
+            target=lambda: (
+                tool_started.wait(timeout=1.0) and turn_cancellation.cancel()
+            )
+        )
+        canceller_thread.start()
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Cancel the fetch.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            turn_cancellation=turn_cancellation,
+        )
+        release_tool.set()
+        canceller_thread.join(timeout=1.0)
+
+        assert reply == _TURN_CANCELLED_REPLY
+        assert call_count == 1
+
+        tool_finished_events = [
+            event for event in published_events if event.event_type == "tool.finished"
+        ]
+        assert len(tool_finished_events) == 1
+        assert tool_finished_events[0].payload["success"] is False
+        assert tool_finished_events[0].payload["error"] == "Tool 'fetch_url_text' was cancelled."
+
+        stored_tool_messages = [
+            message.content
+            for message in session_manager.list_messages(session.id)
+            if message.role is MessageRole.TOOL
+        ]
+        assert len(stored_tool_messages) == 1
+        assert stored_tool_messages[0].startswith("Tool: fetch_url_text\nOutcome: error")
+        assert "was cancelled" in stored_tool_messages[0]
+    finally:
+        release_tool.set()
+        session_manager.close()
+
+
+def test_agent_loop_tool_budget_stops_excess_tool_calls(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    from unclaw.core.runtime import _TOOL_BUDGET_FALLBACK_REPLY
+
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    assert isinstance(app_payload, dict)
+    runtime_payload = app_payload.setdefault("runtime", {})
+    assert isinstance(runtime_payload, dict)
+    runtime_payload["max_tool_calls_per_turn"] = 1
+    app_config_path.write_text(
+        yaml.safe_dump(app_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    executed_urls: list[str] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url="http://127.0.0.1:11434",
+            default_timeout_seconds=60.0,
+        ):
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com/first"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {
+                                            "url": "https://example.com/first"
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            if call_count == 2:
+                tool_messages = [
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.TOOL
+                ]
+                assert len(tool_messages) == 1
+                assert "First tool result." in tool_messages[0]
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-13T12:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com/second"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {
+                                            "url": "https://example.com/second"
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            raise AssertionError("tool budget exhaustion must stop the loop before another model call")
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    def _fetch_tool(call: ToolCall) -> ToolResult:
+        url = call.arguments["url"]
+        executed_urls.append(url)
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="First tool result.",
+        )
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(FETCH_URL_TEXT_DEFINITION, _fetch_tool)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Use too many tools.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Use too many tools.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == _TOOL_BUDGET_FALLBACK_REPLY
+        assert call_count == 2
+        assert executed_urls == ["https://example.com/first"]
+
+        tool_finished_events = [
+            event for event in published_events if event.event_type == "tool.finished"
+        ]
+        assert len(tool_finished_events) == 1
+        assert tool_finished_events[0].payload["success"] is True
+
+        stored_tool_messages = [
+            message.content
+            for message in session_manager.list_messages(session.id)
+            if message.role is MessageRole.TOOL
+        ]
+        assert len(stored_tool_messages) == 1
+        assert "First tool result." in stored_tool_messages[0]
     finally:
         session_manager.close()
 
