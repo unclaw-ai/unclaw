@@ -346,7 +346,7 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             model_name="qwen3.5:9b",
             temperature=0.2,
             thinking_supported=True,
-            tool_mode="json_plan",
+            tool_mode="native",
         ),
         "codex": ModelProfileDraft(
             provider="ollama",

@@ -8,6 +8,7 @@ import yaml
 
 from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
+from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.settings import load_settings
 
 pytestmark = pytest.mark.unit
@@ -121,6 +122,18 @@ def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
         "Default model profile 'ghost' is not defined in "
         f"{models_config_path}."
     )
+
+
+def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+
+    profile = resolve_model_profile(settings, "deep")
+
+    assert profile.capabilities.tool_mode == "native"
+    assert profile.capabilities.supports_native_tool_calling is True
 
 
 def test_load_telegram_config_errors_when_yaml_is_malformed(tmp_path: Path) -> None:
