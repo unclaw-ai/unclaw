@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -357,11 +359,17 @@ def test_telegram_allow_latest_uses_logged_rejected_chat(
     tracer.trace_telegram_chat_rejected(chat_id=77, reason="unauthorized")
     session_manager.close()
 
+    if os.name == "posix":
+        settings.paths.database_path.chmod(0o644)
+        assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o644
+
     assert telegram_bot.main(project_root=project_root, command="allow-latest") == 0
     assert telegram_bot.load_telegram_config(settings).allowed_chat_ids == frozenset(
         {77}
     )
     assert "77" in capsys.readouterr().out
+    if os.name == "posix":
+        assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o600
 
 
 def test_telegram_allow_command_normalizes_duplicates_and_preserves_config_values(

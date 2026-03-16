@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import warnings
 from pathlib import Path
+
+_DATABASE_FILE_MODE = 0o600
 
 
 def open_connection(database_path: str | Path) -> sqlite3.Connection:
@@ -13,9 +17,28 @@ def open_connection(database_path: str | Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(path)
+    ensure_database_permissions(path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON;")
     return connection
+
+
+def ensure_database_permissions(path: Path) -> None:
+    """Enforce owner-only permissions for the local SQLite database on POSIX."""
+
+    if os.name != "posix" or not path.exists():
+        return
+
+    try:
+        os.chmod(path, _DATABASE_FILE_MODE)
+    except OSError:
+        warnings.warn(
+            (
+                "Unclaw could not enforce owner-only permissions on the local "
+                f"SQLite database: {path}"
+            ),
+            stacklevel=2,
+        )
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from unclaw.db.sqlite import open_connection
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import utc_now_iso
 from unclaw.settings import Settings
@@ -156,8 +157,7 @@ def find_latest_rejected_chat_id(settings: Settings) -> int | None:
     if not database_path.exists():
         return None
 
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
+    connection = open_connection(database_path)
     try:
         rows = connection.execute(
             """

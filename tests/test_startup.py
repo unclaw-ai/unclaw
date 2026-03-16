@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -274,6 +276,42 @@ def test_bootstrap_keeps_old_runtime_traces_when_retention_is_disabled(
 
     assert [event.event_type for event in persisted_events] == ["trace.old"]
     assert log_path.read_text(encoding="utf-8").splitlines() == [old_log_line]
+
+
+def test_session_manager_initialization_creates_database_with_secure_permissions_on_posix(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    session_manager = SessionManager.from_settings(settings)
+    try:
+        assert settings.paths.database_path.exists()
+    finally:
+        session_manager.close()
+
+    if os.name == "posix":
+        assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o600
+
+
+def test_bootstrap_rehardens_existing_database_permissions_on_posix(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    session_manager = SessionManager.from_settings(settings)
+    session_manager.close()
+
+    if os.name == "posix":
+        settings.paths.database_path.chmod(0o644)
+        assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o644
+
+    bootstrap(project_root=project_root)
+
+    assert settings.paths.database_path.exists()
+    if os.name == "posix":
+        assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o600
 
 
 def _repo_root() -> Path:
