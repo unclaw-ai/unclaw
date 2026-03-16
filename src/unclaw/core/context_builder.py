@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 
+from unclaw.constants import DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT
 from unclaw.core.capabilities import (
     RuntimeCapabilitySummary,
     build_runtime_capability_context,
@@ -31,7 +32,7 @@ def build_context_messages(
     session_manager: SessionManager,
     session_id: str,
     user_message: str,
-    max_history_size: int | None = 20,
+    max_history_size: int | None = DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT,
     capability_summary: RuntimeCapabilitySummary | None = None,
     system_context_notes: Sequence[str] | None = None,
 ) -> list[LLMMessage]:

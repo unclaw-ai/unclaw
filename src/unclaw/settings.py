@@ -17,6 +17,10 @@ from unclaw.constants import (
     CONFIG_DIRECTORY_NAME,
     DATA_DIRECTORY_NAME,
     DATABASE_FILE_NAME,
+    DEFAULT_LOG_RETENTION_DAYS,
+    DEFAULT_OLLAMA_REQUEST_TIMEOUT_SECONDS,
+    DEFAULT_RUNTIME_TOOL_CALL_LIMIT,
+    DEFAULT_RUNTIME_TOOL_TIMEOUT_SECONDS,
     DISPLAY_NAME,
     FILES_DIRECTORY_NAME,
     LOG_FILE_NAME,
@@ -306,7 +310,7 @@ def _build_app_settings(
         retention_days=_get_non_negative_int(
             logging_section,
             "retention_days",
-            default=30,
+            default=DEFAULT_LOG_RETENTION_DAYS,
         ),
         include_reasoning_text=_get_bool(
             logging_section,
@@ -325,12 +329,12 @@ def _build_app_settings(
         tool_timeout_seconds=_get_positive_float(
             runtime_section,
             "tool_timeout_seconds",
-            default=15.0,
+            default=DEFAULT_RUNTIME_TOOL_TIMEOUT_SECONDS,
         ),
         max_tool_calls_per_turn=_get_non_negative_int(
             runtime_section,
             "max_tool_calls_per_turn",
-            default=8,
+            default=DEFAULT_RUNTIME_TOOL_CALL_LIMIT,
         ),
     )
     security_settings = SecuritySettings(
@@ -356,7 +360,7 @@ def _build_app_settings(
             timeout_seconds=_get_positive_float(
                 ollama_provider_section,
                 "timeout_seconds",
-                default=60.0,
+                default=DEFAULT_OLLAMA_REQUEST_TIMEOUT_SECONDS,
             )
         )
     )

@@ -51,6 +51,11 @@ from unclaw.core.research_flow import (
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.core.timing import elapsed_ms
+from unclaw.constants import (
+    TELEGRAM_PENDING_MESSAGE_LIMIT_PER_CHAT,
+    TELEGRAM_PENDING_UPDATE_WAIT_INTERVAL_SECONDS,
+    TELEGRAM_POLL_RETRY_DELAY_SECONDS,
+)
 from unclaw.errors import UnclawError
 from unclaw.local_secrets import resolve_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
@@ -66,9 +71,6 @@ from unclaw.settings import Settings
 from unclaw.startup import build_banner, build_startup_report, format_startup_report
 
 LOGGER = logging.getLogger(__name__)
-_POLL_RETRY_DELAY_SECONDS = 3.0
-_MAX_PENDING_MESSAGES_PER_CHAT = 2
-_PENDING_UPDATE_WAIT_INTERVAL_SECONDS = 0.01
 
 # Backward-compatible aliases for names that moved to focused Telegram modules.
 # These are referenced by tests and other modules via telegram_bot.<name>.
@@ -154,7 +156,7 @@ class TelegramBotChannel:
         default_factory=dict
     )
     chat_workers: dict[int, _TelegramChatWorker] = field(default_factory=dict)
-    max_pending_messages_per_chat: int = _MAX_PENDING_MESSAGES_PER_CHAT
+    max_pending_messages_per_chat: int = TELEGRAM_PENDING_MESSAGE_LIMIT_PER_CHAT
     clock: Callable[[], float] = time.time
     owns_session_manager: bool = False
     _chat_workers_lock: threading.Lock = field(
@@ -214,7 +216,7 @@ class TelegramBotChannel:
                 )
             except TelegramApiError as exc:
                 LOGGER.error("Telegram polling failed: %s", exc)
-                time.sleep(_POLL_RETRY_DELAY_SECONDS)
+                time.sleep(TELEGRAM_POLL_RETRY_DELAY_SECONDS)
                 continue
 
             for update in updates:
@@ -240,7 +242,7 @@ class TelegramBotChannel:
                     )
                 except TelegramApiError as exc:
                     LOGGER.error("Telegram polling failed: %s", exc)
-                    time.sleep(_POLL_RETRY_DELAY_SECONDS)
+                    time.sleep(TELEGRAM_POLL_RETRY_DELAY_SECONDS)
                     continue
 
                 for update in updates:
@@ -390,7 +392,7 @@ class TelegramBotChannel:
                     return
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Timed out while waiting for Telegram updates.")
-            time.sleep(_PENDING_UPDATE_WAIT_INTERVAL_SECONDS)
+            time.sleep(TELEGRAM_PENDING_UPDATE_WAIT_INTERVAL_SECONDS)
 
     def _close_chat_workers(self) -> None:
         with self._chat_workers_lock:

@@ -10,6 +10,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from unclaw.async_utils import run_blocking
+from unclaw.constants import DEFAULT_OLLAMA_REQUEST_TIMEOUT_SECONDS
 from unclaw.llm.base import (
     BaseLLMProvider,
     LLMContentCallback,
@@ -37,7 +38,7 @@ class OllamaProvider(BaseLLMProvider):
         self,
         *,
         base_url: str = "http://127.0.0.1:11434",
-        default_timeout_seconds: float = 60.0,
+        default_timeout_seconds: float = DEFAULT_OLLAMA_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._default_timeout_seconds = default_timeout_seconds

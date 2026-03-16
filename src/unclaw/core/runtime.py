@@ -22,7 +22,12 @@ from unclaw.core.orchestrator import (
 from unclaw.core.router import RouteKind, route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
-from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
+from unclaw.constants import (
+    DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
+    EMPTY_RESPONSE_REPLY,
+    RUNTIME_ERROR_REPLY,
+    RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS,
+)
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
@@ -35,7 +40,6 @@ from unclaw.tools.dispatcher import ToolDispatcher
 if TYPE_CHECKING:
     from unclaw.tools.registry import ToolRegistry
 
-_MAX_AGENT_STEPS_DEFAULT = 6
 _MAX_STEPS_FALLBACK_REPLY = (
     "I reached the maximum number of steps for this request. "
     "Here is what I found so far."
@@ -44,7 +48,6 @@ _TOOL_BUDGET_FALLBACK_REPLY = (
     "I stopped after reaching the tool-call limit for this request."
 )
 _TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
-_TOOL_POLL_INTERVAL_SECONDS = 0.01
 
 
 @dataclass(slots=True)
@@ -95,7 +98,7 @@ def run_user_turn(
     tool_registry: ToolRegistry | None = None,
     explicit_tool_call: ToolCall | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
-    max_agent_steps: int = _MAX_AGENT_STEPS_DEFAULT,
+    max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: RuntimeTurnCancellation | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
@@ -634,7 +637,7 @@ def _collect_pending_tool_results(
                 )
 
         if any(result is None for result in resolved_by_index):
-            sleep(_TOOL_POLL_INTERVAL_SECONDS)
+            sleep(RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS)
 
     return tuple(
         (pending_call, resolved_result, finished_at)

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from unclaw.constants import (
+    DEFAULT_SESSION_MEMORY_SNIPPET_LIMIT,
+    SESSION_MEMORY_SNIPPET_CHARACTER_LIMIT,
+)
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.schemas.session import SessionRecord
@@ -30,7 +34,7 @@ class MemoryManager:
     """Manage small session summaries and recent snippets."""
 
     session_manager: SessionManager
-    recent_snippet_limit: int = 3
+    recent_snippet_limit: int = DEFAULT_SESSION_MEMORY_SNIPPET_LIMIT
 
     def build_context_note(self, session_id: str | None = None) -> str | None:
         """Build one bounded note that can be injected into model context."""
@@ -167,6 +171,8 @@ class MemoryManager:
         if not normalized_content:
             return None
 
-        if len(normalized_content) > 90:
-            normalized_content = f"{normalized_content[:87].rstrip(' ,;:.')}..."
+        if len(normalized_content) > SESSION_MEMORY_SNIPPET_CHARACTER_LIMIT:
+            normalized_content = (
+                f"{normalized_content[:SESSION_MEMORY_SNIPPET_CHARACTER_LIMIT - 3].rstrip(' ,;:.')}..."
+            )
         return f"- {message.role.value}: {normalized_content}"

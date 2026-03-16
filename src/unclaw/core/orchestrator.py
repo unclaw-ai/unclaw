@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 
+from unclaw.constants import DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT
 from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.context_builder import build_context_messages
 from unclaw.core.session_manager import SessionManager
@@ -66,7 +67,7 @@ class Orchestrator:
         session_id: str,
         user_message: str,
         model_profile_name: str,
-        max_history_size: int | None = 20,
+        max_history_size: int | None = DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT,
         capability_summary: RuntimeCapabilitySummary | None = None,
         system_context_notes: Sequence[str] | None = None,
         thinking_enabled: bool = False,

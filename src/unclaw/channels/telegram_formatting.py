@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from unclaw.constants import TELEGRAM_MESSAGE_CHARACTER_LIMIT
 from unclaw.core.command_handler import CommandResult, CommandStatus
 from unclaw.tools.contracts import ToolDefinition, ToolResult
 
-MESSAGE_LIMIT = 4000
+MESSAGE_LIMIT = TELEGRAM_MESSAGE_CHARACTER_LIMIT
 NON_TEXT_MESSAGE_REPLY = "Please send a text message or a slash command."
 RATE_LIMITED_CHAT_MESSAGE = (
     "Too many messages arrived before the previous reply finished. "

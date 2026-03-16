@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from unclaw.constants import TELEGRAM_REJECTED_CHAT_LOOKBACK_LIMIT
 from unclaw.db.sqlite import open_connection
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import utc_now_iso
@@ -165,9 +166,12 @@ def find_latest_rejected_chat_id(settings: Settings) -> int | None:
             FROM events
             WHERE event_type = ?
             ORDER BY created_at DESC, rowid DESC
-            LIMIT 20
+            LIMIT ?
             """,
-            (_LATEST_REJECTED_EVENT_TYPE,),
+            (
+                _LATEST_REJECTED_EVENT_TYPE,
+                TELEGRAM_REJECTED_CHAT_LOOKBACK_LIMIT,
+            ),
         ).fetchall()
     except sqlite3.Error:
         return None

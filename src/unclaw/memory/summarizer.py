@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from unclaw.constants import (
+    SESSION_SUMMARY_FINDING_CHARACTER_LIMIT,
+    SESSION_SUMMARY_INTENT_CHARACTER_LIMIT,
+    SESSION_SUMMARY_INTENT_LIMIT,
+    SESSION_SUMMARY_RETAINED_FACT_LIMIT,
+    SESSION_SUMMARY_RETAINED_UNCERTAINTY_LIMIT,
+    SESSION_SUMMARY_REPLY_CHARACTER_LIMIT,
+)
 from unclaw.core.search_grounding import parse_search_tool_history
 from unclaw.schemas.chat import ChatMessage, MessageRole
-
-_MAX_INTENT_COUNT = 3
-_MAX_INTENT_LENGTH = 80
-_MAX_REPLY_LENGTH = 120
-_MAX_RETAINED_FACT_COUNT = 3
-_MAX_RETAINED_UNCERTAINTY_COUNT = 2
-_MAX_RETAINED_FINDING_LENGTH = 120
 
 
 def summarize_session_messages(messages: Iterable[ChatMessage]) -> str:
@@ -26,17 +27,17 @@ def summarize_session_messages(messages: Iterable[ChatMessage]) -> str:
     retained_grounded_facts = _collect_retained_search_findings(
         ordered_messages,
         include_uncertain=False,
-        limit=_MAX_RETAINED_FACT_COUNT,
+        limit=SESSION_SUMMARY_RETAINED_FACT_LIMIT,
     )
     retained_uncertain_details = _collect_retained_search_findings(
         ordered_messages,
         include_uncertain=True,
-        limit=_MAX_RETAINED_UNCERTAINTY_COUNT,
+        limit=SESSION_SUMMARY_RETAINED_UNCERTAINTY_LIMIT,
     )
     latest_assistant_reply = _find_latest_reply(
         ordered_messages,
         role=MessageRole.ASSISTANT,
-        limit=_MAX_REPLY_LENGTH,
+        limit=SESSION_SUMMARY_REPLY_CHARACTER_LIMIT,
     )
 
     user_count = sum(1 for message in ordered_messages if message.role == MessageRole.USER)
@@ -90,7 +91,10 @@ def _collect_recent_user_intents(messages: list[ChatMessage]) -> list[str]:
         if message.role != MessageRole.USER:
             continue
 
-        snippet = _summary_fragment(message.content, limit=_MAX_INTENT_LENGTH)
+        snippet = _summary_fragment(
+            message.content,
+            limit=SESSION_SUMMARY_INTENT_CHARACTER_LIMIT,
+        )
         if snippet is None:
             continue
 
@@ -100,7 +104,7 @@ def _collect_recent_user_intents(messages: list[ChatMessage]) -> list[str]:
 
         snippets.append(snippet)
         seen_snippets.add(normalized_snippet)
-        if len(snippets) >= _MAX_INTENT_COUNT:
+        if len(snippets) >= SESSION_SUMMARY_INTENT_LIMIT:
             break
 
     snippets.reverse()
@@ -124,7 +128,10 @@ def _collect_retained_search_findings(
         if grounding is None:
             continue
 
-        query_label = _summary_fragment(grounding.query, limit=_MAX_INTENT_LENGTH)
+        query_label = _summary_fragment(
+            grounding.query,
+            limit=SESSION_SUMMARY_INTENT_CHARACTER_LIMIT,
+        )
         source_findings = (
             grounding.uncertain_findings
             if include_uncertain
@@ -134,7 +141,7 @@ def _collect_retained_search_findings(
         for finding in source_findings:
             finding_text = _summary_fragment(
                 finding.text,
-                limit=_MAX_RETAINED_FINDING_LENGTH,
+                limit=SESSION_SUMMARY_FINDING_CHARACTER_LIMIT,
             )
             if finding_text is None:
                 continue

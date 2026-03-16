@@ -8,13 +8,13 @@ from datetime import date
 from enum import StrEnum
 
 from unclaw.core.capabilities import RuntimeCapabilitySummary
+from unclaw.constants import ROUTER_CLASSIFIER_TIMEOUT_SECONDS
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
 from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
 
-_ROUTER_CLASSIFIER_TIMEOUT_SECONDS = 15.0
 _ROUTER_SYSTEM_PROMPT = (
     "Decide whether the user's request should stay on normal chat or use a "
     "web-backed search route. Return JSON only with keys route and "
@@ -153,7 +153,7 @@ def _classify_route_with_model(
         response = provider.chat(
             profile=classifier_profile,
             messages=_build_router_messages(user_input),
-            timeout_seconds=_ROUTER_CLASSIFIER_TIMEOUT_SECONDS,
+            timeout_seconds=ROUTER_CLASSIFIER_TIMEOUT_SECONDS,
             thinking_enabled=False,
         )
     except LLMProviderError:

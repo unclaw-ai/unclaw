@@ -14,6 +14,12 @@ from enum import StrEnum
 from pathlib import Path
 from time import sleep
 
+from unclaw.constants import (
+    OLLAMA_STARTUP_INSPECTION_TIMEOUT_SECONDS,
+    OLLAMA_STARTUP_POLL_INTERVAL_SECONDS,
+    OLLAMA_STARTUP_RECHECK_TIMEOUT_SECONDS,
+    OLLAMA_STARTUP_WAIT_TIMEOUT_SECONDS,
+)
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMProviderError
 from unclaw.local_secrets import local_secrets_path, resolve_telegram_bot_token
@@ -95,7 +101,10 @@ class OllamaStatus:
     error_message: str | None = None
 
 
-def inspect_ollama(*, timeout_seconds: float = 1.5) -> OllamaStatus:
+def inspect_ollama(
+    *,
+    timeout_seconds: float = OLLAMA_STARTUP_INSPECTION_TIMEOUT_SECONDS,
+) -> OllamaStatus:
     """Inspect whether the local Ollama runtime looks ready."""
 
     cli_path = shutil.which("ollama")
@@ -139,19 +148,19 @@ def inspect_ollama(*, timeout_seconds: float = 1.5) -> OllamaStatus:
 
 def wait_for_ollama(
     *,
-    timeout_seconds: float = 8.0,
-    poll_interval_seconds: float = 0.5,
+    timeout_seconds: float = OLLAMA_STARTUP_WAIT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = OLLAMA_STARTUP_POLL_INTERVAL_SECONDS,
 ) -> OllamaStatus:
     """Wait briefly for Ollama to become reachable."""
 
     elapsed_seconds = 0.0
     while elapsed_seconds <= timeout_seconds:
-        status = inspect_ollama(timeout_seconds=1.0)
+        status = inspect_ollama(timeout_seconds=OLLAMA_STARTUP_RECHECK_TIMEOUT_SECONDS)
         if status.is_running:
             return status
         sleep(poll_interval_seconds)
         elapsed_seconds += poll_interval_seconds
-    return inspect_ollama(timeout_seconds=1.0)
+    return inspect_ollama(timeout_seconds=OLLAMA_STARTUP_RECHECK_TIMEOUT_SECONDS)
 
 
 def start_ollama_server(log_path: Path) -> subprocess.Popen[bytes]:
