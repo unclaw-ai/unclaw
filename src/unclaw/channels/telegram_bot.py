@@ -40,6 +40,10 @@ from unclaw.local_secrets import resolve_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory import MemoryManager
+from unclaw.memory.protocols import (
+    SessionMemoryChannelInterface,
+    SessionMemorySummaryRefresher,
+)
 from unclaw.schemas.chat import MessageRole
 from unclaw.schemas.session import SessionRecord
 from unclaw.settings import Settings
@@ -78,7 +82,7 @@ class TelegramBotChannel:
     settings: Settings
     config: TelegramConfig
     session_manager: SessionManager
-    memory_manager: MemoryManager
+    memory_manager: SessionMemoryChannelInterface
     tracer: Tracer
     tool_executor: ToolExecutor
     api_client: TelegramApiClient
@@ -664,15 +668,14 @@ def _format_tool_result(result: ToolResult) -> str:
 
 def _refresh_memory_summary(
     *,
-    memory_manager,
+    memory_manager: SessionMemorySummaryRefresher,
     session_id: str,
 ) -> None:
-    refresh_summary = getattr(memory_manager, "build_or_refresh_session_summary", None)
-    if not callable(refresh_summary):
+    if not isinstance(memory_manager, SessionMemorySummaryRefresher):
         return
 
     try:
-        refresh_summary(session_id)
+        memory_manager.build_or_refresh_session_summary(session_id)
     except UnclawError as exc:
         LOGGER.warning("Could not refresh session summary for %s: %s", session_id, exc)
 

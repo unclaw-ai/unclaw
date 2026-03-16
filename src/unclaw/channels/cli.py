@@ -22,6 +22,7 @@ from unclaw.errors import UnclawError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory import MemoryManager
+from unclaw.memory.protocols import SessionMemorySummaryRefresher
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import Settings
 from unclaw.startup import (
@@ -157,7 +158,7 @@ def run_cli(
     *,
     session_manager: SessionManager,
     command_handler: CommandHandler,
-    memory_manager: MemoryManager,
+    memory_manager: SessionMemorySummaryRefresher,
     tracer: Tracer,
     tool_executor: ToolExecutor,
 ) -> int:
@@ -366,15 +367,14 @@ def _render_assistant_reply(reply_text: str) -> None:
 
 def _refresh_session_summary(
     *,
-    memory_manager: MemoryManager,
+    memory_manager: SessionMemorySummaryRefresher,
     session_id: str,
 ) -> None:
-    refresh_summary = getattr(memory_manager, "build_or_refresh_session_summary", None)
-    if not callable(refresh_summary):
+    if not isinstance(memory_manager, SessionMemorySummaryRefresher):
         return
 
     try:
-        refresh_summary(session_id)
+        memory_manager.build_or_refresh_session_summary(session_id)
     except UnclawError as exc:
         print(f"Warning: could not refresh session summary: {exc}")
 

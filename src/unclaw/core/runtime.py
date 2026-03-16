@@ -27,6 +27,7 @@ from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
+from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
@@ -307,15 +308,14 @@ def _build_session_memory_context_note(
     command_handler: CommandHandler,
     session_id: str,
 ) -> str | None:
-    memory_manager = getattr(command_handler, "memory_manager", None)
-    if memory_manager is None:
+    memory_manager = command_handler.memory_manager
+    if (
+        memory_manager is None
+        or not isinstance(memory_manager, SessionMemoryContextProvider)
+    ):
         return None
 
-    build_context_note = getattr(memory_manager, "build_context_note", None)
-    if not callable(build_context_note):
-        return None
-
-    note = build_context_note(session_id)
+    note = memory_manager.build_context_note(session_id)
     if not isinstance(note, str):
         return None
 

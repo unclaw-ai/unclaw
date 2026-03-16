@@ -15,7 +15,7 @@ from unclaw.tools.contracts import ToolCall
 
 if TYPE_CHECKING:
     from unclaw.logs.tracer import Tracer
-    from unclaw.memory import MemoryManager
+    from unclaw.memory.protocols import SessionMemoryCommandInterface
 
 _FREEFORM_TOOL_COMMANDS = frozenset({"fetch", "ls", "read", "search"})
 
@@ -58,7 +58,7 @@ class CommandHandler:
 
     settings: Settings
     session_manager: SessionManager
-    memory_manager: MemoryManager | None = None
+    memory_manager: SessionMemoryCommandInterface | None = None
     tracer: Tracer | None = None
     current_model_profile_name: str | None = None
     thinking_enabled: bool | None = None
