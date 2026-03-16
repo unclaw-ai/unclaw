@@ -33,6 +33,7 @@ def build_context_messages(
     user_message: str,
     max_history_size: int | None = 20,
     capability_summary: RuntimeCapabilitySummary | None = None,
+    system_context_notes: Sequence[str] | None = None,
 ) -> list[LLMMessage]:
     """Build the minimal message list sent to the selected model."""
     normalized_user_message = user_message.strip()
@@ -51,6 +52,12 @@ def build_context_messages(
                 role=LLMRole.SYSTEM,
                 content=build_runtime_capability_context(capability_summary),
             )
+        )
+    if system_context_notes:
+        context_messages.extend(
+            LLMMessage(role=LLMRole.SYSTEM, content=note)
+            for note in system_context_notes
+            if note.strip()
         )
     if has_search_grounding_context(recent_history):
         context_messages.append(

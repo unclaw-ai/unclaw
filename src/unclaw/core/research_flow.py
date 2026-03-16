@@ -115,7 +115,7 @@ def run_search_command(
     # results are already persisted) but before the assistant reply is
     # stored, so it can safely inspect session history.
     def _grounding_transform(reply: str) -> str:
-        return _apply_search_grounding_from_history(
+        return apply_search_grounding_from_history(
             reply,
             query=query,
             session_manager=session_manager,
@@ -289,7 +289,31 @@ def _build_search_user_request(query: str) -> str:
     )
 
 
-def _apply_search_grounding_from_history(
+def build_web_search_route_note(
+    *,
+    query: str,
+    search_results_ready: bool,
+) -> str:
+    """Build a small system note for normal turns routed into web-backed mode."""
+    lines = [
+        "Route requirement: this turn needs web-backed grounding.",
+        f"Ground this request: {query}",
+    ]
+    if search_results_ready:
+        lines.append(
+            "Grounded search results should already be present in this "
+            "conversation. Do not answer from unsupported memory."
+        )
+    else:
+        lines.append(
+            "If grounded search results are not already present in this "
+            "conversation, call the search_web tool with a focused query."
+        )
+    lines.append("Answer from retrieved evidence and include compact sources.")
+    return "\n".join(lines)
+
+
+def apply_search_grounding_from_history(
     reply: str,
     *,
     query: str,

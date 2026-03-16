@@ -16,7 +16,7 @@ from unclaw.core.orchestrator import (
     OrchestratorError,
     OrchestratorTurnResult,
 )
-from unclaw.core.router import route_request
+from unclaw.core.router import RouteKind, route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.errors import ConfigurationError
@@ -94,11 +94,18 @@ def run_user_turn(
         input_length=len(user_input),
     )
 
+    active_assistant_reply_transform = assistant_reply_transform
+    system_context_notes: tuple[str, ...] = ()
+    runtime_explicit_tool_call = explicit_tool_call
+
     try:
         route = route_request(
             settings=session_manager.settings,
             model_profile_name=selected_model_profile_name,
+            user_input=user_input,
             thinking_enabled=thinking_enabled,
+            capability_summary=capability_summary,
+            allow_web_search_routing=explicit_tool_call is None,
         )
         active_tracer.trace_route_selected(
             session_id=session.id,
@@ -106,13 +113,28 @@ def run_user_turn(
             model_profile_name=route.model_profile_name,
         )
 
-        if explicit_tool_call is not None and tool_definitions is None:
+        if route.kind is RouteKind.WEB_SEARCH:
+            (
+                system_context_notes,
+                active_assistant_reply_transform,
+                runtime_explicit_tool_call,
+            ) = _prepare_web_search_route(
+                session_manager=session_manager,
+                session_id=session.id,
+                user_input=user_input,
+                route=route,
+                assistant_reply_transform=assistant_reply_transform,
+            )
+
+        if runtime_explicit_tool_call is not None and (
+            route.kind is RouteKind.WEB_SEARCH or tool_definitions is None
+        ):
             _execute_runtime_tool_call(
                 session_manager=session_manager,
                 session_id=session.id,
                 tracer=active_tracer,
                 tool_registry=active_tool_registry,
-                tool_call=explicit_tool_call,
+                tool_call=runtime_explicit_tool_call,
             )
 
         orchestrator = Orchestrator(
@@ -125,6 +147,7 @@ def run_user_turn(
             user_message=user_input,
             model_profile_name=route.model_profile_name,
             capability_summary=capability_summary,
+            system_context_notes=system_context_notes,
             thinking_enabled=thinking_enabled,
             content_callback=stream_output_func,
             tools=tool_definitions,
@@ -182,8 +205,8 @@ def run_user_turn(
         )
         assistant_reply = RUNTIME_ERROR_REPLY
 
-    if assistant_reply_transform is not None:
-        assistant_reply = assistant_reply_transform(assistant_reply)
+    if active_assistant_reply_transform is not None:
+        assistant_reply = active_assistant_reply_transform(assistant_reply)
 
     session_manager.add_message(
         MessageRole.ASSISTANT,
@@ -196,6 +219,64 @@ def run_user_turn(
         turn_duration_ms=_elapsed_ms(turn_started_at),
     )
     return assistant_reply
+
+
+def _prepare_web_search_route(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+    route: Any,
+    assistant_reply_transform: Callable[[str], str] | None,
+) -> tuple[tuple[str, ...], Callable[[str], str] | None, ToolCall | None]:
+    from unclaw.core.research_flow import (
+        apply_search_grounding_from_history,
+        build_web_search_route_note,
+    )
+
+    search_query = (
+        route.search_query.strip()
+        if isinstance(route.search_query, str) and route.search_query.strip()
+        else user_input.strip()
+    )
+    system_context_notes = (
+        build_web_search_route_note(
+            query=search_query,
+            search_results_ready=True,
+        ),
+    )
+
+    def _grounding_transform(reply: str) -> str:
+        return apply_search_grounding_from_history(
+            reply,
+            query=search_query,
+            session_manager=session_manager,
+            session_id=session_id,
+        )
+
+    return (
+        system_context_notes,
+        _compose_reply_transforms(_grounding_transform, assistant_reply_transform),
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": search_query},
+        ),
+    )
+
+
+def _compose_reply_transforms(
+    first: Callable[[str], str] | None,
+    second: Callable[[str], str] | None,
+) -> Callable[[str], str] | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+
+    def _composed(reply: str) -> str:
+        return second(first(reply))
+
+    return _composed
 
 
 def _run_agent_loop(

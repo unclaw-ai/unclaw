@@ -444,6 +444,163 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
         session_manager.close()
 
 
+def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_for_non_native_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=(
+            "Search query: Marine Leleu biographie\n"
+            "Sources fetched: 2 of 2 attempted\n"
+            "Evidence kept: 4\n"
+        ),
+        payload={
+            "query": "Marine Leleu biographie",
+            "summary_points": [
+                "Marine Leleu is a French endurance athlete and content creator."
+            ],
+            "display_sources": [
+                {
+                    "title": "Marine Leleu",
+                    "url": "https://example.com/marine-leleu",
+                },
+                {
+                    "title": "Athlete Profile",
+                    "url": "https://example.com/athletes/marine-leleu",
+                },
+            ],
+        },
+    )
+    tool_registry = _build_search_tool_registry(search_tool_result)
+
+    captured_messages: list[list[LLMMessage]] = []
+    captured_tools: list[object | None] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback
+            first_message = messages[0]
+            if (
+                first_message.role is LLMRole.SYSTEM
+                and "Return JSON only with keys route and search_query" in first_message.content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content='{"route":"web_search","search_query":"Marine Leleu biographie"}',
+                    created_at="2026-03-16T10:00:00Z",
+                    finish_reason="stop",
+                )
+
+            captured_tools.append(tools)
+            captured_messages.append(list(messages))
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Marine Leleu is a French endurance athlete and content creator.",
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        user_input = "fais une recherche en ligne sur Marine Leleu et fais moi sa biographie"
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            event_bus=event_bus,
+            tool_registry=tool_registry,
+        )
+
+        assert "Marine Leleu is a French endurance athlete and content creator." in reply
+        assert "Sources:" in reply
+        assert "https://example.com/marine-leleu" in reply
+        assert "https://example.com/athletes/marine-leleu" in reply
+        assert captured_tools == [None]
+        assert any(
+            message.role is LLMRole.SYSTEM
+            and "Route requirement: this turn needs web-backed grounding." in message.content
+            for message in captured_messages[0]
+        )
+        assert any(
+            message.role is LLMRole.TOOL
+            and "Marine Leleu: https://example.com/marine-leleu" in message.content
+            for message in captured_messages[0]
+        )
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
+
+        event_types = [event.event_type for event in published_events]
+        assert event_types == [
+            "runtime.started",
+            "route.selected",
+            "tool.started",
+            "tool.finished",
+            "model.called",
+            "model.succeeded",
+            "assistant.reply.persisted",
+        ]
+        route_event = next(
+            event for event in published_events if event.event_type == "route.selected"
+        )
+        assert route_event.payload["route_kind"] == "web_search"
+    finally:
+        session_manager.close()
+
+
 def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_context(
     monkeypatch,
     tmp_path: Path,

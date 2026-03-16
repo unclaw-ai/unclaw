@@ -67,6 +67,7 @@ class Orchestrator:
         model_profile_name: str,
         max_history_size: int | None = 20,
         capability_summary: RuntimeCapabilitySummary | None = None,
+        system_context_notes: Sequence[str] | None = None,
         thinking_enabled: bool = False,
         content_callback: LLMContentCallback | None = None,
         tools: Sequence[ToolDefinition] | None = None,
@@ -80,6 +81,7 @@ class Orchestrator:
             user_message=user_message,
             max_history_size=max_history_size,
             capability_summary=capability_summary,
+            system_context_notes=system_context_notes,
         )
 
         self.tracer.trace_model_called(
