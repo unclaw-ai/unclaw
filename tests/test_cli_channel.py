@@ -4,6 +4,8 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from unclaw.channels.cli import _TerminalAssistantStream
 from unclaw.channels.cli import run_cli
 from unclaw.core.command_handler import CommandHandler
@@ -15,6 +17,8 @@ from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+
+pytestmark = pytest.mark.integration
 
 
 def test_terminal_assistant_stream_finishes_cleanly_when_stream_matches(capsys) -> None:

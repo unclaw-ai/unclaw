@@ -10,6 +10,8 @@ from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
 from unclaw.settings import load_settings
 
+pytestmark = pytest.mark.unit
+
 
 def test_load_settings_errors_when_app_config_file_is_missing(tmp_path: Path) -> None:
     project_root = _create_temp_project(tmp_path)

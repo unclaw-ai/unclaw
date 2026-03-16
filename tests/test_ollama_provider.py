@@ -457,6 +457,8 @@ _SIMPLE_TOOL = ToolDefinition(
 )
 
 
+@pytest.mark.integration
+@pytest.mark.real_ollama
 @_skip_no_ollama
 def test_integration_tool_definitions_accepted_by_ollama() -> None:
     """Ollama accepts a chat request with tool definitions and returns
@@ -480,6 +482,8 @@ def test_integration_tool_definitions_accepted_by_ollama() -> None:
     assert isinstance(response.raw_payload, dict)
 
 
+@pytest.mark.integration
+@pytest.mark.real_ollama
 @_skip_no_ollama
 def test_integration_tool_call_response_parsed_into_contract() -> None:
     """When prompted to use a tool, a real Ollama model returns a tool_call

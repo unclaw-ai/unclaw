@@ -20,6 +20,8 @@ from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
+pytestmark = pytest.mark.integration
+
 EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
 
 

@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0,<9.0",
+  "pytest-cov>=7.0,<8.0",
   "ruff>=0.11,<0.12",
 ]
 
@@ -31,3 +32,23 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+markers = [
+  "unit: focused unit and config-validation tests.",
+  "integration: tests that exercise multiple layers together.",
+  "e2e: end-to-end flow tests through the public entrypoints.",
+  "reliability: stability, long-history, or concurrency regression tests.",
+  "real_ollama: integration tests that talk to a live local Ollama instance.",
+]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["src/unclaw"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

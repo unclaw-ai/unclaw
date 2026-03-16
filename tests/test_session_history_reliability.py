@@ -5,6 +5,8 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.research_flow import run_search_command
 from unclaw.core.runtime import run_user_turn
@@ -17,6 +19,8 @@ from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+
+pytestmark = pytest.mark.reliability
 
 
 def test_run_user_turn_stays_stable_across_repeated_turns_with_long_history(

@@ -5,6 +5,7 @@ from datetime import date as real_date
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from unclaw.core.capabilities import (
@@ -23,6 +24,8 @@ from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+
+pytestmark = pytest.mark.integration
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(

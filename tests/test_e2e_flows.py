@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
 from unclaw import main as unclaw_main
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMResponse, LLMRole
@@ -12,6 +14,8 @@ from unclaw.startup import OllamaStatus
 from unclaw.tools.contracts import ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+
+pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
 
 def test_start_entrypoint_bootstraps_runtime_and_leaves_a_usable_session(
