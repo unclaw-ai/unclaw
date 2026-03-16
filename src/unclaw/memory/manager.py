@@ -32,6 +32,30 @@ class MemoryManager:
     session_manager: SessionManager
     recent_snippet_limit: int = 3
 
+    def build_context_note(self, session_id: str | None = None) -> str | None:
+        """Build one bounded note that can be injected into model context."""
+
+        state = self.get_session_state(
+            session_id,
+            recent_limit=0,
+        )
+        if state.message_count <= 1:
+            return None
+        if state.summary_text == "No messages yet.":
+            return None
+
+        return "\n".join(
+            (
+                "Persisted session memory (deterministic summary):",
+                state.summary_text,
+                (
+                    "Use this as prior conversation context. Prefer the more "
+                    "specific messages below when they overlap, and prefer current "
+                    "tool output for fresh external facts."
+                ),
+            )
+        )
+
     def build_or_refresh_session_summary(self, session_id: str | None = None) -> str:
         """Rebuild the stored summary text for one session."""
 

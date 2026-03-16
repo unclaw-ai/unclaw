@@ -100,6 +100,13 @@ def run_user_turn(
     runtime_explicit_tool_call = explicit_tool_call
 
     try:
+        memory_context_note = _build_session_memory_context_note(
+            command_handler=command_handler,
+            session_id=session.id,
+        )
+        if memory_context_note is not None:
+            system_context_notes = (memory_context_note,)
+
         route = route_request(
             settings=session_manager.settings,
             model_profile_name=selected_model_profile_name,
@@ -116,7 +123,7 @@ def run_user_turn(
 
         if route.kind is RouteKind.WEB_SEARCH:
             (
-                system_context_notes,
+                route_context_notes,
                 active_assistant_reply_transform,
                 runtime_explicit_tool_call,
             ) = _prepare_web_search_route(
@@ -126,6 +133,7 @@ def run_user_turn(
                 route=route,
                 assistant_reply_transform=assistant_reply_transform,
             )
+            system_context_notes = (*system_context_notes, *route_context_notes)
 
         if runtime_explicit_tool_call is not None and (
             route.kind is RouteKind.WEB_SEARCH or tool_definitions is None
@@ -220,6 +228,27 @@ def run_user_turn(
         turn_duration_ms=elapsed_ms(turn_started_at),
     )
     return assistant_reply
+
+
+def _build_session_memory_context_note(
+    *,
+    command_handler: CommandHandler,
+    session_id: str,
+) -> str | None:
+    memory_manager = getattr(command_handler, "memory_manager", None)
+    if memory_manager is None:
+        return None
+
+    build_context_note = getattr(memory_manager, "build_context_note", None)
+    if not callable(build_context_note):
+        return None
+
+    note = build_context_note(session_id)
+    if not isinstance(note, str):
+        return None
+
+    normalized_note = note.strip()
+    return normalized_note or None
 
 
 def _prepare_web_search_route(
