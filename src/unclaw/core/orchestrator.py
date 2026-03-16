@@ -9,6 +9,7 @@ from time import perf_counter
 from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.context_builder import build_context_messages
 from unclaw.core.session_manager import SessionManager
+from unclaw.core.timing import elapsed_ms
 from unclaw.errors import UnclawError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse
 from unclaw.llm.model_profiles import resolve_model_profile
@@ -106,13 +107,13 @@ class Orchestrator:
                 provider=profile.provider,
                 model_profile_name=profile.name,
                 model_name=profile.model_name,
-                duration_ms=_elapsed_ms(model_started_at),
+                duration_ms=elapsed_ms(model_started_at),
                 error=str(exc),
             ) from exc
 
         return OrchestratorTurnResult(
             response=response,
-            model_duration_ms=_elapsed_ms(model_started_at),
+            model_duration_ms=elapsed_ms(model_started_at),
             context_messages=tuple(context_messages),
         )
 
@@ -152,13 +153,13 @@ class Orchestrator:
                 provider=profile.provider,
                 model_profile_name=profile.name,
                 model_name=profile.model_name,
-                duration_ms=_elapsed_ms(model_started_at),
+                duration_ms=elapsed_ms(model_started_at),
                 error=str(exc),
             ) from exc
 
         return OrchestratorTurnResult(
             response=response,
-            model_duration_ms=_elapsed_ms(model_started_at),
+            model_duration_ms=elapsed_ms(model_started_at),
             context_messages=tuple(messages),
         )
 
@@ -173,7 +174,3 @@ class Orchestrator:
         raise OrchestratorError(
             f"Provider '{provider_name}' is not supported by the minimal runtime."
         )
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))

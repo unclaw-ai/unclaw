@@ -17,6 +17,7 @@ from unclaw.core.research_flow import (
 )
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
+from unclaw.core.timing import elapsed_ms
 from unclaw.errors import UnclawError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -207,7 +208,7 @@ def run_cli(
                     success=tool_result.success,
                     output_length=len(tool_result.output_text),
                     error=tool_result.error,
-                    tool_duration_ms=_elapsed_ms(tool_started_at),
+                    tool_duration_ms=elapsed_ms(tool_started_at),
                 )
                 persist_tool_result(
                     session_manager=session_manager,
@@ -369,10 +370,6 @@ def _refresh_session_summary(
         refresh_summary(session_id)
     except UnclawError as exc:
         print(f"Warning: could not refresh session summary: {exc}")
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))
 
 
 if __name__ == "__main__":

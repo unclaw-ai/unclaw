@@ -34,6 +34,7 @@ from unclaw.core.research_flow import (
 )
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
+from unclaw.core.timing import elapsed_ms
 from unclaw.errors import ConfigurationError, UnclawError
 from unclaw.local_secrets import resolve_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
@@ -287,7 +288,7 @@ class TelegramBotChannel:
                     success=tool_result.success,
                     output_length=len(tool_result.output_text),
                     error=tool_result.error,
-                    tool_duration_ms=_elapsed_ms(tool_started_at),
+                    tool_duration_ms=elapsed_ms(tool_started_at),
                 )
                 persist_tool_result(
                     session_manager=self.session_manager,
@@ -695,11 +696,5 @@ def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str
 
     chunks.append(remaining)
     return chunks
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((time.perf_counter() - started_at) * 1000))
-
-
 if __name__ == "__main__":
     raise SystemExit(main())

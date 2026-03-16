@@ -18,6 +18,7 @@ from unclaw.core.orchestrator import (
 )
 from unclaw.core.router import RouteKind, route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.core.timing import elapsed_ms
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
@@ -216,7 +217,7 @@ def run_user_turn(
     active_tracer.trace_assistant_reply_persisted(
         session_id=session.id,
         output_length=len(assistant_reply),
-        turn_duration_ms=_elapsed_ms(turn_started_at),
+        turn_duration_ms=elapsed_ms(turn_started_at),
     )
     return assistant_reply
 
@@ -418,7 +419,7 @@ def _execute_runtime_tool_call(
         success=tool_result.success,
         output_length=len(tool_result.output_text),
         error=tool_result.error,
-        tool_duration_ms=_elapsed_ms(tool_started_at),
+        tool_duration_ms=elapsed_ms(tool_started_at),
     )
     persist_tool_result(
         session_manager=session_manager,
@@ -427,7 +428,3 @@ def _execute_runtime_tool_call(
         tool_call=tool_call,
     )
     return tool_result
-
-
-def _elapsed_ms(started_at: float) -> int:
-    return max(0, round((perf_counter() - started_at) * 1000))
