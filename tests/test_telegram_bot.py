@@ -60,11 +60,10 @@ class FakeTracer:
         self.events.append(("tool_finished", dict(kwargs)))
 
 
-def test_load_telegram_config_denies_all_when_allowlist_is_empty(
-    tmp_path: Path,
+def test_load_telegram_config_shipped_default_denies_all(
     make_temp_project,
 ) -> None:
-    project_root = make_temp_project(allowed_chat_ids=[])
+    project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
 
     config = telegram_bot.load_telegram_config(settings)
