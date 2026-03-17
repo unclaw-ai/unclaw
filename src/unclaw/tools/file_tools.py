@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from unclaw.tools.registry import ToolRegistry
 
 _DEFAULT_MAX_FILE_CHARS = 8_000
 _DEFAULT_DIRECTORY_LIMIT = 200
+_MAX_WRITE_FILE_CHARS = 1_000_000  # 1 MB upper bound on text content
 
 READ_TEXT_FILE_DEFINITION = ToolDefinition(
     name="read_text_file",
@@ -47,6 +49,27 @@ LIST_DIRECTORY_DEFINITION = ToolDefinition(
     },
 )
 
+WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
+    name="write_text_file",
+    description=(
+        "Write plain UTF-8 text content to a local file within allowed roots. "
+        "Fails if the file already exists unless overwrite is set to true. "
+        "Content is limited to 1 MB. Only writes inside the configured allowed roots."
+    ),
+    permission_level=ToolPermissionLevel.LOCAL_WRITE,
+    arguments={
+        "path": ToolArgumentSpec(description="Path to the file to write."),
+        "content": ToolArgumentSpec(description="UTF-8 text content to write."),
+        "overwrite": ToolArgumentSpec(
+            description=(
+                "Set to true to allow overwriting an existing file. "
+                "Default: false — write fails if the file already exists."
+            ),
+            value_type="boolean",
+        ),
+    },
+)
+
 
 def register_file_tools(
     registry: ToolRegistry,
@@ -66,8 +89,12 @@ def register_file_tools(
     def list_handler(call: ToolCall) -> ToolResult:
         return list_directory(call, allowed_roots=allowed_roots)
 
+    def write_handler(call: ToolCall) -> ToolResult:
+        return write_text_file(call, allowed_roots=allowed_roots)
+
     registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
     registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
+    registry.register(WRITE_TEXT_FILE_DEFINITION, write_handler)
 
 
 def read_text_file(
@@ -207,6 +234,89 @@ def list_directory(
             "max_depth": max_depth,
             "displayed_entries": displayed_entries,
             "truncated": truncated,
+        },
+    )
+
+
+def write_text_file(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> ToolResult:
+    """Write plain UTF-8 text to a local file, bounded and permissioned."""
+    tool_name = WRITE_TEXT_FILE_DEFINITION.name
+
+    path_value = call.arguments.get("path")
+    if not isinstance(path_value, str) or not path_value.strip():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'path' must be a non-empty string.",
+        )
+
+    content = call.arguments.get("content")
+    if not isinstance(content, str):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'content' must be a string.",
+        )
+
+    overwrite = call.arguments.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'overwrite' must be a boolean.",
+        )
+
+    if len(content) > _MAX_WRITE_FILE_CHARS:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"Content exceeds the maximum allowed size of "
+                f"{_MAX_WRITE_FILE_CHARS} characters."
+            ),
+        )
+
+    path = _resolve_path(path_value.strip())
+    access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=path,
+        allowed_roots=_normalize_allowed_roots(allowed_roots),
+    )
+    if access_error is not None:
+        return access_error
+
+    if path.exists() and not overwrite:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"File already exists: {path}. "
+                "Pass overwrite=true to replace it."
+            ),
+        )
+
+    if path.exists() and not path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Path exists but is not a file: {path}",
+        )
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Could not write file '{path}': {exc}",
+        )
+
+    return ToolResult.ok(
+        tool_name=tool_name,
+        output_text=f"File written: {path}",
+        payload={
+            "path": str(path),
+            "size_chars": len(content),
+            "overwrite": overwrite,
         },
     )
 
@@ -354,7 +464,10 @@ def _read_positive_int_argument(
 __all__ = [
     "LIST_DIRECTORY_DEFINITION",
     "READ_TEXT_FILE_DEFINITION",
+    "WRITE_TEXT_FILE_DEFINITION",
+    "_MAX_WRITE_FILE_CHARS",
     "list_directory",
     "read_text_file",
     "register_file_tools",
+    "write_text_file",
 ]

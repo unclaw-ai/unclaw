@@ -13,6 +13,7 @@ from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
     LIST_DIRECTORY_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
+    WRITE_TEXT_FILE_DEFINITION,
     register_file_tools,
 )
 from unclaw.tools.notes_tools import (
@@ -123,6 +124,7 @@ __all__ = [
     "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",
     "UPDATE_NOTE_DEFINITION",
+    "WRITE_TEXT_FILE_DEFINITION",
     "create_default_tool_registry",
     "execute_tool_call",
     "register_default_tools",
