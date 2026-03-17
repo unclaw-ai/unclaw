@@ -49,6 +49,64 @@ _TOOL_BUDGET_FALLBACK_REPLY = (
 )
 _TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
 
+# ---------------------------------------------------------------------------
+# Overwrite intent guard — P3-4 corrective mission.
+# Explicitly required by the P3-4 mission spec; satisfies mandatory_rules.md
+# rule 5 allowed exception (tiny local safeguard, scoped, not core routing)
+# and rule 10 (explicitly justified, easy to audit, easy to remove).
+# ---------------------------------------------------------------------------
+
+_OVERWRITE_INTENT_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "écrase",
+        "écraser",
+        "remplace",
+        "remplacer",
+        "réécris par-dessus",
+        "overwrite",
+        "replace existing",
+        "overwrite the file",
+        "replace the file",
+    }
+)
+
+
+def _has_explicit_overwrite_intent(user_input: str) -> bool:
+    """Return True if user_input contains an explicit overwrite intent keyword.
+
+    Keyword list is defined in the P3-4 corrective mission spec.
+    Checks the latest user turn only, never the full conversation history.
+    """
+    lowered = user_input.lower()
+    return any(keyword in lowered for keyword in _OVERWRITE_INTENT_KEYWORDS)
+
+
+def _guard_write_overwrite_intent(
+    tool_calls: Sequence[ToolCall],
+    user_input: str,
+) -> Sequence[ToolCall]:
+    """Strip overwrite=True from write_text_file calls when user intent is absent.
+
+    When the user's message contains an explicit overwrite keyword, calls pass
+    through unchanged. Otherwise overwrite=True is removed so the tool naturally
+    returns a 'file already exists' error, prompting the assistant to surface
+    the conflict and ask the user for explicit confirmation before retrying.
+    """
+    if _has_explicit_overwrite_intent(user_input):
+        return tool_calls
+
+    guarded: list[ToolCall] = []
+    for call in tool_calls:
+        if call.tool_name == "write_text_file":
+            overwrite_val = call.arguments.get("overwrite")
+            overwrite_is_true = overwrite_val is True or overwrite_val == "true"
+            if overwrite_is_true:
+                new_args = {k: v for k, v in call.arguments.items() if k != "overwrite"}
+                guarded.append(ToolCall(tool_name=call.tool_name, arguments=new_args))
+                continue
+        guarded.append(call)
+    return guarded
+
 
 @dataclass(slots=True)
 class RuntimeTurnCancellation:
@@ -259,6 +317,7 @@ def run_user_turn(
                     content_callback=stream_output_func,
                     max_steps=max_agent_steps,
                     tool_guard_state=tool_guard_state,
+                    user_input=user_input,
                 )
             else:
                 assistant_reply = response.response.content.strip() or EMPTY_RESPONSE_REPLY
@@ -406,6 +465,7 @@ def _run_agent_loop(
     content_callback: LLMContentCallback | None,
     max_steps: int,
     tool_guard_state: _RuntimeToolGuardState,
+    user_input: str = "",
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
     context_messages: list[LLMMessage] = list(first_response.context_messages)
@@ -415,6 +475,9 @@ def _run_agent_loop(
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
             return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
+
+        # Apply overwrite intent guard before executing write_text_file calls.
+        tool_calls = _guard_write_overwrite_intent(tool_calls, user_input)
 
         stop_reply = _preflight_runtime_tool_batch(
             tool_calls=tool_calls,

@@ -21,7 +21,8 @@ _ROUTER_SYSTEM_PROMPT = (
     "search_query. route must be one of: chat, web_search, unclear. Use "
     "web_search only when the user explicitly asks for online research or when "
     "a responsible answer needs current or externally verifiable public facts. "
-    "Use chat for conversation, stable general knowledge, or local reasoning. "
+    "Use chat for conversation, stable general knowledge, local reasoning, "
+    "and local actions such as system information, notes, or file operations. "
     "Keep search_query empty unless route is web_search."
 )
 

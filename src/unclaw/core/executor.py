@@ -63,6 +63,7 @@ def create_default_tool_registry(settings: Settings | None = None) -> ToolRegist
         registry,
         project_root=settings.paths.project_root,
         configured_roots=settings.app.security.tools.files.allowed_roots,
+        default_write_dir=settings.paths.files_dir,
     )
     register_web_tools(
         registry,

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from unclaw.tools.file_tools import LIST_DIRECTORY_DEFINITION, READ_TEXT_FILE_DEFINITION
+from unclaw.tools.file_tools import (
+    LIST_DIRECTORY_DEFINITION,
+    READ_TEXT_FILE_DEFINITION,
+    WRITE_TEXT_FILE_DEFINITION,
+)
+from unclaw.tools.notes_tools import CREATE_NOTE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
@@ -22,6 +27,8 @@ class RuntimeCapabilitySummary:
     system_info_available: bool
     memory_summary_available: bool
     model_can_call_tools: bool = False
+    notes_available: bool = False
+    local_file_write_available: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -55,6 +62,8 @@ def build_runtime_capability_summary(
         system_info_available=SYSTEM_INFO_DEFINITION.name in available_tool_name_set,
         memory_summary_available=memory_summary_available,
         model_can_call_tools=model_can_call_tools,
+        notes_available=CREATE_NOTE_DEFINITION.name in available_tool_name_set,
+        local_file_write_available=WRITE_TEXT_FILE_DEFINITION.name in available_tool_name_set,
     )
 
 
@@ -155,6 +164,18 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
         lines.append(
             "system_info: return a read-only summary of the local machine and runtime."
         )
+    if summary.notes_available:
+        lines.append(
+            "create_note / read_note / list_notes / update_note: "
+            "create, read, list, or overwrite local markdown notes."
+        )
+    if summary.local_file_write_available:
+        lines.append(
+            "write_text_file <path>: write a new local file. "
+            "Relative paths are created inside data/files/ by default. "
+            "Default is overwrite=false — fails if the file already exists. "
+            "Only use overwrite=true when the user explicitly intends to replace an existing file."
+        )
     return tuple(lines)
 
 
@@ -174,6 +195,10 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
         lines.insert(0, "Web search via /search <query>.")
     if not summary.system_info_available:
         lines.insert(0, "Local machine and runtime information via system_info.")
+    if not summary.notes_available:
+        lines.insert(0, "Local notes (create_note, read_note, list_notes, update_note).")
+    if not summary.local_file_write_available:
+        lines.insert(0, "Local file write via write_text_file.")
     if not summary.memory_summary_available:
         lines.insert(0, "Session memory and summary access.")
 

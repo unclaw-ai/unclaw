@@ -1,4 +1,4 @@
-"""Targeted tests for write_text_file — P3-3."""
+"""Targeted tests for write_text_file — P3-3 and P3-4 corrective patch."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 from unclaw.core.executor import create_default_tool_registry
+from unclaw.core.runtime import (
+    _guard_write_overwrite_intent,
+    _has_explicit_overwrite_intent,
+)
 from unclaw.tools.contracts import ToolCall, ToolPermissionLevel
 from unclaw.tools.file_tools import (
     WRITE_TEXT_FILE_DEFINITION,
@@ -240,3 +244,192 @@ def test_write_text_file_dispatched_via_registry_handler(tmp_path: Path) -> None
     result = registered.handler(call)
     assert result.success is True
     assert (tmp_path / "via-handler.txt").read_text(encoding="utf-8") == "dispatched"
+
+
+# ---------------------------------------------------------------------------
+# P3-4 corrective: default_write_dir — relative paths go to data/files/
+# ---------------------------------------------------------------------------
+
+
+def test_relative_path_writes_to_default_write_dir(tmp_path: Path) -> None:
+    """Relative path 'hello.txt' must land in default_write_dir/hello.txt."""
+    write_dir = tmp_path / "files"
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "hello.txt", "content": "hi"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,), default_write_dir=write_dir)
+    assert result.success is True
+    assert (write_dir / "hello.txt").read_text(encoding="utf-8") == "hi"
+    # Must NOT land at tmp_path/hello.txt
+    assert not (tmp_path / "hello.txt").exists()
+
+
+def test_nested_relative_path_writes_under_default_write_dir(tmp_path: Path) -> None:
+    """Nested relative path 'drafts/hello.txt' resolves under default_write_dir."""
+    write_dir = tmp_path / "files"
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "drafts/hello.txt", "content": "draft"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,), default_write_dir=write_dir)
+    assert result.success is True
+    assert (write_dir / "drafts" / "hello.txt").read_text(encoding="utf-8") == "draft"
+
+
+def test_absolute_path_bypasses_default_write_dir(tmp_path: Path) -> None:
+    """Absolute allowed path must bypass the default_write_dir redirect."""
+    write_dir = tmp_path / "files"
+    target = tmp_path / "explicit.txt"
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "explicit"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,), default_write_dir=write_dir)
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "explicit"
+    # Must NOT be in files/
+    assert not (write_dir / "explicit.txt").exists()
+
+
+def test_relative_path_respects_allowed_roots_traversal_block(tmp_path: Path) -> None:
+    """A relative path trying to escape write_dir via .. must be blocked."""
+    write_dir = tmp_path / "files"
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "../../escape.txt", "content": "bad"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,), default_write_dir=write_dir)
+    assert result.success is False
+
+
+def test_register_file_tools_passes_default_write_dir_to_handler(tmp_path: Path) -> None:
+    """register_file_tools with default_write_dir wires the redirect into the handler."""
+    write_dir = tmp_path / "files"
+    registry = ToolRegistry()
+    register_file_tools(registry, project_root=tmp_path, default_write_dir=write_dir)
+
+    registered = registry.get("write_text_file")
+    assert registered is not None
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "via-handler.txt", "content": "via handler"},
+    )
+    result = registered.handler(call)
+    assert result.success is True
+    assert (write_dir / "via-handler.txt").read_text(encoding="utf-8") == "via handler"
+
+
+# ---------------------------------------------------------------------------
+# P3-4 corrective: overwrite intent guard
+# ---------------------------------------------------------------------------
+
+
+def test_has_explicit_overwrite_intent_detects_english_keywords() -> None:
+    assert _has_explicit_overwrite_intent("please overwrite the file")
+    assert _has_explicit_overwrite_intent("replace existing content")
+    assert _has_explicit_overwrite_intent("Overwrite it")
+
+
+def test_has_explicit_overwrite_intent_detects_french_keywords() -> None:
+    assert _has_explicit_overwrite_intent("écrase ce fichier")
+    assert _has_explicit_overwrite_intent("tu peux écraser")
+    assert _has_explicit_overwrite_intent("remplace le fichier")
+    assert _has_explicit_overwrite_intent("remplacer ce contenu")
+
+
+def test_has_explicit_overwrite_intent_returns_false_for_neutral_input() -> None:
+    assert not _has_explicit_overwrite_intent("write hello.txt with 'hi'")
+    assert not _has_explicit_overwrite_intent("create a note about my tasks")
+    assert not _has_explicit_overwrite_intent("save my draft to drafts/draft.txt")
+
+
+def test_guard_strips_overwrite_when_no_intent(tmp_path: Path) -> None:
+    """overwrite=True is stripped when user_input contains no overwrite intent."""
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "file.txt", "content": "hello", "overwrite": True},
+    )
+    guarded = _guard_write_overwrite_intent([call], user_input="write file.txt")
+    assert len(guarded) == 1
+    assert guarded[0].arguments.get("overwrite") is None
+
+
+def test_guard_passes_overwrite_through_when_intent_present(tmp_path: Path) -> None:
+    """overwrite=True is preserved when user_input contains explicit intent."""
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "file.txt", "content": "new", "overwrite": True},
+    )
+    guarded = _guard_write_overwrite_intent([call], user_input="please overwrite the file")
+    assert len(guarded) == 1
+    assert guarded[0].arguments.get("overwrite") is True
+
+
+def test_guard_strips_string_true_overwrite_when_no_intent() -> None:
+    """overwrite='true' (string from LLM) is also stripped when no intent."""
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "file.txt", "content": "hello", "overwrite": "true"},
+    )
+    guarded = _guard_write_overwrite_intent([call], user_input="write file.txt")
+    assert len(guarded) == 1
+    assert guarded[0].arguments.get("overwrite") is None
+
+
+def test_guard_does_not_affect_other_tools() -> None:
+    """The guard only touches write_text_file; other tools pass through unchanged."""
+    call = ToolCall(
+        tool_name="search_web",
+        arguments={"query": "hello", "overwrite": True},
+    )
+    guarded = _guard_write_overwrite_intent([call], user_input="search something")
+    assert len(guarded) == 1
+    assert guarded[0].arguments.get("overwrite") is True
+
+
+def test_existing_file_not_overwritten_without_intent(tmp_path: Path) -> None:
+    """End-to-end: existing file + overwrite=True + no intent → tool fails."""
+    write_dir = tmp_path / "files"
+    write_dir.mkdir()
+    existing = write_dir / "file.txt"
+    existing.write_text("original", encoding="utf-8")
+
+    # Guard strips overwrite, then tool returns "already exists" error.
+    call_with_overwrite = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "file.txt", "content": "new", "overwrite": True},
+    )
+    guarded = _guard_write_overwrite_intent(
+        [call_with_overwrite], user_input="update file.txt with new content"
+    )
+    guarded_call = guarded[0]
+    result = write_text_file(
+        guarded_call, allowed_roots=(tmp_path,), default_write_dir=write_dir
+    )
+    assert result.success is False
+    assert "already exists" in result.error  # type: ignore[operator]
+    assert existing.read_text(encoding="utf-8") == "original"
+
+
+def test_existing_file_overwritten_with_explicit_intent(tmp_path: Path) -> None:
+    """End-to-end: existing file + overwrite=True + explicit intent → succeeds."""
+    write_dir = tmp_path / "files"
+    write_dir.mkdir()
+    existing = write_dir / "file.txt"
+    existing.write_text("original", encoding="utf-8")
+
+    call_with_overwrite = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "file.txt", "content": "replaced", "overwrite": True},
+    )
+    guarded = _guard_write_overwrite_intent(
+        [call_with_overwrite], user_input="please overwrite the file with new content"
+    )
+    guarded_call = guarded[0]
+    result = write_text_file(
+        guarded_call, allowed_roots=(tmp_path,), default_write_dir=write_dir
+    )
+    assert result.success is True
+    assert existing.read_text(encoding="utf-8") == "replaced"

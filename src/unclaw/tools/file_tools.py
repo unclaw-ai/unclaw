@@ -52,7 +52,8 @@ LIST_DIRECTORY_DEFINITION = ToolDefinition(
 WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
     name="write_text_file",
     description=(
-        "Write plain UTF-8 text content to a local file within allowed roots. "
+        "Write plain UTF-8 text content to a local file. "
+        "Relative paths are created inside the data/files/ directory by default. "
         "Fails if the file already exists unless overwrite is set to true. "
         "Content is limited to 1 MB. Only writes inside the configured allowed roots."
     ),
@@ -76,6 +77,7 @@ def register_file_tools(
     *,
     project_root: Path | None = None,
     configured_roots: tuple[str, ...] = (),
+    default_write_dir: Path | None = None,
 ) -> None:
     """Register the built-in local file tools."""
     allowed_roots = resolve_allowed_roots(
@@ -90,7 +92,11 @@ def register_file_tools(
         return list_directory(call, allowed_roots=allowed_roots)
 
     def write_handler(call: ToolCall) -> ToolResult:
-        return write_text_file(call, allowed_roots=allowed_roots)
+        return write_text_file(
+            call,
+            allowed_roots=allowed_roots,
+            default_write_dir=default_write_dir,
+        )
 
     registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
     registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
@@ -242,6 +248,7 @@ def write_text_file(
     call: ToolCall,
     *,
     allowed_roots: tuple[Path, ...] | None = None,
+    default_write_dir: Path | None = None,
 ) -> ToolResult:
     """Write plain UTF-8 text to a local file, bounded and permissioned."""
     tool_name = WRITE_TEXT_FILE_DEFINITION.name
@@ -276,7 +283,12 @@ def write_text_file(
             ),
         )
 
-    path = _resolve_path(path_value.strip())
+    path_str = path_value.strip()
+    if not Path(path_str).is_absolute() and default_write_dir is not None:
+        path = (default_write_dir / path_str).resolve()
+    else:
+        path = _resolve_path(path_str)
+
     access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=path,
