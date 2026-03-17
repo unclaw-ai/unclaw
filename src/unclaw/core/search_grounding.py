@@ -16,7 +16,7 @@ from unclaw.core.search_payload_helpers import (
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.tools.contracts import SearchWebPayload
 
-_MAX_COMPOSED_FACTS = 3
+_MAX_COMPOSED_FACTS = 5
 _SEARCH_TOOL_PREFIX = "Tool: search_web\n"
 _STALE_AS_OF_PATTERN = re.compile(
     r"\bas of\s+(?:"

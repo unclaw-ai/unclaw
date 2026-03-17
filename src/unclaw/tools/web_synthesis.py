@@ -45,8 +45,8 @@ from unclaw.tools.web_text import (
 )
 
 _MIN_SUMMARY_EVIDENCE_SCORE = 3.0
-_MAX_SUMMARY_POINTS = 5
-_MAX_SUMMARY_POINT_CHARS = 260
+_MAX_SUMMARY_POINTS = 8
+_MAX_SUMMARY_POINT_CHARS = 400
 
 
 @dataclass(frozen=True, slots=True)
