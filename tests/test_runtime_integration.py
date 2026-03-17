@@ -5249,3 +5249,126 @@ def _freeze_search_grounding_date(monkeypatch) -> None:
     monkeypatch.setattr("unclaw.core.context_builder.date", FixedDate)
     monkeypatch.setattr("unclaw.core.research_flow.date", FixedDate)
     monkeypatch.setattr("unclaw.core.search_grounding.date", FixedDate)
+
+
+# ---------------------------------------------------------------------------
+# P3-4 corrective follow-up: overwrite-refusal short-circuit in agent loop
+# ---------------------------------------------------------------------------
+
+
+def test_agent_loop_write_text_file_overwrite_refusal_short_circuits(
+    monkeypatch,
+    tmp_path,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Agent loop must return a deterministic refusal reply when write_text_file
+    is blocked by the overwrite-protection guard, and must NOT call the model
+    again — preventing the assistant from falsely claiming the write succeeded.
+
+    Verifies:
+    1. Reply contains "already exists" and "not overwritten".
+    2. The original file content is untouched.
+    3. The fake provider is called exactly once (no second model call).
+    """
+    from unclaw.core.runtime import _build_overwrite_refusal_reply  # noqa: F401 — import proof
+
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    # Create an existing file that the model will try to overwrite.
+    existing_file = tmp_path / "hello.txt"
+    existing_file.write_text("original content", encoding="utf-8")
+
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call: model returns a write_text_file tool call targeting an existing file.
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-18T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="write_text_file",
+                            arguments={"path": str(existing_file), "content": "new content"},
+                        ),
+                    ),
+                    raw_payload={"message": {"content": "", "tool_calls": [
+                        {"function": {"name": "write_text_file", "arguments": {
+                            "path": str(existing_file), "content": "new content",
+                        }}}
+                    ]}},
+                )
+            # Second call must never happen after the refusal short-circuit.
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Le fichier hello.txt a été écrasé avec succès.",
+                created_at="2026-03-18T10:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    # Register real write_text_file with the existing file's directory as allowed root.
+    from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION, write_text_file
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: write_text_file(call, allowed_roots=(tmp_path,)),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "write hello.txt with new content",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="write hello.txt with new content",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        # A. Reply must truthfully say the file was NOT overwritten.
+        assert "already exists" in reply
+        assert "not overwritten" in reply.lower()
+
+        # B. The original file content must be untouched.
+        assert existing_file.read_text(encoding="utf-8") == "original content"
+
+        # C. The model must have been called exactly once — no false-success path.
+        assert call_count == 1, (
+            f"Expected model to be called once (short-circuit after refusal), "
+            f"but it was called {call_count} times."
+        )
+    finally:
+        session_manager.close()

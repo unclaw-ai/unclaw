@@ -108,6 +108,45 @@ def _guard_write_overwrite_intent(
     return guarded
 
 
+# ---------------------------------------------------------------------------
+# Overwrite-refusal deterministic reply — P3-4 corrective follow-up.
+# Prevents the model from falsely claiming success after write_text_file
+# returns the specific "already exists" overwrite-protection failure.
+# Short-circuits the agent loop so the model is never called with the
+# tool-failure context, eliminating the false-success response path.
+# Explicitly required by the P3-4 corrective mission; satisfies
+# mandatory_rules.md rule 7 (smallest correct patch) and rule 10
+# (explicitly justified, visibly scoped, easy to audit and remove).
+# ---------------------------------------------------------------------------
+
+_WRITE_FILE_ALREADY_EXISTS_MARKER = "already exists"
+_OVERWRITE_REFUSED_REPLY_TEMPLATE = (
+    "The file already exists and was not overwritten.\n"
+    "{error}\n"
+    'Please confirm explicitly if you want to replace it '
+    '(for example: "overwrite the file" or "replace the file").'
+)
+
+
+def _build_overwrite_refusal_reply(tool_results: tuple[ToolResult, ...]) -> str | None:
+    """Return a deterministic reply if write_text_file was blocked by overwrite protection.
+
+    Checks tool_results for the specific write_text_file "already exists" error.
+    When found, returns a pre-built refusal reply so the model is never called
+    again on that path — eliminating the false-success assistant reply.
+    Returns None if no such failure is present.
+    """
+    for result in tool_results:
+        if (
+            result.tool_name == "write_text_file"
+            and not result.success
+            and result.error is not None
+            and _WRITE_FILE_ALREADY_EXISTS_MARKER in result.error
+        ):
+            return _OVERWRITE_REFUSED_REPLY_TEMPLATE.format(error=result.error)
+    return None
+
+
 @dataclass(slots=True)
 class RuntimeTurnCancellation:
     """Minimal turn-local cancellation handle for runtime tool execution."""
@@ -496,14 +535,15 @@ def _run_agent_loop(
         )
 
         # Execute tool calls concurrently, then replay results in model order.
-        for tool_result in _execute_runtime_tool_calls(
+        tool_results = _execute_runtime_tool_calls(
             session_manager=session_manager,
             session_id=session_id,
             tracer=tracer,
             tool_registry=tool_registry,
             tool_calls=tool_calls,
             tool_guard_state=tool_guard_state,
-        ):
+        )
+        for tool_result in tool_results:
             context_messages.append(
                 LLMMessage(
                     role=LLMRole.TOOL,
@@ -512,6 +552,13 @@ def _run_agent_loop(
                     ),
                 )
             )
+
+        # Overwrite-refusal short-circuit: if write_text_file was blocked by the
+        # overwrite protection guard, return a deterministic reply immediately.
+        # The model is never called again after this path — it cannot claim success.
+        overwrite_refusal = _build_overwrite_refusal_reply(tool_results)
+        if overwrite_refusal is not None:
+            return overwrite_refusal
 
         if tool_guard_state.is_cancelled():
             return _TURN_CANCELLED_REPLY

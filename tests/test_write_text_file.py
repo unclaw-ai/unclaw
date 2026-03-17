@@ -8,10 +8,11 @@ import pytest
 
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.runtime import (
+    _build_overwrite_refusal_reply,
     _guard_write_overwrite_intent,
     _has_explicit_overwrite_intent,
 )
-from unclaw.tools.contracts import ToolCall, ToolPermissionLevel
+from unclaw.tools.contracts import ToolCall, ToolPermissionLevel, ToolResult
 from unclaw.tools.file_tools import (
     WRITE_TEXT_FILE_DEFINITION,
     _MAX_WRITE_FILE_CHARS,
@@ -433,3 +434,79 @@ def test_existing_file_overwritten_with_explicit_intent(tmp_path: Path) -> None:
     )
     assert result.success is True
     assert existing.read_text(encoding="utf-8") == "replaced"
+
+
+# ---------------------------------------------------------------------------
+# P3-4 corrective follow-up: _build_overwrite_refusal_reply
+# ---------------------------------------------------------------------------
+
+
+def test_build_overwrite_refusal_reply_fires_on_file_exists_failure() -> None:
+    """Returns a deterministic reply for the specific 'already exists' failure."""
+    result = ToolResult.failure(
+        tool_name="write_text_file",
+        error="File already exists: /tmp/hello.txt. Pass overwrite=true to replace it.",
+    )
+    reply = _build_overwrite_refusal_reply((result,))
+    assert reply is not None
+    assert "already exists" in reply
+    assert "not overwritten" in reply.lower()
+    assert "confirm" in reply.lower() or "replace" in reply.lower()
+
+
+def test_build_overwrite_refusal_reply_includes_error_details() -> None:
+    """The reply must surface the tool error text so the user sees the path."""
+    target_path = "/home/user/data/files/notes.txt"
+    error = f"File already exists: {target_path}. Pass overwrite=true to replace it."
+    result = ToolResult.failure(tool_name="write_text_file", error=error)
+    reply = _build_overwrite_refusal_reply((result,))
+    assert reply is not None
+    assert target_path in reply
+
+
+def test_build_overwrite_refusal_reply_returns_none_for_other_write_failures() -> None:
+    """Non-'already exists' write failures do not trigger the short-circuit."""
+    result = ToolResult.failure(
+        tool_name="write_text_file",
+        error="Access to '/etc/passwd' is outside the allowed local roots.",
+    )
+    assert _build_overwrite_refusal_reply((result,)) is None
+
+
+def test_build_overwrite_refusal_reply_returns_none_for_write_success() -> None:
+    """Successful writes must not trigger the short-circuit."""
+    result = ToolResult.ok(
+        tool_name="write_text_file",
+        output_text="File written: /tmp/new.txt",
+    )
+    assert _build_overwrite_refusal_reply((result,)) is None
+
+
+def test_build_overwrite_refusal_reply_returns_none_for_other_tools() -> None:
+    """Only write_text_file triggers the short-circuit, not other tools."""
+    result = ToolResult.failure(
+        tool_name="read_text_file",
+        error="File already exists: /tmp/hello.txt.",
+    )
+    assert _build_overwrite_refusal_reply((result,)) is None
+
+
+def test_build_overwrite_refusal_reply_returns_none_for_empty_results() -> None:
+    """Empty tool result set must return None, not crash."""
+    assert _build_overwrite_refusal_reply(()) is None
+
+
+def test_build_overwrite_refusal_reply_file_content_untouched(tmp_path: Path) -> None:
+    """Refusal path: the original file content is never mutated."""
+    target = tmp_path / "hello.txt"
+    target.write_text("original", encoding="utf-8")
+
+    # Simulate the tool result that fires when overwrite protection activates.
+    result = ToolResult.failure(
+        tool_name="write_text_file",
+        error=f"File already exists: {target}. Pass overwrite=true to replace it.",
+    )
+    reply = _build_overwrite_refusal_reply((result,))
+    assert reply is not None
+    # The guard operates only on ToolResult; the real file must be untouched.
+    assert target.read_text(encoding="utf-8") == "original"
