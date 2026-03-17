@@ -113,6 +113,10 @@ def build_onboarding_file_payloads(
                 "timeout_seconds": settings.app.providers.ollama.timeout_seconds,
             },
         },
+        "runtime": {
+            "tool_timeout_seconds": settings.app.runtime.tool_timeout_seconds,
+            "max_tool_calls_per_turn": settings.app.runtime.max_tool_calls_per_turn,
+        },
         "security": {
             "tools": {
                 "files": {

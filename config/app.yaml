@@ -10,12 +10,11 @@ paths:
   files_dir: files
   database_file: app.db
 logging:
-  level: INFO
-  mode: simple
+  level: DEBUG
+  mode: full
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
-  retention_days: 30
   include_reasoning_text: false
 channels:
   terminal_enabled: true
@@ -24,12 +23,12 @@ models:
   default_profile: main
 thinking:
   default_enabled: false
-runtime:
-  tool_timeout_seconds: 15.0
-  max_tool_calls_per_turn: 8
 providers:
   ollama:
     timeout_seconds: 60.0
+runtime:
+  tool_timeout_seconds: 15.0
+  max_tool_calls_per_turn: 8
 security:
   tools:
     files:
