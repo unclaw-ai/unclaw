@@ -80,6 +80,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert models_payload["profiles"]["codex"]["num_ctx"] == 4096
     assert models_payload["profiles"]["codex"]["keep_alive"] == "10m"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
+    assert telegram_payload["allowed_chat_ids"] == []
     assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
     assert any("BotFather" in line for line in outputs)
     assert any("config/secrets.yaml" in line for line in outputs)
