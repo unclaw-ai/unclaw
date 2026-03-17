@@ -13,6 +13,7 @@ import yaml
 from unclaw.channels import telegram_api, telegram_bot
 from unclaw.core.command_handler import CommandResult, CommandStatus
 from unclaw.core.session_manager import SessionManager
+from unclaw.errors import UnclawError
 from unclaw.local_secrets import mask_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -1260,6 +1261,41 @@ def test_concurrent_dispatch_preserves_existing_command_handling(
 
     assert api_client.sent_messages == [(42, "Telegram help")]
     assert bound_sessions == [(42, "sess-42")]
+
+
+def test_build_chat_worker_channel_raises_unclaw_error_for_missing_factory(
+    monkeypatch,
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, _, _ = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(42,),
+    )
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_supports_isolated_chat_workers",
+        lambda self: True,
+    )
+
+    with pytest.raises(
+        UnclawError,
+        match="missing session_manager_factory",
+    ):
+        channel._build_chat_worker_channel(42)
+
+
+def test_build_chat_worker_channel_returns_self_without_isolated_worker_support(
+    tmp_path: Path,
+    make_temp_project,
+) -> None:
+    channel, _, _ = _build_channel(
+        make_temp_project,
+        allowed_chat_ids=(42,),
+    )
+
+    assert channel._build_chat_worker_channel(42) is channel
 
 
 def _build_channel(

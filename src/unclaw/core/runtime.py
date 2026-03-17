@@ -28,7 +28,7 @@ from unclaw.constants import (
     RUNTIME_ERROR_REPLY,
     RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS,
 )
-from unclaw.errors import ConfigurationError
+from unclaw.errors import ConfigurationError, UnclawError
 from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -288,7 +288,10 @@ def run_user_turn(
         )
         assistant_reply = RUNTIME_ERROR_REPLY
 
-    assert assistant_reply is not None
+    if assistant_reply is None:
+        raise UnclawError(
+            "Runtime turn completed without producing an assistant reply."
+        )
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)

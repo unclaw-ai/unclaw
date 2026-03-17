@@ -313,22 +313,47 @@ class TelegramBotChannel:
         if not self._supports_isolated_chat_workers():
             return self
 
-        assert self.session_manager_factory is not None
-        assert self.memory_manager_factory is not None
-        assert self.tracer_factory is not None
-        assert self.tool_executor_factory is not None
-        assert self.session_store_factory is not None
+        session_manager_factory = self.session_manager_factory
+        if session_manager_factory is None:
+            raise UnclawError(
+                "Telegram isolated chat worker setup is incomplete: "
+                "missing session_manager_factory."
+            )
+        memory_manager_factory = self.memory_manager_factory
+        if memory_manager_factory is None:
+            raise UnclawError(
+                "Telegram isolated chat worker setup is incomplete: "
+                "missing memory_manager_factory."
+            )
+        tracer_factory = self.tracer_factory
+        if tracer_factory is None:
+            raise UnclawError(
+                "Telegram isolated chat worker setup is incomplete: "
+                "missing tracer_factory."
+            )
+        tool_executor_factory = self.tool_executor_factory
+        if tool_executor_factory is None:
+            raise UnclawError(
+                "Telegram isolated chat worker setup is incomplete: "
+                "missing tool_executor_factory."
+            )
+        session_store_factory = self.session_store_factory
+        if session_store_factory is None:
+            raise UnclawError(
+                "Telegram isolated chat worker setup is incomplete: "
+                "missing session_store_factory."
+            )
 
-        session_manager = self.session_manager_factory.from_settings(self.settings)
-        memory_manager = self.memory_manager_factory(session_manager=session_manager)
-        tracer = self.tracer_factory(
+        session_manager = session_manager_factory.from_settings(self.settings)
+        memory_manager = memory_manager_factory(session_manager=session_manager)
+        tracer = tracer_factory(
             event_bus=self.event_bus or EventBus(),
             event_repository=session_manager.event_repository,
             include_reasoning_text=self.tracer.include_reasoning_text,
         )
         tracer.runtime_log_path = self.tracer.runtime_log_path
-        tool_executor = self.tool_executor_factory.with_default_tools(self.settings)
-        session_store = self.session_store_factory(session_manager.connection)
+        tool_executor = tool_executor_factory.with_default_tools(self.settings)
+        session_store = session_store_factory(session_manager.connection)
         session_store.initialize()
 
         return TelegramBotChannel(

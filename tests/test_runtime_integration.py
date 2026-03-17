@@ -18,12 +18,14 @@ from unclaw.core.capabilities import (
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
+from unclaw.core.router import RouteKind
 from unclaw.core.runtime import (
     RuntimeTurnCancellation,
     _prepare_web_search_route,
     run_user_turn,
 )
 from unclaw.core.session_manager import SessionManager
+from unclaw.errors import UnclawError
 from unclaw.llm.base import (
     LLMConnectionError,
     LLMMessage,
@@ -2921,6 +2923,130 @@ def test_run_user_turn_surfaces_explicit_ollama_failure_inside_agent_loop(
         ]
         assert len(model_failed_events) == 1
         assert model_failed_events[0].payload["error"] == expected_reply
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_raises_unclaw_error_when_agent_loop_returns_no_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del (
+                profile,
+                messages,
+                timeout_seconds,
+                thinking_enabled,
+                content_callback,
+                tools,
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+                tool_calls=(
+                    ToolCall(
+                        tool_name="fetch_url_text",
+                        arguments={"url": "https://example.com"},
+                    ),
+                ),
+                raw_payload={
+                    "message": {
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "function": {
+                                    "name": "fetch_url_text",
+                                    "arguments": {"url": "https://example.com"},
+                                }
+                            }
+                        ],
+                    }
+                },
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.route_request",
+        lambda **kwargs: SimpleNamespace(
+            kind=RouteKind.CHAT,
+            model_profile_name="main",
+            search_query=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "unclaw.core.runtime._run_agent_loop",
+        lambda **kwargs: None,
+    )
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Fetched {call.arguments['url']}",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Fetch the page.",
+            session_id=session.id,
+        )
+
+        with pytest.raises(
+            UnclawError,
+            match="Runtime turn completed without producing an assistant reply.",
+        ):
+            run_user_turn(
+                session_manager=session_manager,
+                command_handler=command_handler,
+                user_input="Fetch the page.",
+                tracer=tracer,
+                tool_registry=tool_registry,
+            )
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [MessageRole.USER]
     finally:
         session_manager.close()
 
