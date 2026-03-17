@@ -2,356 +2,381 @@
 
 ## Purpose
 
-This document defines the **target architecture** for Unclaw and clarifies the gap between the **current MVP** and the **intended product**.
+This document describes the **current shipped architecture** of Unclaw.
 
-Unclaw must become a **lightweight, secure, privacy-first, local-only AI agent runtime**.
-It must **not** drift into being a chatbot with manual tools.
-
-This document is both:
-- a design reference for future engineering work,
-- and a reality check to prevent documentation from promising features that do not yet exist.
+Unclaw is a **local-first AI agent/runtime** built around local Ollama models, thin channel adapters, safe built-in tools, local persistence, and bounded execution. It is not yet a fully autonomous local agent by default, so the remaining gaps are called out explicitly.
 
 ---
 
-## Current reality vs target state
+## Current product position
 
-### Current MVP reality
-At the time of writing, the MVP is best described as:
-- a local-first assistant runtime,
-- with terminal CLI, Telegram polling, slash tools, grounded web search, and local persistence,
-- model-assisted routing between normal chat and a web-backed search path,
-- a bounded observation-action loop that can run when the selected profile supports native tool calling,
-- strong observability,
-- local persistence,
-- and clean module boundaries,
-- **but not yet a true autonomous agent runtime by default**.
+Today Unclaw ships as:
 
-The current system still depends too heavily on:
-- explicit slash commands for most tools,
-- default shipped profiles that use `tool_mode: json_plan` rather than native tool calling,
-- routing that is still limited to chat versus web-backed search,
-- and session-summary memory rather than richer memory selection.
+- a shared local runtime for terminal and Telegram
+- local Ollama model profiles with `fast`, `main`, `deep`, and `codex`
+- guided onboarding that writes local config files and optional local secrets
+- model-assisted routing between normal chat and a web-backed search path
+- grounded search that can run either as a runtime-managed step or as a native tool call
+- deterministic session summaries injected as bounded context notes
+- local SQLite persistence plus local JSONL and SQLite tracing
 
-### Target state
-The target system is:
-- a **real autonomous local-first agent runtime**,
-- able to decide when to use tools,
-- able to execute multi-step observation-action loops,
-- able to adapt routing and depth to the request,
-- able to stay fast on modest hardware,
-- and able to remain transparent, secure, and easy to maintain.
+Important current reality:
+
+- the shipped `deep` profile uses `tool_mode: native`
+- the default `main` profile still uses `tool_mode: json_plan`
+- search is the most integrated model-driven tool path today
+- file and fetch tools still remain mainly slash-command-driven in normal usage
 
 ---
 
-## Non-negotiable architecture principles
+## Main runtime layers
 
-### 1. Agent runtime, not chatbot wrapper
-Unclaw must be designed as a runtime that can:
-1. receive a user request,
-2. understand the intent,
-3. decide whether direct answering is enough,
-4. decide whether one or more tools are needed,
-5. execute tool calls safely,
-6. observe the results,
-7. continue or stop,
-8. produce a natural final answer,
-9. persist only useful state,
-10. trace the whole execution clearly.
+### 1. Channels
 
-If a capability only works through explicit slash commands, that capability is not yet fully integrated into the agent runtime.
+Shipped channels are:
 
-### 2. Local-first and local-only for core intelligence
-The core runtime must work with:
-- local models,
-- local memory,
-- local tools,
-- local persistence,
-- local logs,
-- local control.
+- terminal CLI via `unclaw start`
+- Telegram polling bot via `unclaw telegram`
 
-Cloud APIs must not become a required dependency for core behavior.
+These layers are intentionally thin. They are responsible for:
 
-### 3. Privacy-first
-The architecture must assume that:
-- user data stays local by default,
-- logs may contain sensitive information,
-- session storage must be minimal and understandable,
-- secrets must be handled conservatively,
-- web content and tool outputs must not silently leak private context.
+- accepting user input
+- running startup checks
+- rendering replies
+- handling channel-specific session binding or message formatting
+- delegating actual routing, model calls, and tool orchestration to the shared runtime
 
-### 4. Security-first
-Every capability must be designed with explicit trust boundaries.
-This includes:
-- path safety,
-- SSRF protection,
-- prompt injection resistance,
-- tool permission levels,
-- safe defaults,
-- bounded loops and timeouts,
-- constrained persistence,
-- explicit high-risk action gates.
+### 2. Shared core runtime
 
-### 5. Lightweight by design
-Unclaw must remain lightweight:
-- few dependencies,
-- no heavyweight orchestration framework,
-- no giant agent SDK unless absolutely required,
-- no architecture that assumes large cloud-grade models,
-- no prompt stuffing as a substitute for runtime design.
+The shared runtime lives in `src/unclaw/core/` and owns:
 
-### 6. Scalable without brittle deterministic lists
-The architecture must avoid depending on long hand-maintained lists of words, phrases, or cases whenever a more adaptive mechanism is reasonable.
+- route selection
+- capability summaries for prompt honesty
+- context assembly
+- orchestration of model calls
+- bounded observation-action loops
+- explicit tool execution
+- grounded search reply shaping
+- persistence of assistant and tool history
 
-Examples of preferred direction:
-- capability routing based on model/tool reasoning or compact semantic classification,
-- provider abstractions instead of vendor-specific logic in core runtime,
-- schemas and contracts instead of regex-heavy glue everywhere,
-- bounded adaptive logic instead of giant lists of language-specific triggers.
+### 3. LLM provider boundary
 
-### 7. Mainstream UX, hidden machinery
-The user should not have to think in terms of internal tools.
-The default experience should feel like a real assistant.
-Internal steps should remain visible in logs and traces, but **not leak awkwardly into the final answer**.
-
----
-
-## Architecture layers
-
-## channels/
-Channels are thin I/O layers.
-
-Examples:
-- terminal CLI,
-- Telegram,
-- future local API,
-- future local UI.
-
-Channels should:
-- receive user input,
-- display output,
-- surface logs when requested,
-- delegate actual intelligence to the runtime.
-
-Channels should **not** contain business logic, routing logic, or tool orchestration logic.
-
-## core/
-The core runtime is the brain of the system.
+`src/unclaw/llm/ollama_provider.py` is the shipped provider boundary.
 
 It is responsible for:
-- request classification,
-- capability routing,
-- model selection,
-- tool orchestration,
-- observation-action loop control,
-- context assembly,
-- grounding policies,
-- session flow,
-- memory selection,
-- final answer composition.
 
-This is where the agent behavior must live.
+- sending chat requests to the local Ollama HTTP API
+- forwarding `think` on/off state
+- forwarding per-profile `keep_alive`
+- forwarding native tool definitions when the selected profile supports them
+- parsing streamed and non-streamed replies
+- parsing native `tool_calls`
+- stripping leaked `<think>` blocks from assistant-visible text
 
-## llm/
-This layer abstracts model providers and model capabilities.
+Provider-specific HTTP details stay here rather than leaking into channel code.
 
-It must expose clean support for:
-- chat,
-- structured outputs,
-- tool calling when supported,
-- reasoning/thinking modes,
-- model capability detection,
-- profile selection,
-- fallback behavior for weaker models.
+### 4. Tools
 
-Provider-specific details must not leak into high-level runtime logic.
+Tools are registered capability endpoints, not separate UX products.
 
-## tools/
-Tools are capability endpoints, not UX features.
+Current built-in tools include:
 
-Each tool must define:
-- a name,
-- a clear description,
-- input schema,
-- permission level,
-- timeout or execution bounds,
-- traceability,
-- safe failure behavior.
+- `search_web`
+- `fetch_url_text`
+- `read_text_file`
+- `list_directory`
 
-Tools should be as dumb and reliable as possible.
-They should return useful data, not try to impersonate the final assistant voice.
+Tools return data. The runtime owns final answer composition.
 
-The runtime, not the tool module, should own final answer composition.
+### 5. Persistence and memory
 
-## memory/
-Memory must stay modular and selective.
+The local persistence layer is SQLite plus flat files under `data/`.
 
-Logical layers may include:
-- session memory,
-- user memory,
-- project memory,
-- ephemeral memory,
-- execution memory,
-- research/session caches.
+Current persisted state includes:
 
-Memory should be:
-- retrieved selectively,
-- freshness-aware,
-- bounded,
-- and never injected blindly.
+- sessions
+- messages
+- runtime events
+- deterministic session summaries stored in the session record
+- JSONL runtime traces in `data/logs/runtime.log` when file logging is enabled
 
-## db/
-Persistence should remain simple and local-first.
+Memory today is intentionally small in scope:
 
-Initial persistence should stay compatible with:
-- SQLite,
-- structured tables,
-- explicit repositories,
-- easy inspection,
-- easy export,
-- easy cleanup.
+- recent conversation history
+- one deterministic session summary
+- retained grounded facts and uncertainties extracted from prior search tool results
 
-## logs/
-Observability is a first-class product feature.
-
-Logs and traces must expose:
-- route decisions,
-- selected model,
-- tool decisions,
-- tool execution steps,
-- timings,
-- failures,
-- memory injections,
-- and final outputs.
-
-The engineering trace may be richer than the user trace, but both should remain coherent.
-
-Current transparency notes:
-- In the shipped CLI and Telegram entrypoints, the tracer publishes events to an in-process event bus, writes local JSON lines to `data/logs/runtime.log` when file logging is enabled, and persists the same event metadata into the local SQLite `events` table.
-- Those same startup paths also apply the configured `logging.retention_days` window to both trace stores. The default keeps 30 days of runtime traces; `0` disables automatic trace cleanup.
-- Runtime traces record metadata such as route, model/profile, tool names and arguments, durations, and success or failure status. They do not store full assistant replies or raw fetched page bodies in the runtime log stream.
-- Reasoning text is excluded by default. Only reasoning length is persisted unless `logging.include_reasoning_text` is explicitly enabled.
+This is not yet the richer multi-store memory system described in the long-term project brief.
 
 ---
 
-## Target runtime flow
+## Startup, settings, and onboarding flow
 
-The long-term default runtime flow should look like this:
+### Settings loading
 
-1. input arrives from a channel,
-2. command handling happens only for explicit runtime commands,
-3. the runtime classifies the task,
-4. the runtime decides between direct answer vs agent execution,
-5. the runtime selects the model/profile,
-6. the runtime builds a bounded context,
-7. the model may call tools,
-8. the runtime executes tools safely,
-9. the runtime feeds results back into the loop,
-10. the runtime stops when a final answer is ready or a safe bound is reached,
-11. the final answer is rendered naturally,
-12. useful traces and state are persisted.
+`load_settings()` in `src/unclaw/settings.py` loads:
 
-This loop must stay:
-- bounded,
-- observable,
-- model-aware,
-- and lightweight.
+- `config/app.yaml`
+- `config/models.yaml`
+- `config/prompts/system.txt`
 
----
+It validates and resolves:
 
-## Current runtime flow
+- runtime paths
+- channel toggles
+- logging and retention settings
+- tool security settings
+- model profiles, including `tool_mode` and `keep_alive`
 
-As implemented today, the shared runtime works like this:
+### Bootstrap
 
-1. input arrives from the CLI or Telegram channel,
-2. explicit slash commands are handled by `CommandHandler`,
-3. plain turns go through `route_request()`,
-4. the current router chooses between normal chat/chat-with-thinking and a web-backed search route,
-5. on the shipped `json_plan` profiles, `search_web` is executed by the runtime for web-backed turns before the final model answer,
-6. on profiles configured with `tool_mode: native`, Ollama can return `tool_calls`, the runtime executes them, persists tool output, and loops up to a bounded step limit,
-7. the assistant reply is persisted and traced.
+`bootstrap()` in `src/unclaw/bootstrap.py` prepares the local runtime by:
 
-This means Unclaw already has a real shared runtime path, but broad model-driven access to all built-in tools is still not the default user experience.
+- creating required runtime directories
+- applying log and trace retention pruning
 
----
+When channels later open the SQLite database through the session manager, the database file is re-hardened to owner-only permissions on POSIX systems.
 
-## Tool execution strategy
+### Onboarding
 
-Unclaw must support multiple tool execution modes because local models differ a lot.
+`unclaw onboard` runs the interactive onboarding flow in `src/unclaw/onboarding.py`.
 
-### Preferred order
-1. native tool calling when reliable,
-2. structured output / action schema when native tools are weak or unavailable,
-3. conservative fallback behavior for weaker models,
-4. direct answer when tools are unnecessary.
+It currently:
 
-The runtime must not assume that one approach works for every model family.
+- inspects the local Ollama installation
+- loads existing Telegram config and local secrets
+- recommends a default local model lineup
+- writes `config/app.yaml`, `config/models.yaml`, and `config/telegram.yaml`
+- optionally writes `config/secrets.yaml` for the Telegram token
+- can guide the user to start Ollama or pull missing models
+
+The shipped onboarding recommendations currently match the repo defaults:
+
+- `main` stays conservative
+- `deep` is the shipped native-tool profile
 
 ---
 
-## Search and research architecture direction
+## Channel boundaries
 
-Web search is already part of the shared runtime path for `/search` and for normal turns routed into web-backed mode.
+### Terminal CLI
 
-Today the search stack is split across focused modules for search, fetch, retrieval, synthesis, HTML parsing, text processing, and safety. The remaining limits are that retrieval is still synchronous, public-web-only by default, and dependent on DuckDuckGo HTML plus bounded page fetching.
+`src/unclaw/channels/cli.py` is a REPL wrapper around the shared runtime.
 
-Current transparency notes:
-- Discovery uses DuckDuckGo's HTML endpoint, not a browser or a general crawling backend.
-- The current search budget is bounded in code: up to 20 initial search results, up to 30 fetched pages, crawl depth 2, up to 3 child links per fetched page, and extracted page text clipped before synthesis.
-- The search path always enforces public-web SSRF checks and redirect revalidation. The separate manual fetch tool can be reconfigured to allow private-network access, but grounded `search_web` stays on the public-web path.
+It handles:
 
-The preferred long-term structure is:
-- discovery/search,
-- page fetch,
-- extraction/cleaning,
-- safety filtering,
-- evidence selection,
-- temporary caching,
-- synthesis into natural assistant output.
+- startup reporting
+- slash commands
+- streamed terminal rendering
+- local display of tool results
+- summary refresh after each turn
 
-Important rules:
-- tools return data,
-- the agent loop decides whether more research is needed,
-- final answers should sound like assistant answers,
-- raw tool mechanics should remain mostly hidden from the user.
+It does not contain its own routing or tool-selection policy.
 
----
+### Telegram
 
-## Current architectural gaps to keep visible
+`src/unclaw/channels/telegram_bot.py` is a polling-based channel that adds:
 
-This document must stay honest.
+- deny-by-default chat authorization
+- per-chat session binding
+- per-chat command handlers
+- message chunking
+- per-chat worker isolation when the isolated-worker dependencies are available
+- simple burst rate limiting
 
-At the time of writing, the main gaps between MVP and target architecture are:
-- the shipped profiles and onboarding defaults still do not enable native tool calling,
-- routing is still limited to chat versus web-backed search,
-- file and URL tools are still primarily manual slash commands,
-- search is grounded and modular, but still synchronous and dependent on DuckDuckGo HTML,
-- memory still basic,
-- UX still exposes too much manual control for important capabilities.
-
-These gaps must remain visible in docs until they are genuinely resolved.
+Telegram-specific management commands stay local to the machine running Unclaw. Remote chats cannot authorize themselves.
 
 ---
 
-## What Unclaw must never become
+## Current shared runtime flow
 
-Unclaw must not become:
-- a cloud-dependent wrapper,
-- a giant framework-first project,
-- a prompt-stuffed fake agent,
-- a brittle keyword router,
-- an opaque system that hides unsafe behavior,
-- a pile of deterministic lists pretending to be intelligence,
-- or a manual-tool chatbot marketed as agentic.
+For plain chat turns, the shared runtime flow is:
+
+1. the channel persists the user message
+2. `run_user_turn()` resolves tool availability for the selected model profile
+3. the runtime builds a capability summary and optional session memory context note
+4. `route_request()` uses a lightweight model-assisted classifier to choose:
+   - `chat`
+   - `chat_with_thinking`
+   - `web_search`
+5. `Orchestrator.run_turn()` builds the actual LLM message list from:
+   - the system prompt
+   - runtime capability context
+   - optional routing or memory notes
+   - recent session history
+   - grounded-search answer contract when relevant
+6. the Ollama provider is called with or without native tool definitions
+7. the runtime either returns the model text directly or enters the bounded agent loop
+8. the final assistant reply is transformed if needed, persisted, and traced
+
+### Routing
+
+The shipped router is intentionally narrow:
+
+- it only distinguishes normal chat from web-backed search
+- it is model-assisted rather than keyword-driven
+- it falls back to normal chat when classification fails or web search is unavailable
+
+This keeps the current routing logic honest, but it is still much narrower than the long-term capability-routing vision.
 
 ---
 
-## Success criteria for the architecture
+## Native agent loop
 
-A successful architecture for Unclaw should make it possible to:
-- run well on modest local hardware,
-- support multiple local model profiles,
-- use tools autonomously when useful,
-- stay safe and bounded,
-- keep the codebase understandable,
-- evolve without massive rewrites,
-- and deliver a polished mainstream assistant experience.
+The native agent loop is implemented in `src/unclaw/core/runtime.py`.
+
+It activates only when the selected profile supports native tool calling.
+
+Current behavior:
+
+- the shipped `deep` profile is native-tool capable
+- native tool definitions are sent only for native-tool profiles
+- the loop is bounded by a step limit and a tool-call budget
+- tool calls are executed concurrently within one batch
+- tool calls respect a runtime timeout
+- tool results are persisted to session history
+- tool results are wrapped as untrusted content before being fed back to the model
+- the loop stops when the model returns a final text reply or a bound is hit
+
+This is a real observation-action loop, not a simulated slash-command wrapper.
+
+Important limit:
+
+- because the default `main` profile is still `json_plan`, the broader native-tool path is available but not yet the default everyday experience
+
+---
+
+## Tool execution path
+
+There are two current tool execution modes.
+
+### Explicit slash-command path
+
+For `/read`, `/ls`, `/fetch`, and `/search`:
+
+- `CommandHandler` resolves the explicit command
+- the channel executes the tool or hands `/search` to the shared research flow
+- the result is persisted as tool history
+- the user sees the tool result or the grounded assistant reply
+
+### Native model-callable path
+
+For native profiles:
+
+- Ollama can return `tool_calls`
+- the runtime executes them through the shared tool registry and dispatcher
+- tool results are persisted in model order
+- the model receives tool results back as untrusted tool messages
+- the loop continues until a final answer is ready
+
+---
+
+## Search grounding path
+
+Grounded search is part of the shared runtime, not a separate assistant product.
+
+Current behavior:
+
+- `/search` goes through `src/unclaw/core/research_flow.py`
+- normal turns can also be routed into a web-backed search path by the shared router
+- on non-native profiles, the runtime pre-executes `search_web` before the final model answer
+- on native profiles, the model can call `search_web` inside the normal agent loop
+- search tool results are persisted as compact tool-history summaries
+- the final reply is shaped from the latest grounded search context and then given compact sources
+
+The underlying search stack is still:
+
+- DuckDuckGo HTML discovery
+- bounded public page retrieval
+- grounding and source shaping
+
+Important current limits:
+
+- retrieval is synchronous
+- search is public-web-only
+- search still depends on DuckDuckGo HTML and readable fetched page text
+
+---
+
+## Memory and context model
+
+Current memory behavior is deliberately modest.
+
+`MemoryManager` builds a deterministic session summary from persisted messages and search tool history. That summary can inject a single bounded context note that includes:
+
+- recent user intents
+- retained grounded facts
+- retained uncertainties
+- the latest assistant reply summary
+- basic session size metadata
+
+This gives follow-up turns useful continuity without pretending Unclaw already has:
+
+- user memory
+- project memory
+- execution memory stores
+- retrieval-augmented long-term memory selection
+
+---
+
+## Security and trust boundaries
+
+### Untrusted tool and search content
+
+Tool output is not injected back into the model as plain trusted text.
+
+`build_untrusted_tool_message_content()` in `src/unclaw/core/context_builder.py`:
+
+- wraps tool output in an explicit untrusted-content block
+- warns that trusted instructions come only from runtime/system messages
+- flags instruction-like lines before the model sees them again
+
+This is a meaningful hardening layer, but it does not fully eliminate prompt-injection risk from weak local models.
+
+### Web safety
+
+Current web boundaries are conservative:
+
+- `search_web` stays on the public web path
+- fetch/search require direct HTTP or HTTPS targets
+- private-network and local-address SSRF targets are blocked by default
+- redirect targets are revalidated
+
+### File safety
+
+Local file tools are restricted to configured allowed roots.
+
+### Telegram safety
+
+Telegram is deny-by-default:
+
+- `config/telegram.yaml` ships with `allowed_chat_ids: []`
+- unauthorized chats are rejected and logged locally
+- allow/revoke/list management requires local CLI access
+
+### Local secrets and local data
+
+The current local security posture also includes:
+
+- Telegram token storage in `config/secrets.yaml` or an environment variable
+- token masking in logs and Telegram API errors
+- owner-only `0o600` hardening for local secrets files on POSIX
+- owner-only `0o600` hardening for the SQLite database on POSIX
+- reasoning text excluded from logs by default
+- automatic local trace pruning based on `logging.retention_days`
+
+---
+
+## Current limitations that remain intentional to document
+
+Unclaw is still missing several pieces of the longer-term vision:
+
+- no public GUI
+- no general local API layer documented as a shipped primary interface
+- no broad default model-driven file or fetch automation path
+- no rich multi-store memory retrieval architecture
+- no skills marketplace
+- no broad OS automation suite
+- no finished document-editing automation workflow marketed as a core feature
+
+The current repo is therefore best described as a local-first AI agent/runtime with a real shared runtime and a real bounded agent loop, but with only part of the broader agent vision shipped by default.

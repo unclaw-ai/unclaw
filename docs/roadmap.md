@@ -2,204 +2,186 @@
 
 ## Strategy
 
-Unclaw must be developed in layers.
+Unclaw should keep moving in layers, but the roadmap must stay honest about what already ships.
 
-But the sequencing matters:
-we should not keep adding surface features to a runtime whose default user experience still lags behind the agent-oriented plumbing already present in code.
+Today the repository is no longer just a conversational assistant skeleton. It already includes:
 
-The first major objective now is:
-**finish the transition from strong local assistant runtime to a more generally agentic local-first runtime baseline.**
+- a shared local runtime
+- model-assisted routing
+- grounded web search
+- a bounded native agent loop
+- one shipped native-tool profile (`deep`)
+- onboarding, tracing, and local persistence
 
-This roadmap therefore distinguishes clearly between:
-- what exists,
-- what is being repaired,
-- and what comes after the runtime becomes truly agentic.
-
----
-
-## Guiding priorities
-
-Every roadmap decision should preserve these constraints:
-- lightweight,
-- secure-first,
-- privacy-first,
-- local-first,
-- multi-model aware,
-- mainstream-usable,
-- and scalable without heavy frameworks or brittle deterministic logic.
+The remaining work is to make that agent/runtime behavior broader, more default, and more polished without drifting into a heavyweight or misleading architecture.
 
 ---
 
-## Phase 0 — Foundation and documentation
+## Current audit status snapshot
+
+### Completed in the current repo
+
+- one shipped profile now enables native tool calling by default: `deep`
+- the system prompt now includes tool-use, anti-injection, and citation guidance
+- Ollama requests now send per-profile `keep_alive`
+- normal routed web-backed turns and `/search` both use the shared runtime path
+- native-tool profiles can call `search_web` inside the normal agent loop
+- shared test fixtures now exist in `tests/conftest.py`
+- real Ollama provider/runtime integration tests exist, and CI runs a live Ollama subset
+- committed Telegram config is now deny-by-default with `allowed_chat_ids: []`
+- local secret files and the SQLite database are hardened to owner-only permissions on POSIX
+- tool and search output is wrapped as untrusted content before being fed back to the model
+
+### Still remaining
+
+- make broader model-driven tool use the normal default path, not mainly `deep` and search
+- expand routing beyond chat versus web-backed search
+- ship richer multi-store memory and selective retrieval
+- add a public GUI or other richer primary interface
+- broaden safe automation without overselling current capabilities
+
+---
+
+## Phase 0 — Foundation and docs
 
 ### Goal
-Create a clean repository and define the project direction.
+Keep the repository coherent and keep project positioning aligned with reality.
 
 ### Status
-Largely complete.
+Core foundation is complete. Documentation alignment is ongoing and must continue whenever the runtime meaningfully changes.
 
-### Deliverables
-- README,
-- core docs,
-- repository structure,
-- local Python environment,
-- first commits.
+### Already in place
+
+- README and core strategic docs
+- local Python package and CLI entrypoints
+- local config structure
+- local persistence and trace storage
 
 ### Remaining expectation
-Docs must stay aligned with reality and with the target agent-runtime direction.
+
+- keep docs aligned with the actual shipped runtime and security posture
 
 ---
 
-## Phase 1 — Base runtime MVP
+## Phase 1 — Base local runtime
 
 ### Goal
-Build the first local-first conversational runtime.
+Ship a useful local-first conversational runtime with shared infrastructure.
 
 ### Status
-Complete as a conversational MVP, but incomplete as an agent runtime.
+Complete.
 
-### What exists
-- CLI chat,
-- Telegram polling,
-- session management,
-- model profiles,
-- local persistence,
-- model-assisted chat versus web-search routing,
-- live logging,
-- provider abstraction.
+### Delivered
 
-### Architectural limitation
-This phase produced a strong assistant foundation, but not yet a true autonomous runtime.
+- terminal CLI
+- Telegram polling channel
+- session management
+- local persistence
+- Ollama provider abstraction
+- model profiles
+- startup checks and onboarding
+- logging and trace plumbing
 
 ---
 
-## Phase 2 — Initial tools and utility
+## Phase 2 — Safe practical tools
 
 ### Goal
-Make the system useful beyond plain chat.
+Make the runtime useful beyond plain chat.
 
 ### Status
-Mostly complete.
+Complete for the current MVP scope.
 
-### What exists
-- grounded web search,
-- URL fetch,
-- file reading,
-- file listing,
-- tool registry,
-- tool dispatcher,
-- split web-search modules,
-- traceable manual tool execution.
+### Delivered
 
-### Architectural limitation
-These tools still lean too heavily on explicit slash commands from the user.
+- grounded web search
+- direct URL fetch
+- file read
+- directory listing
+- tool registry and dispatcher
+- modularized web-search stack
+- traceable manual tool execution
+
+### Remaining limitation
+
+- outside search, these tools still lean heavily on explicit slash commands in normal use
 
 ---
 
-## Phase 3 — Runtime repair: chatbot MVP to agent MVP
+## Phase 3 — Agent/runtime transition
 
 ### Goal
-This is now the most urgent phase.
-Turn the current shared runtime into a default experience that uses its tool and routing capabilities more broadly and more naturally.
-
-### Priority
-Highest.
-Nothing is more important than this phase now.
+Turn the shared runtime into a more genuinely agentic default experience without losing safety or simplicity.
 
 ### Status
 In progress.
 
-### Already landed in code
-- Ollama tool definitions and tool-call parsing,
-- a bounded observation-action loop for profiles configured with `tool_mode: native`,
-- shared `/search` handling through the same runtime path as normal turns,
-- model-assisted routing between normal chat and web-backed search.
+### Landed already
 
-### Still missing to finish this phase
-- enabling native tool calling in the shipped/default profile setup,
-- broader capability routing beyond web-backed search,
-- model-driven use of file and fetch tools in normal default flows,
-- a less command-heavy default UX for non-search tool use.
+- native tool definitions and tool-call parsing in the Ollama provider
+- a bounded observation-action loop in the shared runtime
+- one shipped native-tool profile: `deep`
+- expanded system prompt for tool use and anti-injection behavior
+- per-profile `keep_alive`
+- model-assisted routing between chat and web-backed search
+- shared `/search` handling through the same runtime path as normal turns
+- native `search_web` calls inside the normal agent loop when a native profile is selected
 
-### Main objectives
-- connect models and tools properly,
-- introduce a bounded observation-action loop,
-- make tool use increasingly autonomous,
-- keep the UX natural,
-- keep the runtime lightweight,
-- keep the system safe and transparent.
+### Still missing before this phase can be called complete
 
-### Expected outcomes
-- the model can request tool usage,
-- the runtime can execute tools and continue the turn,
-- search becomes a capability inside the runtime loop, not a separate fake-agent path,
-- routing becomes more adaptive,
-- final answers look like assistant answers, not tool dumps.
-
-### Example sub-phases
-
-#### 3.1 Tool-calling and runtime loop
-- keep model/tool integration working across supported Ollama models,
-- make the bounded multi-step loop viable in default shipped configurations,
-- persist and trace loop steps clearly.
-
-#### 3.2 Search stack repair
-- keep the split search stack maintainable,
-- harden search against prompt-injection attempts,
-- improve answer shaping and reliability under bounded retrieval.
-
-#### 3.3 Adaptive capability routing
-- reduce reliance on slash commands for normal behavior,
-- support capability-aware routing,
-- avoid giant deterministic trigger lists,
-- keep routing lightweight and bounded.
-
-#### 3.4 UX cleanup
-- hide internal mechanics better,
-- keep explicit commands for power users,
-- make the default experience feel like a real assistant.
+- make broader model-driven tool use normal in day-to-day defaults, not only available through `deep`
+- reduce reliance on `/read`, `/ls`, and `/fetch` as the primary access path for those capabilities
+- broaden capability routing beyond the current chat versus web-search split
+- make the default UX feel less command-heavy while keeping power-user commands
 
 ---
 
 ## Phase 4 — Stronger memory foundations
 
 ### Goal
-Introduce memory that helps the runtime think better without bloating prompts.
+Improve continuity without bloating prompts.
 
 ### Status
-Basic session state and deterministic session summaries exist, but richer memory remains future work.
+Partially complete.
 
-### Scope
-- better session summaries,
-- user memory basics,
-- project memory basics,
-- selective retrieval,
-- memory write rules,
-- bounded memory injection.
+### Landed already
 
-### Important note
-Memory must not become a dump.
-It must stay selective, inspectable, and lightweight.
+- persisted session history
+- deterministic session summaries
+- retained grounded facts and uncertainties from prior search results
+- bounded session-memory context injection
+
+### Remaining
+
+- richer user memory
+- richer project memory
+- selective retrieval across multiple memory stores
+- clearer memory write and retention policies beyond the current session-summary model
 
 ---
 
 ## Phase 5 — Stabilization and quality hardening
 
 ### Goal
-Make the post-repair MVP solid, demonstrable, and trustworthy.
+Make the current runtime more reliable, testable, and honest to operate.
 
-### Scope
-- cleanup,
-- tests,
-- better docs,
-- stronger safety checks,
-- better error handling,
-- installation polish,
-- E2E validation,
-- performance checks.
+### Status
+Partially complete.
 
-### Deliverable
-A strong demo-ready MVP that is honestly agentic, not only marketed that way.
+### Landed already
+
+- shared test fixtures in `tests/conftest.py`
+- real Ollama integration coverage and CI
+- stronger prompt-injection handling around tool/search output
+- deny-by-default Telegram allowlist configuration
+- local secret and database permission hardening
+- continued startup and onboarding polish
+
+### Remaining
+
+- continue filling critical runtime edge-case coverage where needed
+- keep docs aligned as the runtime changes
+- continue cleanup only where it directly improves shipped behavior or auditability
 
 ---
 
@@ -208,36 +190,45 @@ A strong demo-ready MVP that is honestly agentic, not only marketed that way.
 ### Goal
 Strengthen web and information workflows without bloating the runtime.
 
-### Scope
-- local caching of research results,
-- better research/session state,
-- quick vs deep research profiles,
-- deeper multi-step research,
-- stronger synthesis quality,
-- still-bounded retrieval behavior.
+### Status
+Not complete.
 
-### Constraint
-This phase must keep the search/research stack lightweight and maintainable.
+### Already in place
+
+- grounded web search
+- bounded retrieval
+- follow-up grounding from prior search context
+
+### Remaining
+
+- local research caching
+- deeper research/session state
+- quick versus deep research profiles
+- stronger bounded multi-step research workflows
 
 ---
 
 ## Phase 7 — More tools and safe automation
 
 ### Goal
-Move closer to a real local assistant while preserving safety.
+Expand capability surface carefully.
 
-### Scope
-- browser automation,
-- note creation,
-- draft generation,
-- local system actions,
-- code/project tools,
-- richer permission boundaries,
-- possible skill packages.
+### Status
+Mostly future work.
+
+### Possible scope
+
+- browser automation
+- note creation
+- draft generation
+- code and project tools
+- local system actions
+- stronger permission boundaries
+- possible skill packages
 
 ### Constraint
-Every new tool must fit the runtime cleanly.
-Do not widen the tool surface faster than the orchestration quality can support.
+
+Do not widen the tool surface faster than the orchestration quality, permission model, and observability can support.
 
 ---
 
@@ -246,53 +237,46 @@ Do not widen the tool surface faster than the orchestration quality can support.
 ### Goal
 Use stronger local machines when available.
 
-### Scope
-- wake-on-LAN,
-- heavy-task dispatch,
-- local worker pattern,
-- result retrieval,
-- secure machine-to-machine local coordination.
+### Status
+Future work.
 
-### Constraint
-Keep the default setup simple for single-machine users.
+### Scope
+
+- wake-on-LAN
+- local worker dispatch
+- secure machine-to-machine coordination
+- result retrieval for heavier jobs
 
 ---
 
 ## Phase 9 — Voice and richer UX
 
 ### Goal
-Make the assistant more natural for mainstream usage.
+Add richer interfaces once the runtime foundation is genuinely solid.
+
+### Status
+Future work.
 
 ### Scope
-- local STT,
-- local TTS,
-- voice sessions,
-- richer UI,
-- execution timeline visualization.
+
+- local STT
+- local TTS
+- voice sessions
+- richer UI
+- execution timeline visualization
 
 ### Constraint
-Voice and richer UI must be built on top of a solid runtime, not used to hide architectural weakness.
 
----
-
-## Long-term direction
-
-Long-term, Unclaw should become:
-- a strong local-first autonomous personal agent runtime,
-- easy to install,
-- easy to inspect,
-- easy to extend,
-- powerful on both modest and strong local hardware,
-- and trusted because its behavior stays visible and understandable.
+Do not use UI polish to hide architectural gaps.
 
 ---
 
 ## Immediate roadmap truth
 
-At this stage, the most important truth is simple:
+The next important milestone is not “more features”.
 
-**do not paper over the remaining gap between the current runtime and a default-agentic product.**
-
-The next serious milestone is not “more features”.
 It is:
-**make the existing routing and tool loop capabilities real default behavior where the code already supports them.**
+
+- make the current agent/runtime behavior broader in the default experience
+- keep search, memory, and security claims honest
+- preserve the local-first, lightweight, and secure-by-default architecture while that expansion happens
