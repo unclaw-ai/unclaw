@@ -14,6 +14,7 @@ from unclaw.tools.file_tools import (
     register_file_tools,
 )
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
 from unclaw.tools.web_tools import (
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,
@@ -34,6 +35,7 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     """Register the built-in local tools on the provided registry."""
     register_file_tools(registry)
     register_web_tools(registry)
+    register_system_tools(registry)
     return registry
 
 
@@ -52,6 +54,7 @@ def create_default_tool_registry(settings: Settings | None = None) -> ToolRegist
         registry,
         allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
     )
+    register_system_tools(registry)
     return registry
 
 
@@ -97,6 +100,7 @@ def execute_tool_call(
 
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
+    "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",
     "create_default_tool_registry",
     "execute_tool_call",

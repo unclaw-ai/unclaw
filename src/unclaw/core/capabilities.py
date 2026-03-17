@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from unclaw.tools.file_tools import LIST_DIRECTORY_DEFINITION, READ_TEXT_FILE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 
@@ -18,6 +19,7 @@ class RuntimeCapabilitySummary:
     local_directory_listing_available: bool
     url_fetch_available: bool
     web_search_available: bool
+    system_info_available: bool
     memory_summary_available: bool
     model_can_call_tools: bool = False
 
@@ -50,6 +52,7 @@ def build_runtime_capability_summary(
         ),
         url_fetch_available=FETCH_URL_TEXT_DEFINITION.name in available_tool_name_set,
         web_search_available=SEARCH_WEB_DEFINITION.name in available_tool_name_set,
+        system_info_available=SYSTEM_INFO_DEFINITION.name in available_tool_name_set,
         memory_summary_available=memory_summary_available,
         model_can_call_tools=model_can_call_tools,
     )
@@ -148,6 +151,10 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "/search <query>: search the public web, read a few relevant pages, "
             "and answer naturally from grounded web context with compact sources."
         )
+    if summary.system_info_available:
+        lines.append(
+            "system_info: return a read-only summary of the local machine and runtime."
+        )
     return tuple(lines)
 
 
@@ -165,6 +172,8 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
         lines.insert(0, "Direct URL fetch via /fetch <url>.")
     if not summary.web_search_available:
         lines.insert(0, "Web search via /search <query>.")
+    if not summary.system_info_available:
+        lines.insert(0, "Local machine and runtime information via system_info.")
     if not summary.memory_summary_available:
         lines.insert(0, "Session memory and summary access.")
 
