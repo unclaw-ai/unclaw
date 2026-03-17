@@ -28,6 +28,8 @@ Unclaw must feel like a real personal assistant that genuinely works locally.
 
 ## 2. Current status and target status
 
+For the authoritative shipped-status snapshot and remaining work, see [docs/roadmap.md](roadmap.md). This brief stays higher-level and is not the canonical phase tracker.
+
 ### Current status
 The MVP already provides:
 - local model execution through Ollama,
@@ -38,7 +40,7 @@ The MVP already provides:
 - observability and logs,
 - model-assisted routing between normal chat and web-backed search,
 - guided onboarding that rewrites local project config files,
-- a bounded observation-action loop when a profile is configured for native tool calling,
+- a bounded observation-action loop, with the shipped `deep` profile configured for native tool calling,
 - and a relatively clean modular codebase.
 
 But the current MVP is still **not yet a true autonomous agent runtime by default**.
@@ -46,7 +48,7 @@ It is closer to:
 - a strong local-first assistant runtime,
 - with grounded search and some model-guided routing,
 - but with general tool use still mostly manual or route-specific in the shipped configuration,
-- and with default profiles still set to `tool_mode: json_plan`.
+- and with the default `main` profile still set to `tool_mode: json_plan`, so broader model-driven tool use is not yet the normal everyday path.
 
 ### Target status
 The target product is a runtime that can:
@@ -251,7 +253,7 @@ Unclaw must support multiple execution modes such as:
 - conservative fallback behavior for weaker models.
 
 Current implementation note:
-- The code supports native tool calling, but the shipped profiles and onboarding defaults still use `tool_mode: json_plan`.
+- The code supports native tool calling, but broader shipped defaults remain conservative: `deep` is native-tool capable, while `main`, `fast`, and `codex` still use `tool_mode: json_plan`.
 
 ### 9.4 Selective context
 Avoid the classic local-agent failure mode:

@@ -2,7 +2,10 @@
 
 ## Strategy
 
+This document is the authoritative source for current shipped status and remaining roadmap work.
+
 Unclaw should keep moving in layers, but the roadmap must stay honest about what already ships.
+When another strategic document overlaps with current status, defer to this file.
 
 Today the repository is no longer just a conversational assistant skeleton. It already includes:
 
