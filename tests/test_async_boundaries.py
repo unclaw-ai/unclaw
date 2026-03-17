@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import Future
 
+import pytest
+
+from unclaw import async_utils
+from unclaw.async_utils import run_blocking
 from unclaw.channels.telegram_api import TelegramApiClient
 from unclaw.llm.base import (
     BaseLLMProvider,
@@ -15,6 +20,44 @@ from unclaw.llm.base import (
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools import web_tools
+
+
+class _ImmediateExecutor:
+    def __init__(self) -> None:
+        self.submit_calls: list[object] = []
+
+    def submit(self, fn):  # type: ignore[no-untyped-def]
+        self.submit_calls.append(fn)
+        future: Future[object] = Future()
+        try:
+            future.set_result(fn())
+        except BaseException as exc:
+            future.set_exception(exc)
+        return future
+
+
+def test_run_blocking_reuses_shared_executor_for_repeated_calls(monkeypatch) -> None:
+    executor = _ImmediateExecutor()
+    monkeypatch.setattr(async_utils, "_BLOCKING_EXECUTOR", executor)
+
+    async def exercise() -> tuple[str, int]:
+        return (
+            await run_blocking(str.upper, "shared"),
+            await run_blocking(pow, 2, 5),
+        )
+
+    assert asyncio.run(exercise()) == ("SHARED", 32)
+    assert len(executor.submit_calls) == 2
+
+
+def test_run_blocking_propagates_exceptions(monkeypatch) -> None:
+    monkeypatch.setattr(async_utils, "_BLOCKING_EXECUTOR", _ImmediateExecutor())
+
+    def fail() -> None:
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        asyncio.run(run_blocking(fail))
 
 
 def test_base_provider_chat_async_runs_sync_chat_in_worker_thread() -> None:
