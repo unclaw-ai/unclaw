@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.core.research_flow import (
     append_search_sources_section,
     build_tool_history_content,
@@ -19,6 +20,11 @@ from unclaw.core.search_grounding import (
     build_search_tool_history_summary,
     parse_search_tool_history,
     shape_search_backed_reply,
+)
+from unclaw.core.search_payload_helpers import (
+    append_compact_search_sources,
+    read_search_display_sources,
+    read_search_string_items,
 )
 from unclaw.tools.contracts import (
     SearchDisplaySourcePayload,
@@ -268,6 +274,90 @@ def test_append_search_sources_section_from_typed_payload() -> None:
     assert "https://example.com/article" in result
 
 
+def test_read_search_display_sources_falls_back_to_results_and_deduplicates_urls() -> None:
+    payload: SearchWebPayload = _build_minimal_payload()
+    payload.pop("display_sources")
+    payload["results"] = [
+        SearchResultSourcePayload(
+            title="Primary source",
+            url=" https://example.com/article ",
+            takeaway="Primary article.",
+            depth=0,
+            fetched=True,
+            evidence_count=1,
+            fetch_error=None,
+            used_snippet_fallback=False,
+            usefulness=8.0,
+        ),
+        SearchResultSourcePayload(
+            title="Duplicate source",
+            url="https://example.com/article",
+            takeaway="Duplicate article.",
+            depth=1,
+            fetched=True,
+            evidence_count=1,
+            fetch_error=None,
+            used_snippet_fallback=False,
+            usefulness=5.0,
+        ),
+        SearchResultSourcePayload(
+            title="Second source",
+            url="https://example.com/second",
+            takeaway="Second article.",
+            depth=0,
+            fetched=True,
+            evidence_count=1,
+            fetch_error=None,
+            used_snippet_fallback=False,
+            usefulness=7.0,
+        ),
+    ]
+
+    assert read_search_display_sources(payload) == (
+        ("Primary source", "https://example.com/article"),
+        ("Second source", "https://example.com/second"),
+    )
+
+    grounded = build_search_grounding_context(
+        payload,
+        query="test query",
+        current_date=date(2026, 3, 15),
+    )
+    assert grounded is not None
+    assert grounded.display_sources == (
+        ("Primary source", "https://example.com/article"),
+        ("Second source", "https://example.com/second"),
+    )
+
+    reply = append_search_sources_section("Here is the answer.", payload=payload)
+    assert reply == (
+        "Here is the answer.\n\nSources:\n"
+        "- Primary source: https://example.com/article\n"
+        "- Second source: https://example.com/second"
+    )
+
+
+def test_read_search_string_items_trims_and_filters_non_strings() -> None:
+    assert read_search_string_items([" first ", "", "   ", None, 3, "second"]) == (
+        "first",
+        "second",
+    )
+
+    payload: SearchWebPayload = _build_minimal_payload()
+    payload.pop("synthesized_findings")
+    payload["summary_points"] = ["  One fact.  ", "", 7, "Second fact."]
+    context = build_search_grounding_context(
+        payload,
+        query="test query",
+        current_date=date(2026, 3, 15),
+    )
+    assert context is not None
+    assert tuple(finding.text for finding in context.supported_findings) == (
+        "One fact.",
+        "Second fact.",
+    )
+
+
 def test_build_tool_history_content_from_typed_payload() -> None:
     """build_tool_history_content works with a schema-compliant payload."""
     payload = _build_minimal_payload()
@@ -279,6 +369,17 @@ def test_build_tool_history_content_from_typed_payload() -> None:
     content = build_tool_history_content(tool_result)
     assert "search_web" in content
     assert "success" in content
+
+
+def test_append_compact_search_sources_preserves_special_runtime_replies() -> None:
+    sources = (("Docs", "https://example.com/docs"),)
+
+    assert append_compact_search_sources(RUNTIME_ERROR_REPLY, sources=sources) == (
+        RUNTIME_ERROR_REPLY
+    )
+    assert append_compact_search_sources(EMPTY_RESPONSE_REPLY, sources=sources) == (
+        EMPTY_RESPONSE_REPLY
+    )
 
 
 def test_nested_typed_dicts_are_plain_dicts_at_runtime() -> None:

@@ -7,13 +7,16 @@ from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
 
+from unclaw.core.search_payload_helpers import (
+    append_compact_search_sources,
+    read_search_display_sources,
+    read_search_string_items,
+)
 from unclaw.core.search_grounding import (
     build_search_tool_history_summary,
     parse_search_tool_history,
     shape_reply_with_grounding,
-    shape_search_backed_reply,
 )
-from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
 from unclaw.core.runtime import run_user_turn
 from unclaw.llm.base import LLMContentCallback
 from unclaw.schemas.chat import ChatMessage, MessageRole
@@ -141,20 +144,8 @@ def append_search_sources_section(
     payload: SearchWebPayload | Mapping[str, Any] | None,
 ) -> str:
     """Append a compact sources section to a natural-language reply."""
-    if reply_text in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
-        return reply_text
-
-    sources = _extract_search_sources(payload)
-    if not sources:
-        return reply_text
-
-    lines = [reply_text.rstrip(), "", "Sources:"]
-    for title, url in sources:
-        if title:
-            lines.append(f"- {title}: {url}")
-        else:
-            lines.append(f"- {url}")
-    return "\n".join(lines)
+    sources = read_search_display_sources(payload)
+    return append_compact_search_sources(reply_text, sources=sources)
 
 
 def _build_search_tool_history_content(
@@ -179,7 +170,7 @@ def _build_search_tool_history_content(
         if grounded_lines:
             body_lines.extend(["", *grounded_lines])
         else:
-            summary_points = _read_string_list(payload.get("summary_points"))
+            summary_points = read_search_string_items(payload.get("summary_points"))
             body_lines.extend(
                 [
                     "",
@@ -191,7 +182,7 @@ def _build_search_tool_history_content(
             else:
                 body_lines.append(f"- {_NO_FINDINGS_REPLY}")
 
-            sources = _extract_search_sources(payload)
+            sources = read_search_display_sources(payload)
             if sources:
                 body_lines.extend(
                     [
@@ -220,37 +211,6 @@ def _build_search_tool_history_content(
         body_lines.append(fallback_body)
 
     return "\n".join([*lines, "", *body_lines])
-
-
-def _extract_search_sources(
-    payload: SearchWebPayload | Mapping[str, Any] | None,
-) -> tuple[tuple[str, str], ...]:
-    if not isinstance(payload, Mapping):
-        return ()
-
-    raw_sources = payload.get("display_sources")
-    if not isinstance(raw_sources, list):
-        raw_sources = payload.get("results")
-        if not isinstance(raw_sources, list):
-            return ()
-
-    sources: list[tuple[str, str]] = []
-    seen_urls: set[str] = set()
-    for entry in raw_sources:
-        if not isinstance(entry, Mapping):
-            continue
-        title = entry.get("title")
-        url = entry.get("url")
-        if not isinstance(url, str) or not url.strip():
-            continue
-        normalized_url = url.strip()
-        if normalized_url in seen_urls:
-            continue
-        seen_urls.add(normalized_url)
-        resolved_title = title.strip() if isinstance(title, str) else ""
-        sources.append((resolved_title, normalized_url))
-
-    return tuple(sources)
 
 
 def _read_search_query(
@@ -330,7 +290,7 @@ def apply_search_grounding_from_history(
         return reply
 
     shaped = shape_reply_with_grounding(reply, grounding=grounding, query=query)
-    return _append_sources_from_grounding(shaped, sources=grounding.display_sources)
+    return append_compact_search_sources(shaped, sources=grounding.display_sources)
 
 
 def _find_latest_search_grounding(
@@ -350,33 +310,3 @@ def _find_latest_search_grounding(
         if grounding is not None:
             return grounding
     return None
-
-
-def _append_sources_from_grounding(
-    reply: str,
-    *,
-    sources: tuple[tuple[str, str], ...],
-) -> str:
-    """Append a compact sources section using parsed grounding display sources."""
-    if reply in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
-        return reply
-    if not sources:
-        return reply
-
-    lines = [reply.rstrip(), "", "Sources:"]
-    for title, url in sources:
-        if title:
-            lines.append(f"- {title}: {url}")
-        else:
-            lines.append(f"- {url}")
-    return "\n".join(lines)
-
-
-def _read_string_list(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(
-        item.strip()
-        for item in value
-        if isinstance(item, str) and item.strip()
-    )

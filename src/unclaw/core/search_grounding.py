@@ -9,6 +9,10 @@ import re
 import unicodedata
 from typing import Any
 
+from unclaw.core.search_payload_helpers import (
+    read_search_display_sources,
+    read_search_string_items,
+)
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.tools.contracts import SearchWebPayload
 
@@ -331,7 +335,7 @@ def _parse_search_payload(
 ) -> _ParsedSearchPayload | None:
     resolved_query = _read_query(payload, fallback=fallback_query)
     raw_findings = _read_findings(payload)
-    display_sources = _read_display_sources(payload)
+    display_sources = read_search_display_sources(payload)
     if not raw_findings and not resolved_query and not display_sources:
         return None
 
@@ -363,21 +367,21 @@ def _read_findings(payload: Mapping[str, Any]) -> tuple[SearchGroundingFinding, 
                         support_count if isinstance(support_count, int) and support_count > 0 else 1
                     ),
                     score=float(score) if isinstance(score, int | float) else 0.0,
-                    source_titles=_read_string_tuple(entry.get("source_titles")),
-                    source_urls=_read_string_tuple(entry.get("source_urls")),
+                    source_titles=read_search_string_items(entry.get("source_titles")),
+                    source_urls=read_search_string_items(entry.get("source_urls")),
                     confidence="supported",
                 )
             )
     if findings:
         return tuple(findings)
 
-    summary_points = payload.get("summary_points")
-    if not isinstance(summary_points, list):
+    summary_points = read_search_string_items(payload.get("summary_points"))
+    if not summary_points:
         return ()
 
     fallback_findings = [
         SearchGroundingFinding(
-            text=item.strip(),
+            text=item,
             support_count=1,
             score=6.0,
             source_titles=(),
@@ -385,7 +389,6 @@ def _read_findings(payload: Mapping[str, Any]) -> tuple[SearchGroundingFinding, 
             confidence="supported",
         )
         for item in summary_points
-        if isinstance(item, str) and item.strip()
     ]
     return tuple(fallback_findings)
 
@@ -418,43 +421,6 @@ def _partition_findings_by_confidence(
         finding for finding in findings if finding.confidence == "uncertain"
     )
     return supported_findings, uncertain_findings
-
-
-def _read_string_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        return ()
-    return tuple(
-        item.strip() for item in value if isinstance(item, str) and item.strip()
-    )
-
-
-def _read_display_sources(payload: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
-    raw_sources = payload.get("display_sources")
-    if not isinstance(raw_sources, list):
-        raw_sources = payload.get("results")
-        if not isinstance(raw_sources, list):
-            return ()
-
-    seen_urls: set[str] = set()
-    display_sources: list[tuple[str, str]] = []
-    for entry in raw_sources:
-        if not isinstance(entry, Mapping):
-            continue
-        title = entry.get("title")
-        url = entry.get("url")
-        if not isinstance(url, str) or not url.strip():
-            continue
-        normalized_url = url.strip()
-        if normalized_url in seen_urls:
-            continue
-        seen_urls.add(normalized_url)
-        display_sources.append(
-            (
-                title.strip() if isinstance(title, str) else "",
-                normalized_url,
-            )
-        )
-    return tuple(display_sources)
 
 
 def _build_source_quality_index(payload: Mapping[str, Any]) -> dict[str, float]:
