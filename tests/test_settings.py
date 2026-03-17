@@ -188,6 +188,25 @@ def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
     )
 
 
+def test_resolve_model_profile_marks_shipped_default_main_profile_as_native_tool_capable(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.default_model_profile == "main"
+
+    profile = resolve_model_profile(settings, settings.app.default_model_profile)
+
+    assert settings.models["main"].tool_mode == "native"
+    assert settings.models["main"].num_ctx == 8192
+    assert profile.name == "main"
+    assert profile.capabilities.tool_mode == "native"
+    assert profile.capabilities.supports_native_tool_calling is True
+    assert profile.num_ctx == 8192
+    assert profile.keep_alive == "30m"
+
+
 def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable(
     make_temp_project,
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from unclaw import main as unclaw_main
 from unclaw.core.session_manager import SessionManager
@@ -127,6 +128,11 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
     capsys,
 ) -> None:
     project_root = make_temp_project()
+    # Explicitly pin main to non-native (json_plan) so the runtime pre-executes
+    # the search tool and persists a TOOL message before the LLM call. This test
+    # covers the non-native grounding flow. main is now native by default
+    # (P2-5 shipped); native coverage is in test_cli_search_returns_a_natural_reply_*.
+    _force_main_json_plan(project_root)
     settings = _patch_ready_ollama(monkeypatch, project_root)
     search_registry = _build_search_registry(
         query="fais une recherche en ligne sur Marine Leleu et fais moi sa biographie",
@@ -263,6 +269,10 @@ def test_cli_search_command_runs_end_to_end_via_shared_runtime(
     capsys,
 ) -> None:
     project_root = make_temp_project()
+    # Explicitly pin main to non-native (json_plan) so the runtime pre-executes
+    # the explicit /search tool call before the LLM answer step. main is now
+    # native by default (P2-5 shipped); this test keeps non-native path coverage.
+    _force_main_json_plan(project_root)
     settings = _patch_ready_ollama(monkeypatch, project_root)
     search_registry = _build_search_registry(
         query="latest news about Ollama",
@@ -405,6 +415,19 @@ def _build_search_registry(
         ),
     )
     return registry
+
+def _force_main_json_plan(project_root: Path) -> None:
+    """Override models.yaml in the temp project to use json_plan for main.
+
+    Used by tests that exercise the non-native (pre-executed) tool path.
+    main is native by default after P2-5 shipped; tests that need non-native
+    behaviour must call this before bootstrapping the runtime.
+    """
+    models_yaml = project_root / "config" / "models.yaml"
+    config = yaml.safe_load(models_yaml.read_text(encoding="utf-8"))
+    config["profiles"]["main"]["tool_mode"] = "json_plan"
+    models_yaml.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
 
 def _next_input(scripted_inputs) -> str:  # type: ignore[no-untyped-def]
     try:

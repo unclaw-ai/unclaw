@@ -788,9 +788,14 @@ def test_telegram_search_non_native_uses_runtime_tool_path_without_channel_preex
     monkeypatch,
     tmp_path: Path,
     make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     project_root = make_temp_project(allowed_chat_ids=[42])
     settings = load_settings(project_root=project_root)
+    # Explicitly pin to non-native (json_plan) — this test covers the non-native
+    # runtime tool path. main is now native by default (P2-5 shipped), so we
+    # must be explicit about which profile this test exercises.
+    set_profile_tool_mode(settings, "main", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     api_client = FakeApiClient()
     tracer = Tracer(

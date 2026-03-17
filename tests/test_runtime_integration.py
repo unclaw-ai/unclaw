@@ -818,6 +818,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
+    command_handler.current_model_profile_name = "fast"
 
     captured_search_calls: list[ToolCall] = []
     tool_registry = ToolRegistry()
@@ -1499,6 +1500,7 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
+    command_handler.current_model_profile_name = "fast"
 
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
@@ -3076,6 +3078,7 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
+    command_handler.current_model_profile_name = "fast"
     captured_tools: list[object | None] = []
 
     class FakeOllamaProvider:

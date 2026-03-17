@@ -73,6 +73,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
     assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
+    assert models_payload["profiles"]["main"]["tool_mode"] == "native"
     assert models_payload["profiles"]["main"]["num_ctx"] == 8192
     assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
     assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
@@ -153,6 +154,7 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
     assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
     assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
+    assert models_payload["profiles"]["main"]["tool_mode"] == "native"
     assert models_payload["profiles"]["main"]["num_ctx"] == 8192
     assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
     assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
@@ -424,7 +426,7 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             model_name="qwen3.5:4b",
             temperature=0.3,
             thinking_supported=True,
-            tool_mode="json_plan",
+            tool_mode="native",
             num_ctx=8192,
             keep_alive="30m",
         ),

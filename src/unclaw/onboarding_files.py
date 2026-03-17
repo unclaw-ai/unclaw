@@ -33,7 +33,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         model_name="qwen3.5:4b",
         temperature=0.3,
         thinking_supported=True,
-        tool_mode="json_plan",
+        tool_mode="native",
         num_ctx=8192,
         keep_alive="30m",
     ),

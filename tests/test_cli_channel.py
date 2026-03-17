@@ -234,10 +234,15 @@ def test_cli_search_returns_a_natural_reply_with_compact_sources(
 def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecution(
     monkeypatch,
     make_temp_project,
+    set_profile_tool_mode,
     capsys,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    # Explicitly pin to non-native (json_plan) — this test covers the non-native
+    # runtime tool path. main is now native by default (P2-5 shipped), so we
+    # must be explicit about which profile this test exercises.
+    set_profile_tool_mode(settings, "main", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     tracer = Tracer(
         event_bus=EventBus(),
