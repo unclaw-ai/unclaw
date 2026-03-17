@@ -12,7 +12,14 @@ from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.schemas.session import SessionRecord
 
-from unclaw.memory.summarizer import summarize_session_messages
+from unclaw.memory.summarizer import (
+    SessionMemoryStats,
+    StructuredSessionMemory,
+    build_structured_session_memory,
+    parse_persisted_session_memory,
+    render_session_memory_summary,
+    serialize_structured_session_memory,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,8 +32,13 @@ class SessionMemoryState:
     message_count: int
     user_message_count: int
     assistant_message_count: int
-    summary_text: str
+    summary: StructuredSessionMemory
     recent_snippets: tuple[str, ...]
+
+    @property
+    def summary_text(self) -> str:
+        """Rendered session summary preserved for user-facing output."""
+        return render_session_memory_summary(self.summary)
 
 
 @dataclass(slots=True)
@@ -65,18 +77,18 @@ class MemoryManager:
 
         session = self._resolve_session(session_id)
         messages = self.session_manager.list_messages(session.id)
-        return self._store_summary(session.id, messages)
+        return self._store_summary(session.id, messages).summary_text
 
     def get_session_summary(self, session_id: str | None = None) -> str:
         """Return the current stored summary, generating it when missing."""
 
         session = self._resolve_session(session_id)
-        summary_text = self.session_manager.session_repository.get_summary_text(session.id)
-        if summary_text is not None:
-            return summary_text
-
         messages = self.session_manager.list_messages(session.id)
-        return self._store_summary(session.id, messages)
+        summary = self._load_summary(session.id, messages)
+        if summary is not None:
+            return summary.summary_text
+
+        return self._store_summary(session.id, messages).summary_text
 
     def get_session_state(
         self,
@@ -89,9 +101,9 @@ class MemoryManager:
         session = self._resolve_session(session_id)
         messages = self.session_manager.list_messages(session.id)
 
-        summary_text = self.session_manager.session_repository.get_summary_text(session.id)
-        if summary_text is None:
-            summary_text = self._store_summary(session.id, messages)
+        summary = self._load_summary(session.id, messages)
+        if summary is None:
+            summary = self._store_summary(session.id, messages)
 
         return SessionMemoryState(
             session_id=session.id,
@@ -104,7 +116,7 @@ class MemoryManager:
             assistant_message_count=sum(
                 1 for message in messages if message.role == MessageRole.ASSISTANT
             ),
-            summary_text=summary_text,
+            summary=summary,
             recent_snippets=self.list_recent_snippets(
                 session.id,
                 limit=(
@@ -156,15 +168,38 @@ class MemoryManager:
             raise SessionManagerError(f"Session '{session_id}' was not found.")
         return session
 
-    def _store_summary(self, session_id: str, messages: list[ChatMessage]) -> str:
-        summary_text = summarize_session_messages(messages)
+    def _load_summary(
+        self,
+        session_id: str,
+        messages: list[ChatMessage],
+    ) -> StructuredSessionMemory | None:
+        raw_summary = self.session_manager.session_repository.get_summary_text(session_id)
+        if raw_summary is None:
+            return None
+
+        return parse_persisted_session_memory(
+            raw_summary,
+            fallback_stats=SessionMemoryStats.from_messages(messages),
+        )
+
+    def _store_summary(
+        self,
+        session_id: str,
+        messages: list[ChatMessage],
+    ) -> StructuredSessionMemory:
+        summary = build_structured_session_memory(messages)
         stored_summary = self.session_manager.session_repository.update_summary_text(
             session_id,
-            summary_text,
+            serialize_structured_session_memory(summary),
         )
         if stored_summary is None:
             raise SessionManagerError(f"Session '{session_id}' was not found.")
-        return stored_summary
+
+        parsed_summary = parse_persisted_session_memory(
+            stored_summary,
+            fallback_stats=summary.stats,
+        )
+        return parsed_summary or summary
 
     def _format_message_snippet(self, message: ChatMessage) -> str | None:
         normalized_content = " ".join(message.content.split()).strip()
