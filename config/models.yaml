@@ -5,6 +5,7 @@ profiles:
     temperature: 0.2
     thinking_supported: false
     tool_mode: json_plan
+    num_ctx: 4096
     keep_alive: 10m
   main:
     provider: ollama
@@ -12,6 +13,7 @@ profiles:
     temperature: 0.3
     thinking_supported: true
     tool_mode: json_plan
+    num_ctx: 8192
     keep_alive: 30m
   deep:
     provider: ollama
@@ -19,6 +21,7 @@ profiles:
     temperature: 0.2
     thinking_supported: true
     tool_mode: native
+    num_ctx: 8192
     keep_alive: 10m
   codex:
     provider: ollama
@@ -26,4 +29,5 @@ profiles:
     temperature: 0.1
     thinking_supported: true
     tool_mode: json_plan
+    num_ctx: 4096
     keep_alive: 10m

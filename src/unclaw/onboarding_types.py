@@ -28,6 +28,7 @@ class ModelProfileDraft:
     temperature: float
     thinking_supported: bool
     tool_mode: str
+    num_ctx: int | None = None
     keep_alive: str | None = None
 
 

@@ -61,11 +61,14 @@ class OllamaProvider(BaseLLMProvider):
         thinking_requested = (
             thinking_enabled and profile.capabilities.thinking_supported
         )
+        options: dict[str, Any] = {"temperature": profile.temperature}
+        if profile.num_ctx is not None:
+            options["num_ctx"] = profile.num_ctx
         payload: dict[str, Any] = {
             "model": profile.model_name,
             "messages": [message.as_payload() for message in messages],
             "stream": content_callback is not None,
-            "options": {"temperature": profile.temperature},
+            "options": options,
             # The current runtime models thinking as a strict on/off toggle.
             # Providers that need graded reasoning levels would require a wider config change.
             "think": thinking_requested,

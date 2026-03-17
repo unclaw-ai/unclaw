@@ -25,6 +25,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.2,
         thinking_supported=False,
         tool_mode="json_plan",
+        num_ctx=4096,
         keep_alive="10m",
     ),
     "main": ModelProfileDraft(
@@ -33,6 +34,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.3,
         thinking_supported=True,
         tool_mode="json_plan",
+        num_ctx=8192,
         keep_alive="30m",
     ),
     "deep": ModelProfileDraft(
@@ -41,6 +43,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.2,
         thinking_supported=True,
         tool_mode="native",
+        num_ctx=8192,
         keep_alive="10m",
     ),
     "codex": ModelProfileDraft(
@@ -49,6 +52,7 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         temperature=0.1,
         thinking_supported=True,
         tool_mode="json_plan",
+        num_ctx=4096,
         keep_alive="10m",
     ),
 }
@@ -64,6 +68,7 @@ def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
             temperature=draft.temperature,
             thinking_supported=draft.thinking_supported,
             tool_mode=draft.tool_mode,
+            num_ctx=draft.num_ctx,
             keep_alive=draft.keep_alive,
         )
         for name, draft in _RECOMMENDED_PROFILES.items()
@@ -145,6 +150,8 @@ def build_onboarding_file_payloads(
             "thinking_supported": draft.thinking_supported,
             "tool_mode": draft.tool_mode,
         }
+        if draft.num_ctx is not None:
+            profile_payload["num_ctx"] = draft.num_ctx
         if draft.keep_alive is not None:
             profile_payload["keep_alive"] = draft.keep_alive
         profiles_section[profile_name] = profile_payload

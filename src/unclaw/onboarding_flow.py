@@ -208,6 +208,7 @@ def prompt_model_profiles(
             temperature=template.temperature,
             thinking_supported=template.thinking_supported,
             tool_mode=template.tool_mode,
+            num_ctx=template.num_ctx,
             keep_alive=template.keep_alive,
         )
 
@@ -499,6 +500,7 @@ def _draft_from_profile(profile: ModelProfile) -> ModelProfileDraft:
         temperature=profile.temperature,
         thinking_supported=profile.thinking_supported,
         tool_mode=profile.tool_mode,
+        num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
     )
 

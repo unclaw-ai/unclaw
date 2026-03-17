@@ -166,8 +166,10 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
 
     profile = resolve_model_profile(settings, "deep")
 
+    assert settings.models["deep"].num_ctx == 8192
     assert profile.capabilities.tool_mode == "native"
     assert profile.capabilities.supports_native_tool_calling is True
+    assert profile.num_ctx == 8192
     assert profile.keep_alive == "10m"
 
 

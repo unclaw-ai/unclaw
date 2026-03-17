@@ -95,6 +95,7 @@ class ResolvedModelProfile:
     model_name: str
     temperature: float
     capabilities: ModelCapabilities
+    num_ctx: int | None = None
     keep_alive: str | None = None
 
 

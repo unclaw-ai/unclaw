@@ -34,6 +34,7 @@ def _to_resolved_profile(profile: ModelProfile) -> ResolvedModelProfile:
         model_name=profile.model_name,
         temperature=profile.temperature,
         capabilities=_derive_capabilities(profile),
+        num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
     )
 

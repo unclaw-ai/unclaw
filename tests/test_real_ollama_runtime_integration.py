@@ -26,6 +26,7 @@ def _override_main_profile(settings, *, model_name: str, tool_mode: str) -> None
         temperature=0.0,
         thinking_supported=profile.thinking_supported,
         tool_mode=tool_mode,
+        num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
     )
 

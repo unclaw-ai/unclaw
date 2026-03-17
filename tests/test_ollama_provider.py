@@ -207,6 +207,33 @@ def test_chat_sends_keep_alive_when_profile_configured(monkeypatch) -> None:
     assert captured["payload"]["keep_alive"] == "10m"  # type: ignore[index]
 
 
+def test_chat_sends_num_ctx_when_profile_configured(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        captured["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeJsonResponse(
+            json.dumps(
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-13T12:00:00Z",
+                    "done_reason": "stop",
+                    "message": {"content": "Context reply"},
+                }
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    provider = ollama_provider.OllamaProvider()
+    provider.chat(
+        profile=_build_profile(thinking_supported=True, num_ctx=8192),
+        messages=[LLMMessage(role=LLMRole.USER, content="hi")],
+    )
+
+    assert captured["payload"]["options"]["num_ctx"] == 8192  # type: ignore[index]
+
+
 def test_chat_sends_tool_definitions_in_ollama_format(monkeypatch) -> None:
     """When tools are provided, the payload includes them in Ollama's native format."""
     captured: dict[str, object] = {}
@@ -655,6 +682,7 @@ def _build_profile(
     *,
     model_name: str = "qwen3.5:4b",
     thinking_supported: bool,
+    num_ctx: int | None = None,
     keep_alive: str | None = None,
 ) -> ResolvedModelProfile:
     return ResolvedModelProfile(
@@ -668,6 +696,7 @@ def _build_profile(
             supports_tools=True,
             supports_native_tool_calling=False,
         ),
+        num_ctx=num_ctx,
         keep_alive=keep_alive,
     )
 
@@ -723,6 +752,7 @@ def _build_integration_profile(model_name: str) -> ResolvedModelProfile:
             supports_tools=True,
             supports_native_tool_calling=True,
         ),
+        num_ctx=8192,
     )
 
 

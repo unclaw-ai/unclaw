@@ -126,6 +126,7 @@ class ModelProfile:
     temperature: float
     thinking_supported: bool
     tool_mode: str
+    num_ctx: int | None = None
     keep_alive: str | None = None
 
 
@@ -399,6 +400,7 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
             temperature=_get_float(raw_profile, "temperature"),
             thinking_supported=_get_bool(raw_profile, "thinking_supported"),
             tool_mode=_get_str(raw_profile, "tool_mode"),
+            num_ctx=_get_optional_positive_int(raw_profile, "num_ctx"),
             keep_alive=_get_optional_str(raw_profile, "keep_alive"),
         )
 
@@ -531,6 +533,20 @@ def _get_non_negative_int(
     if value < 0:
         raise ConfigurationError(
             f"Configuration key '{key}' must be a non-negative integer."
+        )
+    return value
+
+
+def _get_optional_positive_int(
+    source: Mapping[str, Any],
+    key: str,
+) -> int | None:
+    value = source.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be a positive integer when provided."
         )
     return value
 
