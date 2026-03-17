@@ -9,12 +9,13 @@ from unclaw.llm.base import LLMResponse
 from unclaw.settings import load_settings
 
 
-def test_route_request_uses_web_search_route_but_preserves_user_text_as_query(
+def test_route_request_preserves_router_reformulated_query_for_web_search(
     monkeypatch,
 ) -> None:
     settings = _load_repo_settings()
     capability_summary = _build_capability_summary(settings)
     user_input = "fais une recherche en ligne sur Marine Leleu et fais moi sa biographie"
+    reformulated_query = "biographie de Marine Leleu"
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -42,7 +43,11 @@ def test_route_request_uses_web_search_route_but_preserves_user_text_as_query(
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
-                content='{"route":"web_search","search_query":"biographie de Marine Le Pen"}',
+                content=(
+                    '{"route":"web_search",'
+                    f'"search_query":"{reformulated_query}"'
+                    "}"
+                ),
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
@@ -58,17 +63,17 @@ def test_route_request_uses_web_search_route_but_preserves_user_text_as_query(
     )
 
     assert route.kind is RouteKind.WEB_SEARCH
-    assert route.search_query == user_input
-    assert "Marine Leleu" in route.search_query
-    assert "Marine Le Pen" not in route.search_query
+    assert route.search_query == reformulated_query
+    assert route.search_query != user_input
 
 
-def test_route_request_keeps_weather_request_on_web_search_route_with_user_text(
+def test_route_request_preserves_router_reformulated_weather_query(
     monkeypatch,
 ) -> None:
     settings = _load_repo_settings()
     capability_summary = _build_capability_summary(settings)
     user_input = "Quelle est la météo à Paris aujourd'hui ?"
+    reformulated_query = "météo Paris aujourd'hui"
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -95,7 +100,11 @@ def test_route_request_keeps_weather_request_on_web_search_route_with_user_text(
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
-                content='{"route":"web_search","search_query":"météo Paris aujourd\\u0027hui"}',
+                content=(
+                    '{"route":"web_search",'
+                    f'"search_query":"{reformulated_query}"'
+                    "}"
+                ),
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
@@ -111,7 +120,7 @@ def test_route_request_keeps_weather_request_on_web_search_route_with_user_text(
     )
 
     assert route.kind is RouteKind.WEB_SEARCH
-    assert route.search_query == user_input
+    assert route.search_query == reformulated_query
 
 
 def test_route_request_keeps_plain_local_request_on_chat_route(

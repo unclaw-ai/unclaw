@@ -18,7 +18,11 @@ from unclaw.core.capabilities import (
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
-from unclaw.core.runtime import RuntimeTurnCancellation, run_user_turn
+from unclaw.core.runtime import (
+    RuntimeTurnCancellation,
+    _prepare_web_search_route,
+    run_user_turn,
+)
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import (
     LLMConnectionError,
@@ -848,6 +852,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
 
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
+    reformulated_query = "biographie de Marine Leleu"
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -879,7 +884,11 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
                 return LLMResponse(
                     provider="ollama",
                     model_name="qwen3.5:4b",
-                    content='{"route":"web_search","search_query":"biographie de Marine Le Pen"}',
+                    content=(
+                        '{"route":"web_search",'
+                        f'"search_query":"{reformulated_query}"'
+                        "}"
+                    ),
                     created_at="2026-03-16T10:00:00Z",
                     finish_reason="stop",
                 )
@@ -920,13 +929,11 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         assert "https://example.com/marine-leleu" in reply
         assert "https://example.com/athletes/marine-leleu" in reply
         assert len(captured_search_calls) == 1
-        assert captured_search_calls[0].arguments["query"] == user_input
-        assert "Marine Leleu" in captured_search_calls[0].arguments["query"]
-        assert "Marine Le Pen" not in captured_search_calls[0].arguments["query"]
+        assert captured_search_calls[0].arguments["query"] == reformulated_query
         assert captured_tools == [None]
         assert any(
             message.role is LLMRole.SYSTEM
-            and "Route requirement: this turn needs web-backed grounding." in message.content
+            and f"Ground this request: {reformulated_query}" in message.content
             for message in captured_messages[0]
         )
         assert any(
@@ -1020,6 +1027,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
     captured_turn_messages: list[list[LLMMessage]] = []
     captured_turn_tools: list[object | None] = []
     turn_call_count = 0
+    reformulated_query = "biographie de Marine Leleu"
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1051,7 +1059,11 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
                 return LLMResponse(
                     provider="ollama",
                     model_name="qwen3.5:4b",
-                    content='{"route":"web_search","search_query":"biographie de Marine Le Pen"}',
+                    content=(
+                        '{"route":"web_search",'
+                        f'"search_query":"{reformulated_query}"'
+                        "}"
+                    ),
                     created_at="2026-03-16T10:00:00Z",
                     finish_reason="stop",
                 )
@@ -1065,7 +1077,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
                 assert any(tool.name == SEARCH_WEB_DEFINITION.name for tool in tools)
                 assert any(
                     message.role is LLMRole.SYSTEM
-                    and "call the search_web tool with a focused query." in message.content
+                    and f"Ground this request: {reformulated_query}" in message.content
                     for message in messages
                 )
                 return LLMResponse(
@@ -1077,7 +1089,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
                     tool_calls=(
                         ToolCall(
                             tool_name="search_web",
-                            arguments={"query": user_input},
+                            arguments={"query": reformulated_query},
                         ),
                     ),
                     raw_payload={
@@ -1087,7 +1099,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
                                 {
                                     "function": {
                                         "name": "search_web",
-                                        "arguments": {"query": user_input},
+                                        "arguments": {"query": reformulated_query},
                                     }
                                 }
                             ],
@@ -1102,7 +1114,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
             ]
             assert len(tool_messages) == 1
             assert tool_messages[0].startswith("UNTRUSTED TOOL OUTPUT:")
-            assert f"Search query: {user_input}" in tool_messages[0]
+            assert f"Search query: {reformulated_query}" in tool_messages[0]
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -1137,14 +1149,12 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
         assert "https://example.com/athletes/marine-leleu" in reply
         assert turn_call_count == 2
         assert len(captured_search_calls) == 1
-        assert captured_search_calls[0].arguments["query"] == user_input
-        assert "Marine Leleu" in captured_search_calls[0].arguments["query"]
-        assert "Marine Le Pen" not in captured_search_calls[0].arguments["query"]
+        assert captured_search_calls[0].arguments["query"] == reformulated_query
         assert len(captured_turn_tools) == 2
         assert all(tools is not None for tools in captured_turn_tools)
         assert any(
             message.role is LLMRole.SYSTEM
-            and "Route requirement: this turn needs web-backed grounding." in message.content
+            and f"Ground this request: {reformulated_query}" in message.content
             for message in captured_turn_messages[0]
         )
 
@@ -2408,15 +2418,16 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
     )
 
     user_input = "fais une recherche en ligne sur Marine Leleu et fais moi sa biographie"
+    reformulated_query = "biographie de Marine Leleu"
     search_tool_result = ToolResult.ok(
         tool_name="search_web",
         output_text=(
-            f"Search query: {user_input}\n"
+            f"Search query: {reformulated_query}\n"
             "Sources fetched: 2 of 2 attempted\n"
             "Evidence kept: 4\n"
         ),
         payload={
-            "query": user_input,
+            "query": reformulated_query,
             "summary_points": [
                 "Marine Leleu is a French endurance athlete and content creator."
             ],
@@ -2460,7 +2471,11 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
             if "Summarize that more briefly." in user_request:
                 content = '{"route":"chat","search_query":""}'
             else:
-                content = '{"route":"web_search","search_query":"biographie de Marine Le Pen"}'
+                content = (
+                    '{"route":"web_search",'
+                    f'"search_query":"{reformulated_query}"'
+                    "}"
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -2473,7 +2488,7 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         _build_search_agent_provider(
-            search_query=user_input,
+            search_query=reformulated_query,
             final_reply="Marine Leleu is a French endurance athlete and content creator.",
         ),
     )
@@ -2564,6 +2579,38 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
         assert len(captured_follow_up_messages) == 1
     finally:
         session_manager.close()
+
+
+def test_prepare_web_search_route_falls_back_to_user_input_without_reformulated_query() -> None:
+    user_input = "Quelle est la météo à Paris aujourd'hui ?"
+
+    route_context_notes, assistant_reply_transform, explicit_tool_call = (
+        _prepare_web_search_route(
+            session_manager=SimpleNamespace(),
+            session_id="session-1",
+            user_input=user_input,
+            route=SimpleNamespace(search_query=None),
+            assistant_reply_transform=None,
+            search_results_ready=True,
+        )
+    )
+
+    assert route_context_notes == (
+        "\n".join(
+            (
+                "Route requirement: this turn needs web-backed grounding.",
+                f"Ground this request: {user_input}",
+                "Grounded search results should already be present in this conversation. "
+                "Do not answer from unsupported memory.",
+                "Answer from retrieved evidence and include compact sources.",
+            )
+        ),
+    )
+    assert assistant_reply_transform is not None
+    assert explicit_tool_call == ToolCall(
+        tool_name="search_web",
+        arguments={"query": user_input},
+    )
 
 
 def test_run_user_turn_uses_configured_ollama_timeout(
