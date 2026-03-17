@@ -110,6 +110,36 @@ def test_load_settings_errors_when_logging_retention_is_negative(
     )
 
 
+def test_load_settings_reads_public_facing_shipped_defaults(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.environment == "production"
+    assert settings.app.logging.level == "INFO"
+    assert settings.app.logging.mode == "simple"
+
+
+def test_load_settings_preserves_explicit_verbose_logging_overrides(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["app"]["environment"] = "development"
+    app_payload["logging"]["level"] = "DEBUG"
+    app_payload["logging"]["mode"] = "full"
+    _write_yaml(app_config_path, app_payload)
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.environment == "development"
+    assert settings.app.logging.level == "DEBUG"
+    assert settings.app.logging.mode == "full"
+
+
 def test_load_settings_reads_runtime_guardrail_config(
     make_temp_project,
 ) -> None:

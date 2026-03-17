@@ -1,7 +1,7 @@
 app:
   name: unclaw
   display_name: Unclaw
-  environment: development
+  environment: production
 paths:
   data_dir: data
   logs_dir: logs
@@ -10,8 +10,8 @@ paths:
   files_dir: files
   database_file: app.db
 logging:
-  level: DEBUG
-  mode: full
+  level: INFO
+  mode: simple
   console_enabled: true
   file_enabled: true
   file_name: runtime.log

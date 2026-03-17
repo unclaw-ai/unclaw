@@ -60,6 +60,8 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     telegram_payload = _read_yaml(project_root / "config" / "telegram.yaml")
     secrets_payload = _read_yaml(project_root / "config" / "secrets.yaml")
 
+    assert app_payload["app"]["environment"] == "production"
+    assert app_payload["logging"]["level"] == "INFO"
     assert app_payload["logging"]["mode"] == "simple"
     assert app_payload["logging"]["include_reasoning_text"] is False
     assert app_payload["channels"] == {
