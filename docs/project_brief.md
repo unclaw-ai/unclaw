@@ -1,499 +1,103 @@
 # Unclaw Project Brief
 
-## 1. Project identity
+## 1. Purpose
 
-**Name:** Unclaw  
-**Tagline:** Local-first AI runtime. No cloud lock-in. No recurring fees. Built for real local models.  
+This document is the concise practical brief for contributors and AI coding agents.
+
+Use:
+- [docs/vision.md](vision.md) for product philosophy and long-term direction,
+- [docs/architecture.md](architecture.md) for the current runtime shape,
+- [docs/roadmap.md](roadmap.md) for the authoritative shipped-status snapshot and remaining work.
+
+---
+
+## 2. Current project identity
+
+**Name:** Unclaw
+**Tagline:** Local-first AI runtime. No cloud lock-in. No recurring fees. Built for real local models.
 **Emoji identity:** 🦐
 
-Unclaw is intended to become a **lightweight, secure, privacy-first, local-only AI agent runtime** designed for real use on consumer hardware.
+Unclaw currently ships as a local-first assistant/runtime with:
+- a shared core runtime for terminal and Telegram,
+- local Ollama profiles (`fast`, `main`, `deep`, `codex`),
+- grounded web search plus safe local file and fetch tools,
+- session persistence, deterministic session summaries, and local traces,
+- and a bounded native tool loop on compatible profiles.
 
-It is inspired by the ambition of larger agent systems, but it must not become:
-- a clone,
-- a giant framework,
-- a cloud wrapper,
-- or a chatbot with manual tools dressed up as an agent.
+Current reality contributors must keep in mind:
+- the shipped `deep` profile is native-tool capable,
+- the default `main` profile remains conservative (`tool_mode: json_plan`),
+- grounded search is the most integrated model-driven tool path today,
+- `/read`, `/ls`, and `/fetch` are still mainly slash-command-driven in normal use,
+- and the product is not yet a broadly autonomous default experience.
 
-The project goal is to become a serious reference for local AI agents by being:
-- lighter,
-- clearer,
-- safer,
-- more transparent,
-- more practical,
-- and easier to extend.
-
-Unclaw must feel like a real personal assistant that genuinely works locally.
+Assume technical users on consumer hardware and keep claims honest about those current limits.
 
 ---
 
-## 2. Current status and target status
-
-For the authoritative shipped-status snapshot and remaining work, see [docs/roadmap.md](roadmap.md). This brief stays higher-level and is not the canonical phase tracker.
-
-### Current status
-The MVP already provides:
-- local model execution through Ollama,
-- terminal CLI and a Telegram polling channel,
-- session persistence and deterministic session summaries,
-- local file read/list tools and URL fetch,
-- grounded web search and search-backed follow-up turns,
-- observability and logs,
-- model-assisted routing between normal chat and web-backed search,
-- guided onboarding that rewrites local project config files,
-- a bounded observation-action loop, with the shipped `deep` profile configured for native tool calling,
-- and a relatively clean modular codebase.
-
-But the current MVP is still **not yet a true autonomous agent runtime by default**.
-It is closer to:
-- a strong local-first assistant runtime,
-- with grounded search and some model-guided routing,
-- but with general tool use still mostly manual or route-specific in the shipped configuration,
-- and with the default `main` profile still set to `tool_mode: json_plan`, so broader model-driven tool use is not yet the normal everyday path.
-
-### Target status
-The target product is a runtime that can:
-- understand requests naturally,
-- decide when tools are needed,
-- execute tools autonomously,
-- observe tool results,
-- continue reasoning in bounded multi-step loops,
-- answer naturally without exposing awkward internal mechanics,
-- and stay lightweight enough for modest local hardware.
-
-This gap must remain explicit until it is truly closed.
-
----
-
-## 3. Primary goals
-
-### Primary goal
-Build a local-first agent system that can:
-- answer simple questions quickly,
-- handle harder requests in a deeper mode,
-- read local files,
-- search and fetch web information,
-- use tools intelligently,
-- manage multi-turn conversations,
-- route adaptively between fast and deeper execution,
-- support local models with different capabilities,
-- remain transparent through live logs and traces,
-- and run well on both Mac and PC.
-
-### Long-term goal
-Turn Unclaw into a serious open-source reference for local-first autonomous agents, with:
-- adaptive routing,
-- model-aware tool use,
-- modular memory,
-- research workflows,
-- optional voice,
-- stronger local automation,
-- multi-machine local orchestration,
-- clean UX,
-- and a very low-friction setup.
-
----
-
-## 4. Non-negotiable product constraints
+## 3. Non-negotiable constraints
 
 Unclaw must remain:
 - **local-first**,
 - **privacy-first**,
 - **secure-first**,
 - **lightweight**,
-- **open source**,
-- **free to run locally**,
-- **mainstream-usable**,
+- **open source and free to run locally**,
 - and **architecturally honest**.
 
-That means:
-- no required cloud inference,
-- no dependency on heavy orchestration frameworks unless clearly justified,
-- no product direction built around giant prompts and fake “agentic” behavior,
-- no silent drift into a chatbot-with-tools architecture.
+Practical meaning:
+- no required cloud inference or cloud control plane,
+- no heavy framework adoption without a clear need,
+- no fake agent claims that hide manual or route-specific behavior,
+- no brittle keyword lists as the main control plane,
+- no erosion of explicit security boundaries around files, fetch, or tool output,
+- and no removal of manual slash commands as power-user fallbacks.
 
 ---
 
-## 5. What Unclaw is not
+## 4. Implementation guardrails
 
-Unclaw is not meant to be:
-- a cloud-first product,
-- a thin wrapper around one model,
-- a giant monolithic framework,
-- an enterprise RAG platform,
-- a benchmark-only project that ignores UX,
-- a brittle keyword router,
-- or a manual-tool chatbot pretending to be autonomous.
+Unclaw should be extended as a runtime, not as a chat wrapper.
 
----
-
-## 6. Product philosophy
-
-### 6.1 Local-first
-The core runtime must work locally from day one.
-Cloud services may inspire some ideas, but they must not define the real architecture.
-
-### 6.2 Privacy-first
-User data stays local by default.
-Storage, logs, sessions, research traces, and caches must remain inspectable and bounded.
-
-### 6.3 Security-first
-Every capability must respect strong safety boundaries.
-This includes:
-- safe defaults,
-- argument validation,
-- SSRF resistance,
-- path protections,
-- prompt-injection awareness,
-- permission levels,
-- and bounded execution loops.
-
-### 6.4 Fast by default
-The default experience must feel responsive.
-Most requests should not pay the cost of deep reasoning or heavy orchestration.
-
-### 6.5 Deep when needed
-Harder tasks may use deeper routing, more steps, or more tool use — but still within bounded and observable execution.
-
-### 6.6 Transparent
-The user must be able to inspect what the system is doing through logs and traces:
-- route choice,
-- model choice,
-- tool usage,
-- search or research depth,
-- major execution steps,
-- timings,
-- failures,
-- and fallbacks.
-
-### 6.7 Clean engineering
-The repository must remain understandable and maintainable.
-It should look like careful human engineering work.
+Contributors should preserve these boundaries:
+- keep channels thin; routing, orchestration, and tool policy belong in the shared runtime,
+- keep tool contracts explicit, validated, bounded, and traceable,
+- keep the runtime responsible for the final natural answer while tools return data,
+- prefer model-assisted or capability-based decisions over hand-maintained trigger lists,
+- preserve bounded execution, untrusted-tool handling, and local observability,
+- and keep memory claims modest; today the shipped memory layer is session history plus deterministic session summaries.
 
 ---
 
-## 7. Core product requirement: runtime over chatbot
+## 5. Current contributor priorities
 
-Unclaw must be built as a **runtime**, not as a chat wrapper.
-
-The runtime’s job is to:
-1. receive the input,
-2. inspect the request and state,
-3. decide the route,
-4. select the model/profile,
-5. select the relevant memory,
-6. decide whether tools are needed,
-7. execute tools safely,
-8. observe results,
-9. continue or stop,
-10. produce a natural final answer,
-11. persist only useful information,
-12. trace the whole execution.
-
-If a capability is only accessible through an explicit user command, it is not yet fully integrated into the runtime.
-
-Current implementation note:
-- The runtime already handles route selection, model/profile selection, grounded search turns, tracing, and a bounded native tool loop when available.
-- Default model-driven access to all tools is not enabled yet, and memory selection is still limited to session summaries.
+When making changes, optimize for:
+- broader model-driven tool use without overstating autonomy,
+- docs and product claims that match shipped behavior,
+- security and prompt-injection resilience around tool and search output,
+- modular, auditable changes that do not add framework weight,
+- and logs/traces that keep runtime behavior inspectable.
 
 ---
 
-## 8. MVP expectations
+## 6. Current non-goals
 
-### Strong MVP target
-The first strong MVP should include:
-- terminal interaction,
-- session management,
-- model profiles,
-- fast/deep behavior,
-- local persistence,
-- web research,
-- local file reading,
-- Telegram access,
-- live execution logs,
-- bounded tool use,
-- and a clean professional repository.
-
-### But the strong MVP must also start the agent transition
-The MVP must not stop at “chat + slash commands + tools”.
-It must begin the transition toward:
-- automatic tool selection,
-- autonomous bounded execution,
-- adaptive routing,
-- natural answers that hide tool mechanics,
-- and model-aware capability handling.
+These are not the focus of the current repo state:
+- cloud-first product direction,
+- framework-heavy rewrites,
+- speculative GUI-first redesigns,
+- unrestricted shell or OS automation,
+- rich long-term memory marketed before it exists,
+- marketplace or plugin positioning as a near-term identity,
+- and broad product promises beyond the shipped runtime, search, and bounded native tool loop.
 
 ---
 
-## 9. Main design principles
+## 7. Working rules for contributors and AI coding assistants
 
-### 9.1 Dual-mode behavior
-Unclaw must support at least two broad interaction styles:
-- **Fast mode**: short, lightweight, responsive, minimum overhead.
-- **Deep mode**: more deliberate, more context, more tool usage, more bounded multi-step execution.
-
-Current implementation note:
-- Today this mostly maps to profile choice plus optional thinking mode, not separate planning systems.
-
-### 9.2 Adaptive routing
-Routing must not rely on a giant hand-maintained keyword list.
-The target architecture should support:
-- minimal deterministic pre-routing where clearly justified,
-- adaptive capability routing,
-- small routing logic or structured model assistance when useful,
-- stronger fallback behavior when ambiguity remains.
-
-Current implementation note:
-- Today the model-assisted router only distinguishes normal chat from a web-backed search route.
-
-### 9.3 Model-aware tool use
-Different local models have different strengths.
-Unclaw must support multiple execution modes such as:
-- native tool calling when reliable,
-- structured outputs when needed,
-- conservative fallback behavior for weaker models.
-
-Current implementation note:
-- The code supports native tool calling, but broader shipped defaults remain conservative: `deep` is native-tool capable, while `main`, `fast`, and `codex` still use `tool_mode: json_plan`.
-
-### 9.4 Selective context
-Avoid the classic local-agent failure mode:
-- giant prompts,
-- too much conversation injected,
-- too many tools described at once,
-- too much memory injected blindly.
-
-The system must inject less context, but better context.
-
-### 9.5 Memory as a modular system
-Memory must not be one undifferentiated dump.
-Target layers may include:
-- session memory,
-- user memory,
-- project memory,
-- ephemeral memory,
-- execution memory,
-- research cache.
-
-Current implementation note:
-- The implemented memory layer today is session history plus deterministic session summaries.
-
-### 9.6 Observability is part of the product
-Logs are not a developer afterthought.
-They are part of how Unclaw earns trust.
-
-### 9.7 Scalable without deterministic brittleness
-Avoid building key capabilities around giant lists of terms or hardcoded language-specific triggers when a more robust adaptive mechanism is possible.
-
----
-
-## 10. Target users
-
-### Primary user
-A technical power user who wants a serious local agent on personal hardware.
-
-### Secondary users
-- developers who want a clean local agent base,
-- makers and tinkerers,
-- privacy-conscious users,
-- users who want local AI without recurring fees,
-- users with modest machines as well as stronger local hardware.
-
-### Hardware target
-The system should run well across:
-- compact Apple Silicon machines,
-- gaming PCs,
-- consumer desktops and laptops.
-
-The design must remain compatible with the reality of modest local hardware.
-
----
-
-## 11. Technical scope
-
-### Recommended language
-Python remains the primary language.
-
-Reasons:
-- development speed,
-- strong local AI ecosystem,
-- good tooling for APIs, files, automation, and voice,
-- portability,
-- readability.
-
-### Recommended formats
-- YAML for config,
-- JSON for structured outputs/contracts where useful,
-- Markdown for docs and prompts,
-- SQLite for the first persistent data layer.
-
-### Backend direction
-The backend must expose a clean local runtime and API.
-The terminal remains a first-class interface.
-A local web UI may come later, but must not become mandatory.
-
-### Model backends
-The architecture should preserve support for multiple local providers and profiles.
-The runtime must not be hardcoded around one provider forever.
-
----
-
-## 12. Tool system vision
-
-### Short-term tools
-The first tools should remain practical and safe:
-- web search,
-- fetch URL content,
-- read file,
-- list directory,
-- session or memory inspection where useful.
-
-### Later tools
-Possible extensions:
-- browser automation,
-- note creation,
-- mail drafting,
-- local app/system actions,
-- code/project tools,
-- richer skills/plugins,
-- multi-machine task dispatch.
-
-### Tool rules
-Every tool must have:
-- a clear name,
-- a contract/schema,
-- argument validation,
-- a permission level,
-- timeout or execution bounds,
-- traceability,
-- safe failure behavior.
-
-And most importantly:
-**tools should return useful data, not own the assistant voice.**
-The runtime should own the final natural answer.
-
----
-
-## 13. Logging and trace vision
-
-One of Unclaw’s strongest differentiators should be real-time observability.
-
-Logs should expose:
-- incoming message,
-- session identifier,
-- routing decision,
-- selected model/profile,
-- memory decisions,
-- selected tools,
-- tool summaries/results,
-- timings,
-- errors,
-- final answer.
-
-The system should eventually offer at least:
-- a compact readable trace,
-- and a deeper engineering trace.
-
----
-
-## 14. UX direction
-
-The UX should be:
-- simple,
-- fast,
-- readable,
-- transparent when useful,
-- but not overloaded by internal mechanics.
-
-### Important UX rule
-The user should not need to think like the runtime.
-The user should not have to know internal tool names or manual workflows for normal use.
-
-Slash commands may exist for power use, debugging, or forcing behavior.
-But the default experience should increasingly move toward natural autonomous assistance.
-
----
-
-## 15. Engineering rules for contributors and AI coding assistants
-
-When a human contributor or AI coding assistant works on Unclaw, it should:
-- read this brief first,
-- respect repository structure,
-- keep implementations practical,
-- protect local-first/privacy-first/security-first constraints,
-- avoid unnecessary frameworks,
-- not assume browser UI is mandatory,
-- not assume one model backend solves everything,
-- avoid drifting toward brittle keyword logic,
-- and keep the agent-runtime goal visible at all times.
-
-If a change makes Unclaw more manual, more brittle, or more misleadingly “agentic”, it is probably the wrong change.
-
----
-
-## 16. Security and safety direction
-
-### MVP safety
-The MVP must stay conservative.
-Unsafe system actions must not be rushed.
-
-### Safe defaults
-- start with safe tools,
-- validate arguments aggressively,
-- avoid unrestricted shell execution early,
-- keep risky operations behind explicit permission boundaries,
-- treat fetched content as untrusted,
-- log important actions.
-
-### Later direction
-Later versions may add:
-- stronger permissions,
-- sandboxing,
-- controlled automation,
-- action confirmation checkpoints,
-- richer safety boundaries.
-
----
-
-## 17. Non-goals for the first strong milestone
-
-Do not try to do everything at once.
-Avoid prematurely expanding into:
-- full browser automation,
-- full voice agent,
-- broad messaging platform support,
-- plugin marketplace,
-- perfect long-term memory,
-- full compatibility layers,
-- unrestricted shell power.
-
-Build solid first.
-
----
-
-## 18. Long-term ambition
-
-The long-term ambition is not just to build another local assistant.
-The ambition is to make Unclaw one of the clearest, safest, and most convincing local-first autonomous agent runtimes for real users and real machines.
-
-That means:
-- strong engineering,
-- low friction,
-- practical speed,
-- transparent behavior,
-- adaptable model support,
-- useful memory,
-- safe and effective tools,
-- and an architecture that can survive growth.
-
----
-
-## 19. Working development principle
-
-Development should follow this order:
-1. build the smallest clean version that works,
-2. make it observable,
-3. make it reliable,
-4. make it safe,
-5. then extend it.
-
-Do not build wide before building solid.
+- read the relevant audit material and current authority docs before changing behavior,
+- keep patches narrow, reversible, and easy to audit,
+- do not move shared-runtime logic into channels,
+- do not introduce hidden heuristics or language-specific routing tables,
+- do not describe partial capabilities as default or complete,
+- and prefer brief cross-references over duplicating long explanations from the vision or architecture docs.

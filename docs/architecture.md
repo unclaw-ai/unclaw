@@ -4,11 +4,11 @@
 
 This document describes the **current shipped architecture** of Unclaw.
 
-Unclaw is a **local-first AI agent/runtime** built around local Ollama models, thin channel adapters, safe built-in tools, local persistence, and bounded execution. It is not yet a fully autonomous local agent by default, so the remaining gaps are called out explicitly.
+It focuses on how the runtime is structured today. For product philosophy and long-term direction, see [docs/vision.md](vision.md). For contributor constraints and priorities, see [docs/project_brief.md](project_brief.md).
 
 ---
 
-## Current product position
+## Current shipped posture
 
 Today Unclaw ships as:
 
@@ -16,16 +16,14 @@ Today Unclaw ships as:
 - local Ollama model profiles with `fast`, `main`, `deep`, and `codex`
 - guided onboarding that writes local config files and optional local secrets
 - model-assisted routing between normal chat and a web-backed search path
-- grounded search that can run either as a runtime-managed step or as a native tool call
+- grounded search as the most integrated model-driven tool path today
 - deterministic session summaries injected as bounded context notes
 - local SQLite persistence plus local JSONL and SQLite tracing
+- a bounded native tool loop on profiles configured for native tool calling
 
-Important current reality:
+Important current limit:
 
-- the shipped `deep` profile uses `tool_mode: native`
-- the default `main` profile still uses `tool_mode: json_plan`
-- search is the most integrated model-driven tool path today
-- file and fetch tools still remain mainly slash-command-driven in normal usage
+- the shipped `deep` profile uses `tool_mode: native`, while the default `main` profile still uses `tool_mode: json_plan`
 
 ---
 
@@ -106,7 +104,7 @@ Memory today is intentionally small in scope:
 - one deterministic session summary
 - retained grounded facts and uncertainties extracted from prior search tool results
 
-This is not yet the richer multi-store memory system described in the long-term project brief.
+This is not yet the richer memory direction described in [docs/vision.md](vision.md) and [docs/roadmap.md](roadmap.md).
 
 ---
 
@@ -229,7 +227,6 @@ It activates only when the selected profile supports native tool calling.
 
 Current behavior:
 
-- the shipped `deep` profile is native-tool capable
 - native tool definitions are sent only for native-tool profiles
 - the loop is bounded by a step limit and a tool-call budget
 - tool calls are executed concurrently within one batch
@@ -369,7 +366,7 @@ The current local security posture also includes:
 
 ## Current limitations that remain intentional to document
 
-Unclaw is still missing several pieces of the longer-term vision:
+These are current runtime boundaries, not hidden roadmap promises:
 
 - no public GUI
 - no general local API layer documented as a shipped primary interface
@@ -378,5 +375,3 @@ Unclaw is still missing several pieces of the longer-term vision:
 - no skills marketplace
 - no broad OS automation suite
 - no finished document-editing automation workflow marketed as a core feature
-
-The current repo is therefore best described as a local-first AI agent/runtime with a real shared runtime and a real bounded agent loop, but with only part of the broader agent vision shipped by default.

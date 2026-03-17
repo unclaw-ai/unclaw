@@ -1,5 +1,7 @@
 # Vision
 
+This document captures Unclaw's long-term product direction and positioning. For the current shipped runtime shape, see [docs/architecture.md](architecture.md). For contributor-facing constraints and implementation guardrails, see [docs/project_brief.md](project_brief.md).
+
 ## What Unclaw is trying to become
 
 Unclaw is trying to become a **lightweight, secure, privacy-first, local-only autonomous AI agent runtime** for real local models and real consumer hardware.
@@ -19,6 +21,8 @@ The goal is to build a local assistant that:
 ---
 
 ## The product promise
+
+Current shipped status and present-day limitations live in [docs/roadmap.md](roadmap.md) and [docs/architecture.md](architecture.md); this document stays focused on the destination.
 
 Unclaw should eventually feel like a real personal assistant that lives on your own machine.
 
@@ -65,6 +69,8 @@ Unclaw should become one of the most convincing local-first autonomous agent run
 ---
 
 ## Core product principles
+
+These are product principles, not a restatement of the current implementation checklist.
 
 ### Local-first
 The core of the project must work without cloud services.
