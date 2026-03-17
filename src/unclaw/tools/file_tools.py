@@ -7,6 +7,7 @@ from typing import Any
 
 from unclaw.tools.contracts import (
     ToolCall,
+    ToolArgumentSpec,
     ToolDefinition,
     ToolPermissionLevel,
     ToolResult,
@@ -21,8 +22,11 @@ READ_TEXT_FILE_DEFINITION = ToolDefinition(
     description="Read a local UTF-8 text file.",
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={
-        "path": "Path to a local UTF-8 text file.",
-        "max_chars": "Optional maximum number of characters to return.",
+        "path": ToolArgumentSpec(description="Path to a local UTF-8 text file."),
+        "max_chars": ToolArgumentSpec(
+            description="Optional maximum number of characters to return.",
+            value_type="integer",
+        ),
     },
 )
 
@@ -31,9 +35,15 @@ LIST_DIRECTORY_DEFINITION = ToolDefinition(
     description="List one local directory with depth 1 or 2.",
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={
-        "path": "Path to a local directory.",
-        "max_depth": "Optional depth, allowed values are 1 or 2.",
-        "limit": "Optional maximum number of entries to include.",
+        "path": ToolArgumentSpec(description="Path to a local directory."),
+        "max_depth": ToolArgumentSpec(
+            description="Optional depth, allowed values are 1 or 2.",
+            value_type="integer",
+        ),
+        "limit": ToolArgumentSpec(
+            description="Optional maximum number of entries to include.",
+            value_type="integer",
+        ),
     },
 )
 

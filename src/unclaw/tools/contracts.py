@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 class ToolPermissionLevel(StrEnum):
@@ -15,6 +15,27 @@ class ToolPermissionLevel(StrEnum):
     NETWORK = "network"
 
 
+type ToolArgumentType = Literal[
+    "string",
+    "integer",
+    "number",
+    "boolean",
+    "array",
+    "object",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolArgumentSpec:
+    """Describe one tool argument for provider schema emission."""
+
+    description: str
+    value_type: ToolArgumentType = "string"
+
+
+type ToolArgumentDefinition = str | ToolArgumentSpec
+
+
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     """Describe one callable tool exposed to the runtime."""
@@ -22,7 +43,51 @@ class ToolDefinition:
     name: str
     description: str
     permission_level: ToolPermissionLevel
-    arguments: Mapping[str, str]
+    arguments: Mapping[str, ToolArgumentDefinition]
+
+
+_TOOL_ARGUMENT_TYPE_ALIASES: dict[str, ToolArgumentType] = {
+    "str": "string",
+    "string": "string",
+    "int": "integer",
+    "integer": "integer",
+    "float": "number",
+    "number": "number",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "array": "array",
+    "list": "array",
+    "object": "object",
+    "dict": "object",
+}
+
+
+def resolve_tool_argument_spec(argument: ToolArgumentDefinition) -> ToolArgumentSpec:
+    """Return a normalized tool argument spec.
+
+    Legacy plain-string entries stay supported:
+    - recognized type aliases like ``"int"`` map to structured types
+    - every other string is treated as a description with string typing
+    """
+
+    if isinstance(argument, ToolArgumentSpec):
+        return ToolArgumentSpec(
+            description=argument.description,
+            value_type=_normalize_explicit_tool_argument_type(argument.value_type),
+        )
+
+    normalized_type = _TOOL_ARGUMENT_TYPE_ALIASES.get(argument.strip().lower())
+    return ToolArgumentSpec(
+        description=argument,
+        value_type="string" if normalized_type is None else normalized_type,
+    )
+
+
+def _normalize_explicit_tool_argument_type(value_type: str) -> ToolArgumentType:
+    normalized = _TOOL_ARGUMENT_TYPE_ALIASES.get(value_type.strip().lower())
+    if normalized is None:
+        raise ValueError(f"Unsupported tool argument type: {value_type!r}.")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,9 +229,13 @@ __all__ = [
     "SearchFindingPayload",
     "SearchResultSourcePayload",
     "SearchWebPayload",
+    "ToolArgumentDefinition",
+    "ToolArgumentSpec",
+    "ToolArgumentType",
     "ToolCall",
     "ToolDefinition",
     "ToolHandler",
     "ToolPermissionLevel",
     "ToolResult",
+    "resolve_tool_argument_spec",
 ]

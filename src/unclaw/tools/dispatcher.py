@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.contracts import (
+    ToolArgumentDefinition,
+    ToolCall,
+    ToolResult,
+    resolve_tool_argument_spec,
+)
 from unclaw.tools.registry import ToolRegistry
 
 
@@ -16,7 +21,7 @@ def _coerce_argument(value: Any, expected_type: str) -> Any:
     This function converts safe primitive types before tool execution.
     """
 
-    if expected_type == "int":
+    if expected_type in {"int", "integer"}:
         if isinstance(value, int):
             return value
         if isinstance(value, str):
@@ -25,8 +30,8 @@ def _coerce_argument(value: Any, expected_type: str) -> Any:
             except ValueError:
                 pass
 
-    if expected_type == "float":
-        if isinstance(value, float):
+    if expected_type in {"float", "number"}:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             return value
         if isinstance(value, str):
             try:
@@ -34,7 +39,7 @@ def _coerce_argument(value: Any, expected_type: str) -> Any:
             except ValueError:
                 pass
 
-    if expected_type == "bool":
+    if expected_type in {"bool", "boolean"}:
         if isinstance(value, bool):
             return value
         if isinstance(value, str):
@@ -48,13 +53,17 @@ def _coerce_argument(value: Any, expected_type: str) -> Any:
     return value
 
 
-def _coerce_arguments(arguments: dict[str, Any], schema: dict[str, str]) -> dict[str, Any]:
+def _coerce_arguments(
+    arguments: dict[str, Any],
+    schema: dict[str, ToolArgumentDefinition],
+) -> dict[str, Any]:
     """Apply type coercion based on tool argument schema."""
     coerced: dict[str, Any] = {}
 
     for name, value in arguments.items():
-        expected_type = schema.get(name)
-        if expected_type:
+        raw_spec = schema.get(name)
+        if raw_spec is not None:
+            expected_type = resolve_tool_argument_spec(raw_spec).value_type
             coerced[name] = _coerce_argument(value, expected_type)
         else:
             coerced[name] = value

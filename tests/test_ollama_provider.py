@@ -18,7 +18,14 @@ from unclaw.llm.base import (
     ResolvedModelProfile,
 )
 from unclaw.llm.ollama_provider import OllamaProvider
-from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
+from unclaw.tools.contracts import (
+    ToolArgumentSpec,
+    ToolCall,
+    ToolDefinition,
+    ToolPermissionLevel,
+)
+from unclaw.tools.file_tools import READ_TEXT_FILE_DEFINITION
+from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 
 def test_chat_sends_boolean_think_flag_and_captures_reasoning(monkeypatch) -> None:
@@ -253,48 +260,136 @@ def test_chat_sends_tool_definitions_in_ollama_format(monkeypatch) -> None:
 
     monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
 
-    tools = [
-        ToolDefinition(
-            name="search_web",
-            description="Search the web for information.",
-            permission_level=ToolPermissionLevel.NETWORK,
-            arguments={"query": "The search query string"},
-        ),
-        ToolDefinition(
-            name="read_file",
-            description="Read a local file.",
-            permission_level=ToolPermissionLevel.LOCAL_READ,
-            arguments={"path": "Absolute file path", "max_lines": "Maximum lines to read"},
-        ),
-    ]
-
     provider = ollama_provider.OllamaProvider()
     response = provider.chat(
         profile=_build_profile(thinking_supported=False),
         messages=[LLMMessage(role=LLMRole.USER, content="search for python")],
-        tools=tools,
+        tools=[
+            SEARCH_WEB_DEFINITION,
+            FETCH_URL_TEXT_DEFINITION,
+            READ_TEXT_FILE_DEFINITION,
+        ],
     )
 
     sent_tools = captured["payload"]["tools"]  # type: ignore[index]
-    assert len(sent_tools) == 2
+    assert len(sent_tools) == 3
     assert sent_tools[0] == {
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Search the web for information.",
+            "description": SEARCH_WEB_DEFINITION.description,
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query string"},
+                    "query": {
+                        "type": "string",
+                        "description": "Search query string.",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": (
+                            "Optional maximum number of search results to consider."
+                        ),
+                    },
+                    "timeout_seconds": {
+                        "type": "number",
+                        "description": "Optional request timeout in seconds.",
+                    },
                 },
-                "required": ["query"],
+                "required": ["query", "max_results", "timeout_seconds"],
             },
         },
     }
-    assert sent_tools[1]["function"]["name"] == "read_file"
-    assert len(sent_tools[1]["function"]["parameters"]["required"]) == 2
+    assert sent_tools[1]["function"]["parameters"]["properties"] == {
+        "url": {
+            "type": "string",
+            "description": "HTTP or HTTPS URL to fetch.",
+        },
+        "max_chars": {
+            "type": "integer",
+            "description": "Optional maximum number of characters to return.",
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "description": "Optional request timeout in seconds.",
+        },
+    }
+    assert sent_tools[2]["function"]["parameters"]["properties"] == {
+        "path": {
+            "type": "string",
+            "description": "Path to a local UTF-8 text file.",
+        },
+        "max_chars": {
+            "type": "integer",
+            "description": "Optional maximum number of characters to return.",
+        },
+    }
     assert response.content == "I'll help with that."
     assert response.tool_calls is None
+
+
+def test_tool_definition_to_ollama_maps_supported_json_schema_types() -> None:
+    tool = ToolDefinition(
+        name="typed_tool",
+        description="Exercise all supported JSON schema type mappings.",
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+        arguments={
+            "count": ToolArgumentSpec(
+                description="Number of results to return.",
+                value_type="integer",
+            ),
+            "threshold": ToolArgumentSpec(
+                description="Score threshold.",
+                value_type="number",
+            ),
+            "enabled": ToolArgumentSpec(
+                description="Whether the feature is enabled.",
+                value_type="boolean",
+            ),
+            "label": ToolArgumentSpec(
+                description="Short label.",
+                value_type="string",
+            ),
+            "tags": ToolArgumentSpec(
+                description="List of tags.",
+                value_type="array",
+            ),
+            "metadata": ToolArgumentSpec(
+                description="Nested metadata payload.",
+                value_type="object",
+            ),
+        },
+    )
+
+    ollama_tool = ollama_provider._tool_definition_to_ollama(tool)
+    properties = ollama_tool["function"]["parameters"]["properties"]
+
+    assert properties == {
+        "count": {
+            "type": "integer",
+            "description": "Number of results to return.",
+        },
+        "threshold": {
+            "type": "number",
+            "description": "Score threshold.",
+        },
+        "enabled": {
+            "type": "boolean",
+            "description": "Whether the feature is enabled.",
+        },
+        "label": {
+            "type": "string",
+            "description": "Short label.",
+        },
+        "tags": {
+            "type": "array",
+            "description": "List of tags.",
+        },
+        "metadata": {
+            "type": "object",
+            "description": "Nested metadata payload.",
+        },
+    }
 
 
 def test_chat_parses_tool_calls_from_response(monkeypatch) -> None:

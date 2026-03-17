@@ -26,6 +26,7 @@ from unclaw.tools.contracts import (
     SearchResultSourcePayload,
     SearchWebPayload,
     ToolCall,
+    ToolArgumentSpec,
     ToolDefinition,
     ToolPermissionLevel,
     ToolResult,
@@ -63,9 +64,15 @@ FETCH_URL_TEXT_DEFINITION = ToolDefinition(
     description="Fetch a URL and extract readable text content.",
     permission_level=ToolPermissionLevel.NETWORK,
     arguments={
-        "url": "HTTP or HTTPS URL to fetch.",
-        "max_chars": "Optional maximum number of characters to return.",
-        "timeout_seconds": "Optional request timeout in seconds.",
+        "url": ToolArgumentSpec(description="HTTP or HTTPS URL to fetch."),
+        "max_chars": ToolArgumentSpec(
+            description="Optional maximum number of characters to return.",
+            value_type="integer",
+        ),
+        "timeout_seconds": ToolArgumentSpec(
+            description="Optional request timeout in seconds.",
+            value_type="number",
+        ),
     },
 )
 
@@ -76,9 +83,15 @@ SEARCH_WEB_DEFINITION = ToolDefinition(
     ),
     permission_level=ToolPermissionLevel.NETWORK,
     arguments={
-        "query": "string",
-        "max_results": "int",
-        "timeout_seconds": "int",
+        "query": ToolArgumentSpec(description="Search query string."),
+        "max_results": ToolArgumentSpec(
+            description="Optional maximum number of search results to consider.",
+            value_type="integer",
+        ),
+        "timeout_seconds": ToolArgumentSpec(
+            description="Optional request timeout in seconds.",
+            value_type="number",
+        ),
     },
 )
 

@@ -22,7 +22,7 @@ from unclaw.llm.base import (
     ResolvedModelProfile,
     utc_now_iso,
 )
-from unclaw.tools.contracts import ToolCall, ToolDefinition
+from unclaw.tools.contracts import ToolCall, ToolDefinition, resolve_tool_argument_spec
 
 _OPEN_THINK_TAG = "<think>"
 _CLOSE_THINK_TAG = "</think>"
@@ -589,8 +589,12 @@ def _tool_definition_to_ollama(tool: ToolDefinition) -> dict[str, Any]:
     {"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}
     """
     properties: dict[str, dict[str, str]] = {}
-    for arg_name, arg_description in tool.arguments.items():
-        properties[arg_name] = {"type": "string", "description": arg_description}
+    for arg_name, raw_argument in tool.arguments.items():
+        argument = resolve_tool_argument_spec(raw_argument)
+        properties[arg_name] = {
+            "type": argument.value_type,
+            "description": argument.description,
+        }
 
     return {
         "type": "function",
