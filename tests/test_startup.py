@@ -10,6 +10,7 @@ import yaml
 
 from unclaw.bootstrap import bootstrap
 from unclaw.core.session_manager import SessionManager
+from unclaw.llm.base import LLMProviderError
 from unclaw.schemas.events import EventLevel
 from unclaw.settings import load_settings
 from unclaw.startup import CheckStatus, OllamaStatus, build_banner, build_startup_report
@@ -72,6 +73,143 @@ def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> No
         check.status is CheckStatus.ERROR and check.label == "Models"
         for check in report.checks
     )
+
+
+def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> None:
+    settings = load_settings(project_root=_repo_root())
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=True,
+            model_names=(settings.default_model.model_name,),
+        ),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url
+            captured["default_timeout_seconds"] = default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del content_callback
+            captured["profile_name"] = profile.name
+            captured["model_name"] = profile.model_name
+            captured["messages"] = [
+                (str(message.role), message.content) for message in messages
+            ]
+            captured["timeout_seconds"] = timeout_seconds
+            captured["thinking_enabled"] = thinking_enabled
+            captured["tools"] = tools
+            return object()
+
+    monkeypatch.setattr("unclaw.startup.OllamaProvider", FakeOllamaProvider)
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(settings.app.default_model_profile,),
+        warm_default_model=True,
+    )
+
+    warm_check = next(check for check in report.checks if check.label == "Warm-load")
+
+    assert warm_check.status is CheckStatus.OK
+    assert (
+        captured["default_timeout_seconds"]
+        == settings.app.providers.ollama.timeout_seconds
+    )
+    assert captured["profile_name"] == settings.app.default_model_profile
+    assert captured["model_name"] == settings.default_model.model_name
+    assert captured["messages"] == [("user", " ")]
+    assert (
+        captured["timeout_seconds"] == settings.app.providers.ollama.timeout_seconds
+    )
+    assert captured["thinking_enabled"] is False
+    assert captured["tools"] is None
+
+
+def test_startup_report_warm_load_failure_is_non_fatal(monkeypatch) -> None:
+    settings = load_settings(project_root=_repo_root())
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=True,
+            model_names=(settings.default_model.model_name,),
+        ),
+    )
+
+    class FailingOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del (
+                profile,
+                messages,
+                timeout_seconds,
+                thinking_enabled,
+                content_callback,
+                tools,
+            )
+            raise LLMProviderError("warm-load timeout")
+
+    monkeypatch.setattr("unclaw.startup.OllamaProvider", FailingOllamaProvider)
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(settings.app.default_model_profile,),
+        warm_default_model=True,
+    )
+
+    warm_check = next(check for check in report.checks if check.label == "Warm-load")
+
+    assert report.has_errors is False
+    assert report.summary_status is CheckStatus.WARN
+    assert warm_check.status is CheckStatus.WARN
+    assert "warm-load timeout" in warm_check.detail
+    assert "Startup will continue without preloading." in warm_check.detail
 
 
 def test_startup_report_accepts_local_telegram_token(

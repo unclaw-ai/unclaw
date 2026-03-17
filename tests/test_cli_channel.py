@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from unclaw.channels import cli as cli_channel
 from unclaw.channels.cli import _TerminalAssistantStream
 from unclaw.channels.cli import run_cli
 from unclaw.core.command_handler import CommandHandler
@@ -45,6 +46,35 @@ def test_terminal_assistant_stream_renders_final_reply_when_nothing_streamed(cap
     stream.finish("Saved reply")
 
     assert capsys.readouterr().out == "Unclaw> Saved reply\n"
+
+
+def test_terminal_main_requests_default_model_warm_load(
+    monkeypatch,
+    make_temp_project,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli_channel, "bootstrap", lambda project_root=None: settings)
+
+    def fake_build_startup_report(settings_arg, **kwargs):  # type: ignore[no-untyped-def]
+        assert settings_arg is settings
+        captured["warm_default_model"] = kwargs["warm_default_model"]
+        return SimpleNamespace(has_errors=True)
+
+    monkeypatch.setattr(
+        cli_channel,
+        "build_startup_report",
+        fake_build_startup_report,
+    )
+    monkeypatch.setattr(cli_channel, "build_banner", lambda **kwargs: "banner")
+    monkeypatch.setattr(cli_channel, "format_startup_report", lambda report: "report")
+
+    assert cli_channel.main(project_root=project_root) == 1
+    assert captured["warm_default_model"] is True
+    assert capsys.readouterr().out == "banner\nreport\n"
 
 
 def test_cli_search_returns_a_natural_reply_with_compact_sources(

@@ -89,6 +89,7 @@ def main(project_root: Path | None = None) -> int:
                 for profile_name in settings.models
                 if profile_name != settings.app.default_model_profile
             ),
+            warm_default_model=True,
         )
         if startup_report.has_errors:
             print(_build_preflight_banner(settings))

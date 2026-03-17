@@ -21,7 +21,8 @@ from unclaw.constants import (
     OLLAMA_STARTUP_WAIT_TIMEOUT_SECONDS,
 )
 from unclaw.errors import ConfigurationError
-from unclaw.llm.base import LLMProviderError
+from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
+from unclaw.llm.model_profiles import get_default_model_profile
 from unclaw.local_secrets import local_secrets_path, resolve_telegram_bot_token
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
@@ -185,6 +186,7 @@ def build_startup_report(
     optional_profile_names: tuple[str, ...] = (),
     telegram_token_env_var: str | None = None,
     telegram_allowed_chat_ids: frozenset[int] | None = None,
+    warm_default_model: bool = False,
 ) -> StartupReport:
     """Build a user-facing startup report for one channel."""
 
@@ -216,6 +218,14 @@ def build_startup_report(
             )
         )
         checks.extend(_build_optional_model_checks(missing_profiles=optional_missing))
+        if (
+            warm_default_model
+            and channel_enabled
+            and settings.default_model.model_name in set(ollama_status.model_names)
+        ):
+            warm_load_check = _build_default_model_warm_load_check(settings)
+            if warm_load_check is not None:
+                checks.append(warm_load_check)
     else:
         checks.append(
             StartupCheck(
@@ -239,6 +249,47 @@ def build_startup_report(
         )
 
     return StartupReport(channel_name=channel_name, checks=tuple(checks))
+
+
+def _build_default_model_warm_load_check(settings: Settings) -> StartupCheck | None:
+    """Warm-load the default Ollama model without making startup failures fatal."""
+
+    default_model = settings.default_model
+    if default_model.provider != OllamaProvider.provider_name:
+        return None
+
+    resolved_profile = get_default_model_profile(settings)
+    provider = OllamaProvider(
+        default_timeout_seconds=settings.app.providers.ollama.timeout_seconds,
+    )
+
+    try:
+        provider.chat(
+            profile=resolved_profile,
+            messages=[LLMMessage(role=LLMRole.USER, content=" ")],
+            timeout_seconds=settings.app.providers.ollama.timeout_seconds,
+            thinking_enabled=False,
+        )
+    except Exception as exc:
+        error_detail = " ".join(str(exc).split()) or "unknown error"
+        return StartupCheck(
+            status=CheckStatus.WARN,
+            label="Warm-load",
+            detail=(
+                "Default model warm-load failed for "
+                f"{resolved_profile.name}={resolved_profile.model_name}: "
+                f"{error_detail}. Startup will continue without preloading."
+            ),
+        )
+
+    return StartupCheck(
+        status=CheckStatus.OK,
+        label="Warm-load",
+        detail=(
+            "Default model warm-load completed for "
+            f"{resolved_profile.name}={resolved_profile.model_name}."
+        ),
+    )
 
 
 def find_missing_model_profiles(
