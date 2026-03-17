@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 
+from unclaw.constants import NOTES_DIRECTORY_NAME
 from unclaw.settings import Settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
@@ -12,6 +14,13 @@ from unclaw.tools.file_tools import (
     LIST_DIRECTORY_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
     register_file_tools,
+)
+from unclaw.tools.notes_tools import (
+    CREATE_NOTE_DEFINITION,
+    LIST_NOTES_DEFINITION,
+    READ_NOTE_DEFINITION,
+    UPDATE_NOTE_DEFINITION,
+    register_notes_tools,
 )
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
@@ -36,6 +45,10 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     register_file_tools(registry)
     register_web_tools(registry)
     register_system_tools(registry)
+    register_notes_tools(
+        registry,
+        notes_dir=Path.cwd().resolve() / NOTES_DIRECTORY_NAME,
+    )
     return registry
 
 
@@ -55,6 +68,10 @@ def create_default_tool_registry(settings: Settings | None = None) -> ToolRegist
         allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
     )
     register_system_tools(registry)
+    register_notes_tools(
+        registry,
+        notes_dir=settings.paths.data_dir / NOTES_DIRECTORY_NAME,
+    )
     return registry
 
 
@@ -100,8 +117,12 @@ def execute_tool_call(
 
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
+    "CREATE_NOTE_DEFINITION",
+    "LIST_NOTES_DEFINITION",
+    "READ_NOTE_DEFINITION",
     "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",
+    "UPDATE_NOTE_DEFINITION",
     "create_default_tool_registry",
     "execute_tool_call",
     "register_default_tools",

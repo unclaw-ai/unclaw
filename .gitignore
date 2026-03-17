@@ -54,6 +54,7 @@ data/logs/
 data/cache/
 data/sessions/
 data/files/
+data/notes/
 
 # Logs
 *.log

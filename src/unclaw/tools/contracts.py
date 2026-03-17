@@ -12,6 +12,7 @@ class ToolPermissionLevel(StrEnum):
     """Minimal permission categories for built-in tools."""
 
     LOCAL_READ = "local_read"
+    LOCAL_WRITE = "local_write"
     NETWORK = "network"
 
 
