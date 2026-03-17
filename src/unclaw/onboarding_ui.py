@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from unclaw.onboarding_types import InputFunc, MenuOption, OutputFunc
+from unclaw.terminal_styles import render_onboarding_section
 
 
 @dataclass(slots=True)
@@ -18,12 +19,7 @@ class FallbackPromptUIBase:
     interactive: bool = False
 
     def section(self, title: str, description: str | None = None) -> None:
-        self.output_func("")
-        self.output_func(title)
-        self.output_func("-" * max(36, len(title)))
-        if description:
-            self.output_func(description)
-        self.output_func("")
+        render_onboarding_section(self.output_func, title, description)
 
     def info(self, message: str = "") -> None:
         self.output_func(message)
@@ -153,12 +149,7 @@ class InteractivePromptUIBase:
     interactive: bool = True
 
     def section(self, title: str, description: str | None = None) -> None:
-        self.output_func("")
-        self.output_func(title)
-        self.output_func("-" * max(36, len(title)))
-        if description:
-            self.output_func(description)
-        self.output_func("")
+        render_onboarding_section(self.output_func, title, description)
 
     def info(self, message: str = "") -> None:
         self.output_func(message)

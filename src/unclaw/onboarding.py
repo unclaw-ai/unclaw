@@ -42,6 +42,7 @@ from unclaw.onboarding_ui import (
 )
 from unclaw.settings import Settings
 from unclaw.startup import find_missing_model_profiles, inspect_ollama
+from unclaw.terminal_styles import onboarding_questionary_style_entries
 
 try:
     import questionary
@@ -110,20 +111,7 @@ class InteractivePromptUI(InteractivePromptUIBase):
 
 if questionary is not None:
     _QUESTIONARY_STYLE = questionary.Style(
-        [
-            ("qmark", "fg:#f6c7b1 bold"),
-            ("question", "fg:#fff4ec bold"),
-            ("answer", "fg:#f6c7b1 bold"),
-            ("pointer", "fg:#241511 bg:#f6c7b1 bold"),
-            ("highlighted", "fg:#241511 bg:#f6c7b1 bold"),
-            ("selected", "fg:#241511 bg:#f2b99b bold"),
-            ("text", "fg:#dde3e8"),
-            ("separator", "fg:#8f7b70"),
-            ("instruction", "fg:#c79a85 italic"),
-            ("disabled", "fg:#6d6159 italic"),
-            ("bottom-toolbar", "noreverse"),
-            ("validation-toolbar", "fg:#ffffff bg:#b42318 bold"),
-        ]
+        list(onboarding_questionary_style_entries())
     )
 else:  # pragma: no cover - exercised when questionary is unavailable.
     _QUESTIONARY_STYLE = None

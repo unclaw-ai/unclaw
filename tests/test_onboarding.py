@@ -21,6 +21,7 @@ from unclaw.onboarding import (
 )
 from unclaw.settings import load_settings
 from unclaw.startup import OllamaStatus
+from unclaw.terminal_styles import onboarding_questionary_style_entries
 
 EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
 
@@ -196,6 +197,23 @@ def test_interactive_select_uses_value_for_initial_choice(monkeypatch) -> None:
     choices = captured["choices"]
     assert isinstance(choices, list)
     assert choices[0].description == "Guided defaults."
+
+
+def test_onboarding_questionary_style_entries_preserve_existing_prompt_styles() -> None:
+    assert onboarding_questionary_style_entries() == (
+        ("qmark", "fg:#f6c7b1 bold"),
+        ("question", "fg:#fff4ec bold"),
+        ("answer", "fg:#f6c7b1 bold"),
+        ("pointer", "fg:#241511 bg:#f6c7b1 bold"),
+        ("highlighted", "fg:#241511 bg:#f6c7b1 bold"),
+        ("selected", "fg:#241511 bg:#f2b99b bold"),
+        ("text", "fg:#dde3e8"),
+        ("separator", "fg:#8f7b70"),
+        ("instruction", "fg:#c79a85 italic"),
+        ("disabled", "fg:#6d6159 italic"),
+        ("bottom-toolbar", "noreverse"),
+        ("validation-toolbar", "fg:#ffffff bg:#b42318 bold"),
+    )
 
 
 def test_onboarding_can_keep_existing_local_telegram_token(
