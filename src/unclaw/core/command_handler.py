@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from unclaw.core.executor import resolve_builtin_tool_command
 from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.memory.diagnostics import collect_memory_diagnostics, render_memory_diagnostics
 from unclaw.schemas.session import SessionSummary
 from unclaw.settings import ModelProfile, Settings
 from unclaw.tools.contracts import ToolCall
@@ -137,6 +138,8 @@ class CommandHandler:
                         parsed_command,
                         usage_line="/search <query>",
                     )
+                case "memory-status":
+                    return self._handle_memory_status(parsed_command.arguments)
                 case "help":
                     return self._handle_help(parsed_command.arguments)
                 case "exit":
@@ -318,6 +321,17 @@ class CommandHandler:
             ),
         )
 
+    def _handle_memory_status(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/memory-status")
+
+        diagnostics = collect_memory_diagnostics(
+            data_dir=self.settings.paths.data_dir,
+            session_db_path=self.settings.paths.database_path,
+            current_session_id=self._current_session_id(),
+        )
+        return self._ok(*render_memory_diagnostics(diagnostics))
+
     def _handle_help(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/help")
@@ -347,6 +361,7 @@ class CommandHandler:
             "Memory:",
             "/session  Show the current session state.",
             "/summary  Show the saved session summary.",
+            "/memory-status  Show memory layer diagnostics.",
             "",
             "General:",
             "/help  Show this command list with examples.",
