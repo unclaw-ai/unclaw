@@ -577,8 +577,9 @@ def test_capability_context_without_tool_output_forbids_claiming_search_happened
     )
     context = build_runtime_capability_context(summary)
 
-    assert "Do not claim you already searched, fetched, or read something" in context
-    assert "unless actual tool output is present" in context
+    # Rule was broadened (local-action honesty patch) to cover write/create/modify/delete.
+    assert "Do not claim you already searched, fetched, read, wrote, created" in context
+    assert "actual tool output" in context
 
 
 def test_build_untrusted_tool_message_content_quotes_instruction_like_external_text() -> None:

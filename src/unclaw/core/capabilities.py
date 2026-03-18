@@ -112,9 +112,17 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
     )
 
     if summary.model_can_call_tools:
-        lines.append(
-            "- Use only the listed built-in tools and base the final answer "
-            "on their results."
+        lines.extend(
+            (
+                "- Use only the listed built-in tools and base the final answer "
+                "on their results.",
+                (
+                    "- Only claim a file was written, created, or modified if "
+                    "write_text_file or a notes write tool (create_note, update_note) "
+                    "output is present in this conversation. If no such tool ran, "
+                    "say the action has not happened yet."
+                ),
+            )
         )
     else:
         lines.extend(
@@ -123,14 +131,20 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "slash command. You cannot invoke them yourself in this turn.",
                 "- Do not say \"let me search\" or \"I will look that up\" as if "
                 "you can perform the action right now.",
+                (
+                    "- You cannot write, modify, or create any file or note in this "
+                    "turn. If the user asks you to do so, say the action was not "
+                    "performed — you have not written or changed anything."
+                ),
             )
         )
 
     lines.extend(
         (
             (
-                "- Do not claim you already searched, fetched, or read something "
-                "unless actual tool output is present in this conversation."
+                "- Do not claim you already searched, fetched, read, wrote, created, "
+                "modified, or deleted anything unless actual tool output for that "
+                "action is present in this conversation."
             ),
             (
                 "- If tool output is already present in the conversation, treat it "
@@ -141,6 +155,11 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
             (
                 "- If a capability is unavailable, say so clearly instead of "
                 "implying it exists."
+            ),
+            (
+                "- If the user asks to delete, move, rename, or copy a file or "
+                "directory, say clearly this capability does not exist. Do not "
+                "suggest it might work after confirmation."
             ),
         )
     )
@@ -182,6 +201,7 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
 def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines = [
         "Shell command execution.",
+        "Delete, move, rename, or copy local files or directories (no such tool is registered).",
         "Any capability that is not listed as available above.",
     ]
 
