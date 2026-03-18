@@ -28,6 +28,7 @@ READ_TEXT_FILE_DEFINITION = ToolDefinition(
     name="read_text_file",
     description=(
         "Read a local UTF-8 text file. "
+        "Relative paths are resolved inside the data/files/ directory by default. "
         f"Supported formats (V1): {_READABLE_EXTENSIONS_DISPLAY}. "
         "Other file types (pdf, docx, xlsx, etc.) are not supported in V1."
     ),
@@ -87,6 +88,7 @@ def register_file_tools(
     project_root: Path | None = None,
     configured_roots: tuple[str, ...] = (),
     default_write_dir: Path | None = None,
+    default_read_dir: Path | None = None,
 ) -> None:
     """Register the built-in local file tools."""
     allowed_roots = resolve_allowed_roots(
@@ -95,7 +97,7 @@ def register_file_tools(
     )
 
     def read_handler(call: ToolCall) -> ToolResult:
-        return read_text_file(call, allowed_roots=allowed_roots)
+        return read_text_file(call, allowed_roots=allowed_roots, default_read_dir=default_read_dir)
 
     def list_handler(call: ToolCall) -> ToolResult:
         return list_directory(call, allowed_roots=allowed_roots)
@@ -116,6 +118,7 @@ def read_text_file(
     call: ToolCall,
     *,
     allowed_roots: tuple[Path, ...] | None = None,
+    default_read_dir: Path | None = None,
 ) -> ToolResult:
     """Read a local text file with a small, safe default output limit."""
     tool_name = READ_TEXT_FILE_DEFINITION.name
@@ -130,7 +133,10 @@ def read_text_file(
     except ValueError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
-    path = _resolve_path(path_value)
+    if not Path(path_value).is_absolute() and default_read_dir is not None:
+        path = (default_read_dir / path_value).resolve()
+    else:
+        path = _resolve_path(path_value)
     access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=path,

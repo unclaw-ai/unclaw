@@ -220,3 +220,100 @@ def test_capability_context_mentions_unsupported_formats() -> None:
 def test_read_text_file_in_default_registry() -> None:
     registry = create_default_tool_registry()
     assert registry.get("read_text_file") is not None
+
+
+# ---------------------------------------------------------------------------
+# 7. default_read_dir: relative paths resolve into data/files/ by default
+# ---------------------------------------------------------------------------
+
+
+def test_relative_read_resolves_into_default_read_dir(tmp_path: Path) -> None:
+    """Relative filename resolves inside default_read_dir, not CWD."""
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+    (files_dir / "hello.txt").write_text("hello world", encoding="utf-8")
+
+    result = read_text_file(
+        _make_call("hello.txt"),
+        allowed_roots=(tmp_path,),
+        default_read_dir=files_dir,
+    )
+
+    assert result.success, f"Expected success, got: {result.error}"
+    assert "hello world" in result.output_text
+    assert str(files_dir / "hello.txt") in result.output_text
+
+
+def test_absolute_read_ignores_default_read_dir(tmp_path: Path) -> None:
+    """Absolute path bypasses default_read_dir and resolves directly."""
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+    target = tmp_path / "absolute.txt"
+    target.write_text("absolute content", encoding="utf-8")
+
+    result = read_text_file(
+        _make_call(str(target)),
+        allowed_roots=(tmp_path,),
+        default_read_dir=files_dir,
+    )
+
+    assert result.success, f"Expected success, got: {result.error}"
+    assert "absolute content" in result.output_text
+
+
+def test_relative_read_path_traversal_blocked(tmp_path: Path) -> None:
+    """A traversal attempt via relative path is blocked by allowed_roots."""
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+
+    # Attempt to escape files_dir and tmp_path with traversal
+    result = read_text_file(
+        _make_call("../../etc/passwd"),
+        allowed_roots=(tmp_path,),
+        default_read_dir=files_dir,
+    )
+
+    assert not result.success
+    assert "outside the allowed" in result.error.lower() or "not supported" in result.error.lower()
+
+
+def test_relative_read_unsupported_format_still_rejected_in_default_dir(
+    tmp_path: Path,
+) -> None:
+    """Format restriction fires even when relative path resolves inside default_read_dir."""
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+    (files_dir / "report.pdf").write_bytes(b"%PDF fake")
+
+    result = read_text_file(
+        _make_call("report.pdf"),
+        allowed_roots=(tmp_path,),
+        default_read_dir=files_dir,
+    )
+
+    assert not result.success
+    assert "not supported" in result.error.lower()
+    assert "V1" in result.error
+
+
+def test_register_file_tools_wires_default_read_dir(tmp_path: Path) -> None:
+    """register_file_tools passes default_read_dir through to the read handler."""
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+    (files_dir / "wired.txt").write_text("wired", encoding="utf-8")
+
+    registry = ToolRegistry()
+    register_file_tools(
+        registry,
+        project_root=tmp_path,
+        default_read_dir=files_dir,
+    )
+
+    registered = registry.get("read_text_file")
+    assert registered is not None
+
+    call = _make_call("wired.txt")
+    result = registered.handler(call)
+
+    assert result.success, f"Expected success, got: {result.error}"
+    assert "wired" in result.output_text
