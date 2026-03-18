@@ -32,6 +32,7 @@ updated_at       TEXT NOT NULL     — ISO-8601 UTC
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -42,6 +43,22 @@ from uuid import uuid4
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_TOKEN_SPLIT_RE = re.compile(r"[\s\W]+")
+_MIN_TOKEN_LEN = 3
+
+
+def _extract_search_tokens(query: str) -> list[str]:
+    """Split a natural-language query into individual search tokens.
+
+    Language-agnostic: splits on whitespace and non-word characters,
+    keeps tokens with at least _MIN_TOKEN_LEN characters.
+    No stop-word list — length filtering removes most noise (single chars,
+    two-letter particles) without any hardcoded language-specific table.
+    """
+    raw = _TOKEN_SPLIT_RE.split(query.lower())
+    return [t for t in raw if len(t) >= _MIN_TOKEN_LEN]
 
 
 _CREATE_TABLE_SQL = """
@@ -168,41 +185,76 @@ class LongTermStore:
         category: str = "",
         limit: int = 20,
     ) -> list[LongTermMemoryRecord]:
-        """Return memories whose key, value, or tags contain query (LIKE).
+        """Return memories matching query across key, value, tags, and category.
 
-        Optionally restrict to a category. Results ordered newest-first.
+        Two-pass strategy:
+        1. Full-phrase LIKE match on key, value, tags, and category fields.
+        2. Per-token LIKE match using individual words extracted from the query
+           (words >= 3 chars, language-agnostic, no stop-word list).
+        Results from both passes are merged and de-duplicated, newest-first.
+        Optionally restrict to an exact category value.
         """
-        pattern = f"%{query}%"
+        tokens = _extract_search_tokens(query)
         conn = self._open()
         try:
-            if category:
-                rows = conn.execute(
-                    """
-                    SELECT id, key, value, category, tags, source_session_id,
-                           source_seq, confidence, created_at, updated_at
-                    FROM long_term_memories
-                    WHERE (key LIKE ? OR value LIKE ? OR tags LIKE ?)
-                      AND category = ?
-                    ORDER BY updated_at DESC
-                    LIMIT ?
-                    """,
-                    (pattern, pattern, pattern, category, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT id, key, value, category, tags, source_session_id,
-                           source_seq, confidence, created_at, updated_at
-                    FROM long_term_memories
-                    WHERE key LIKE ? OR value LIKE ? OR tags LIKE ?
-                    ORDER BY updated_at DESC
-                    LIMIT ?
-                    """,
-                    (pattern, pattern, pattern, limit),
-                ).fetchall()
+            seen_ids: set[str] = set()
+            results: list[LongTermMemoryRecord] = []
+
+            # Pass 1: full-phrase match (key, value, tags, category).
+            for row in self._query_rows(conn, f"%{query}%", category, limit):
+                record = _row_to_record(row)
+                seen_ids.add(record.id)
+                results.append(record)
+
+            # Pass 2: per-token fallback when tokens differ from full phrase
+            # or when the first pass left room under the limit.
+            if tokens and len(results) < limit:
+                for token in tokens:
+                    if len(results) >= limit:
+                        break
+                    remaining = limit - len(results)
+                    for row in self._query_rows(conn, f"%{token}%", category, remaining):
+                        record = _row_to_record(row)
+                        if record.id not in seen_ids:
+                            seen_ids.add(record.id)
+                            results.append(record)
+
         finally:
             conn.close()
-        return [_row_to_record(row) for row in rows]
+        return results[:limit]
+
+    def _query_rows(
+        self,
+        conn: sqlite3.Connection,
+        pattern: str,
+        category: str,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Execute a LIKE search across key, value, tags, and category fields."""
+        if category:
+            return conn.execute(
+                """
+                SELECT id, key, value, category, tags, source_session_id,
+                       source_seq, confidence, created_at, updated_at
+                FROM long_term_memories
+                WHERE (key LIKE ? OR value LIKE ? OR tags LIKE ? OR category LIKE ?)
+                  AND category = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, pattern, category, limit),
+            ).fetchall()
+        return conn.execute(
+            """
+            SELECT id, key, value, category, tags, source_session_id,
+                   source_seq, confidence, created_at, updated_at
+            FROM long_term_memories
+            WHERE key LIKE ? OR value LIKE ? OR tags LIKE ? OR category LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (pattern, pattern, pattern, pattern, limit),
+        ).fetchall()
 
     def list_all(
         self,
@@ -315,4 +367,4 @@ def _row_to_record(row: sqlite3.Row) -> LongTermMemoryRecord:
     )
 
 
-__all__ = ["LongTermMemoryRecord", "LongTermStore"]
+__all__ = ["LongTermMemoryRecord", "LongTermStore", "_extract_search_tokens"]

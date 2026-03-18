@@ -46,13 +46,21 @@ _DEFAULT_SEARCH_LIMIT = 20
 REMEMBER_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
     name="remember_long_term_memory",
     description=(
-        "Store a persistent memory item that will survive across sessions. "
-        "Use this only when the user explicitly asks to remember something, "
-        "or when storing a clearly important user preference or fact for the future. "
-        "Do NOT auto-store random facts. "
-        "key is a short title (e.g. 'preferred language'); "
-        "value is the full content to remember. "
-        "category and tags are optional for organisation."
+        "Store a persistent fact or preference that must survive across sessions. "
+        "Call this tool when the user explicitly requests storage of a stable personal "
+        "fact, hardware detail, identity information, or preference — regardless of "
+        "the language used. "
+        "Positive examples (any phrasing that means 'store this for later'): "
+        "'remember that my GPU is an RTX 4080', "
+        "'souviens-toi que je m'appelle Vincent', "
+        "'enregistre que ma langue préférée est le français', "
+        "'remember my name is Alice', "
+        "'keep in mind that I prefer dark mode'. "
+        "Negative examples (do NOT store): general chat, questions, fetched URLs, "
+        "web search results, or facts not explicitly flagged for long-term retention. "
+        "key is a short semantic title (e.g. 'user name', 'main GPU', "
+        "'preferred language'); value is the full content to remember. "
+        "category (e.g. 'identity', 'hardware', 'preference') and tags are optional."
     ),
     permission_level=ToolPermissionLevel.LOCAL_WRITE,
     arguments={
@@ -83,11 +91,24 @@ REMEMBER_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
 SEARCH_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
     name="search_long_term_memory",
     description=(
-        "Search the user's long-term memory store for items matching a query. "
-        "Searches across key, value, and tags using substring matching. "
-        "Returns matching memory items in structured form. "
-        "Use this when the user asks about past preferences, facts, or goals "
-        "that may have been remembered in a prior session."
+        "Search the user's long-term memory for stable facts or preferences stored "
+        "in a prior session. "
+        "Call this tool when the user asks about remembered facts, identity, hardware "
+        "details, or preferences — regardless of the language used. "
+        "Positive examples: "
+        "'what do you remember about my hardware?', "
+        "'do you know my name?', "
+        "'que sais-tu de mon setup?', "
+        "'je m'appelle comment?', "
+        "'what GPU do I have?', "
+        "'what personal info do you have about me?'. "
+        "Pass a concise semantic query term, not verbatim user phrasing. Examples: "
+        "for 'je m'appelle comment?' pass query='name'; "
+        "for 'what do you remember about my hardware?' pass query='GPU' or "
+        "query='hardware'; for 'do you know my name?' pass query='name'. "
+        "Searches across key, value, tags, and category fields. "
+        "Do NOT use this tool for questions about the current session's message "
+        "history or message order — use inspect_session_history for that."
     ),
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={
@@ -112,9 +133,11 @@ LIST_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
     name="list_long_term_memory",
     description=(
         "List all stored long-term memory items, optionally filtered by category. "
-        "Returns items in structured form, newest first. "
-        "Use this to show the user what has been remembered, or to browse "
-        "all stored preferences and facts."
+        "Returns items newest-first in structured form. "
+        "Use this when the user asks broadly what has been stored, without a specific "
+        "topic: 'what do you know about me?', 'what have you remembered?', "
+        "'que sais-tu de moi?', 'list everything you know about me'. "
+        "For targeted recall of a specific topic, prefer search_long_term_memory."
     ),
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={

@@ -162,15 +162,25 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
         if summary.long_term_memory_available:
             lines.extend(
                 (
-                    "- Long-term memory tools (remember_long_term_memory, "
-                    "search_long_term_memory, list_long_term_memory, "
-                    "forget_long_term_memory) let you store and retrieve persistent "
-                    "facts across sessions. "
-                    "Long-term memory is NOT injected into context automatically — "
-                    "call the tools explicitly when needed. "
-                    "Store memories only when the user explicitly asks to remember "
-                    "something, or when a clearly important preference is stated. "
-                    "Do not auto-store random facts.",
+                    "- Long-term memory tools are for stable personal facts, hardware "
+                    "details, identity, and preferences that must persist across sessions. "
+                    "remember_long_term_memory: call when the user explicitly asks to "
+                    "store a fact for later, in any language "
+                    "('remember that...', 'souviens-toi que...', 'enregistre que...'). "
+                    "search_long_term_memory: call when the user asks about previously "
+                    "stored facts, in any language "
+                    "('what do you remember about my hardware?', "
+                    "'je m'appelle comment?', 'do you know my name?', "
+                    "'que sais-tu de mon setup?'). "
+                    "Pass a concise semantic query term when calling search — e.g. "
+                    "for 'je m'appelle comment?' pass query='name'; "
+                    "for 'what GPU do I have?' pass query='GPU'. "
+                    "list_long_term_memory: call when the user asks broadly what is stored. "
+                    "Long-term memory is NOT injected automatically — call the tools "
+                    "explicitly when needed. "
+                    "Do NOT use long-term memory tools for current session message history "
+                    "or message order (use inspect_session_history for that). "
+                    "Do not auto-store facts that were not explicitly requested for storage.",
                 )
             )
     else:
@@ -260,9 +270,12 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
         lines.append(
             "remember_long_term_memory / search_long_term_memory / "
             "list_long_term_memory / forget_long_term_memory: "
-            "store, search, list, or delete persistent cross-session user memories. "
-            "Use only on explicit user request or for clearly important preferences. "
-            "Not injected automatically — call tools to retrieve."
+            "store, search, list, or delete persistent cross-session facts "
+            "(identity, hardware, preferences). "
+            "Not injected automatically — call tools explicitly. "
+            "For recall in any language, pass a concise semantic query term "
+            "(e.g. query='name', query='GPU'). "
+            "Not for session message history — use inspect_session_history for that."
         )
     return tuple(lines)
 
