@@ -6,127 +6,149 @@ runtime artifacts.
 
 unclaw/
 ├── .github
-│   ├── FUNDING.yml
-│   └── workflows
-│       └── real-ollama-integration.yml
+│   ├── FUNDING.yml
+│   └── workflows
+│       └── real-ollama-integration.yml
 ├── .gitignore
 ├── LICENSE
-├── PB_et_piste_amelioration_UNCLAW.txt
 ├── README.md
 ├── config
-│   ├── app.yaml
-│   ├── models.yaml
-│   ├── prompts
-│   │   └── system.txt
-│   └── telegram.yaml
+│   ├── app.yaml
+│   ├── models.yaml
+│   ├── prompts
+│   │   └── system.txt
+│   └── telegram.yaml
 ├── docs
-│   ├── architecture.md
-│   ├── engineering_guidelines.md
-│   ├── project_brief.md
-│   ├── roadmap.md
-│   ├── tree_structure.txt
-│   └── vision.md
+│   ├── architecture.md
+│   ├── engineering_guidelines.md
+│   ├── project_brief.md
+│   ├── roadmap.md
+│   ├── tree_structure.txt
+│   └── vision.md
 ├── pyproject.toml
 ├── src
-│   └── unclaw
-│       ├── __init__.py
-│       ├── __main__.py
-│       ├── async_utils.py
-│       ├── bootstrap.py
-│       ├── channels
-│       │   ├── __init__.py
-│       │   ├── cli.py
-│       │   ├── telegram_api.py
-│       │   ├── telegram_app.py
-│       │   ├── telegram_bot.py
-│       │   ├── telegram_config.py
-│       │   ├── telegram_formatting.py
-│       │   └── telegram_management.py
-│       ├── constants.py
-│       ├── core
-│       │   ├── __init__.py
-│       │   ├── capabilities.py
-│       │   ├── command_handler.py
-│       │   ├── context_builder.py
-│       │   ├── executor.py
-│       │   ├── orchestrator.py
-│       │   ├── research_flow.py
-│       │   ├── router.py
-│       │   ├── runtime.py
-│       │   ├── search_grounding.py
-│       │   ├── search_payload_helpers.py
-│       │   ├── session_manager.py
-│       │   └── timing.py
-│       ├── db
-│       │   ├── __init__.py
-│       │   ├── repositories.py
-│       │   └── sqlite.py
-│       ├── errors.py
-│       ├── llm
-│       │   ├── __init__.py
-│       │   ├── base.py
-│       │   ├── model_profiles.py
-│       │   └── ollama_provider.py
-│       ├── local_secrets.py
-│       ├── logs
-│       │   ├── __init__.py
-│       │   ├── cli.py
-│       │   ├── event_bus.py
-│       │   └── tracer.py
-│       ├── main.py
-│       ├── memory
-│       │   ├── __init__.py
-│       │   ├── manager.py
-│       │   ├── protocols.py
-│       │   └── summarizer.py
-│       ├── onboarding.py
-│       ├── onboarding_files.py
-│       ├── onboarding_flow.py
-│       ├── onboarding_types.py
-│       ├── onboarding_ui.py
-│       ├── schemas
-│       │   ├── __init__.py
-│       │   ├── chat.py
-│       │   ├── events.py
-│       │   └── session.py
-│       ├── settings.py
-│       ├── startup.py
-│       ├── terminal_styles.py
-│       ├── tools
-│       │   ├── __init__.py
-│       │   ├── contracts.py
-│       │   ├── dispatcher.py
-│       │   ├── file_tools.py
-│       │   ├── registry.py
-│       │   ├── web_fetch.py
-│       │   ├── web_html.py
-│       │   ├── web_retrieval.py
-│       │   ├── web_safety.py
-│       │   ├── web_search.py
-│       │   ├── web_synthesis.py
-│       │   ├── web_text.py
-│       │   └── web_tools.py
-│       └── update.py
+│   └── unclaw
+│       ├── __init__.py
+│       ├── __main__.py
+│       ├── async_utils.py
+│       ├── bootstrap.py
+│       ├── channels
+│       │   ├── __init__.py
+│       │   ├── cli.py
+│       │   ├── telegram_api.py
+│       │   ├── telegram_app.py
+│       │   ├── telegram_bot.py
+│       │   ├── telegram_config.py
+│       │   ├── telegram_formatting.py
+│       │   └── telegram_management.py
+│       ├── constants.py
+│       ├── core
+│       │   ├── __init__.py
+│       │   ├── capabilities.py
+│       │   ├── command_handler.py
+│       │   ├── context_builder.py
+│       │   ├── executor.py
+│       │   ├── orchestrator.py
+│       │   ├── research_flow.py
+│       │   ├── router.py
+│       │   ├── runtime.py
+│       │   ├── search_grounding.py
+│       │   ├── search_payload_helpers.py
+│       │   ├── session_manager.py
+│       │   └── timing.py
+│       ├── db
+│       │   ├── __init__.py
+│       │   ├── repositories.py
+│       │   └── sqlite.py
+│       ├── errors.py
+│       ├── llm
+│       │   ├── __init__.py
+│       │   ├── base.py
+│       │   ├── model_profiles.py
+│       │   └── ollama_provider.py
+│       ├── local_secrets.py
+│       ├── logs
+│       │   ├── __init__.py
+│       │   ├── cli.py
+│       │   ├── event_bus.py
+│       │   └── tracer.py
+│       ├── main.py
+│       ├── memory
+│       │   ├── __init__.py
+│       │   ├── chat_store.py
+│       │   ├── diagnostics.py
+│       │   ├── long_term_store.py
+│       │   ├── manager.py
+│       │   ├── protocols.py
+│       │   └── summarizer.py
+│       ├── onboarding.py
+│       ├── onboarding_files.py
+│       ├── onboarding_flow.py
+│       ├── onboarding_types.py
+│       ├── onboarding_ui.py
+│       ├── schemas
+│       │   ├── __init__.py
+│       │   ├── chat.py
+│       │   ├── events.py
+│       │   └── session.py
+│       ├── settings.py
+│       ├── startup.py
+│       ├── terminal_styles.py
+│       ├── tools
+│       │   ├── __init__.py
+│       │   ├── contracts.py
+│       │   ├── dispatcher.py
+│       │   ├── file_tools.py
+│       │   ├── long_term_memory_tools.py
+│       │   ├── notes_tools.py
+│       │   ├── registry.py
+│       │   ├── session_tools.py
+│       │   ├── system_tools.py
+│       │   ├── web_fetch.py
+│       │   ├── web_html.py
+│       │   ├── web_retrieval.py
+│       │   ├── web_safety.py
+│       │   ├── web_search.py
+│       │   ├── web_synthesis.py
+│       │   ├── web_text.py
+│       │   └── web_tools.py
+│       └── update.py
 ├── tests
-│   ├── conftest.py
-│   ├── test_async_boundaries.py
-│   ├── test_block4_cleanup.py
-│   ├── test_cli_channel.py
-│   ├── test_command_handler.py
-│   ├── test_e2e_flows.py
-│   ├── test_logs_cli.py
-│   ├── test_main.py
-│   ├── test_memory_summary.py
-│   ├── test_ollama_provider.py
-│   ├── test_onboarding.py
-│   ├── test_real_ollama_runtime_integration.py
-│   ├── test_router.py
-│   ├── test_runtime_integration.py
-│   ├── test_search_payload_schema.py
-│   ├── test_session_history_reliability.py
-│   ├── test_settings.py
-│   ├── test_startup.py
-│   ├── test_telegram_bot.py
-│   ├── test_tool_security.py
-│   └── test_update.py
+│   ├── conftest.py
+│   ├── test_async_boundaries.py
+│   ├── test_block4_cleanup.py
+│   ├── test_chat_memory_store.py
+│   ├── test_cli_channel.py
+│   ├── test_command_handler.py
+│   ├── test_context_budget.py
+│   ├── test_db_path_migration.py
+│   ├── test_e2e_flows.py
+│   ├── test_exact_recall.py
+│   ├── test_local_action_honesty.py
+│   ├── test_logs_cli.py
+│   ├── test_long_term_memory_reliability.py
+│   ├── test_main.py
+│   ├── test_memory_architecture.py
+│   ├── test_memory_status.py
+│   ├── test_memory_summary.py
+│   ├── test_notes_tools.py
+│   ├── test_ollama_provider.py
+│   ├── test_onboarding.py
+│   ├── test_p34_capability_and_routing.py
+│   ├── test_read_text_file.py
+│   ├── test_real_ollama_runtime_integration.py
+│   ├── test_router.py
+│   ├── test_runtime_integration.py
+│   ├── test_search_payload_schema.py
+│   ├── test_session_history_reliability.py
+│   ├── test_session_history_tool.py
+│   ├── test_settings.py
+│   ├── test_startup.py
+│   ├── test_system_tools.py
+│   ├── test_telegram_bot.py
+│   ├── test_tool_security.py
+│   ├── test_update.py
+│   ├── test_v1_validation.py
+│   ├── test_web_grounding_caps.py
+│   └── test_write_text_file.py
 └── unclaw-animated.svg
