@@ -11,6 +11,7 @@ from unclaw.tools.file_tools import (
 )
 from unclaw.tools.notes_tools import CREATE_NOTE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
@@ -29,6 +30,7 @@ class RuntimeCapabilitySummary:
     model_can_call_tools: bool = False
     notes_available: bool = False
     local_file_write_available: bool = False
+    session_history_recall_available: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -64,6 +66,9 @@ def build_runtime_capability_summary(
         model_can_call_tools=model_can_call_tools,
         notes_available=CREATE_NOTE_DEFINITION.name in available_tool_name_set,
         local_file_write_available=WRITE_TEXT_FILE_DEFINITION.name in available_tool_name_set,
+        session_history_recall_available=(
+            INSPECT_SESSION_HISTORY_DEFINITION.name in available_tool_name_set
+        ),
     )
 
 
@@ -124,6 +129,11 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 ),
             )
         )
+        if summary.session_history_recall_available:
+            lines.append(
+                "- Use inspect_session_history to answer exact questions about "
+                "prior prompts, message order, or counts. Do not guess from memory."
+            )
     else:
         lines.extend(
             (
@@ -198,6 +208,14 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Relative paths are created inside data/files/ by default. "
             "Default is overwrite=false — fails if the file already exists. "
             "Only use overwrite=true when the user explicitly intends to replace an existing file."
+        )
+    if summary.session_history_recall_available:
+        lines.append(
+            "inspect_session_history: return an exact, deterministic list of "
+            "persisted messages for the current session. "
+            "Supports filter_role (user/assistant/tool), nth (1-indexed lookup), "
+            "and limit. Use this tool for exact questions about prior prompts, "
+            "their order, or message counts."
         )
     return tuple(lines)
 

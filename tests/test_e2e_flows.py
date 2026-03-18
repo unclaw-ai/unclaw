@@ -224,7 +224,7 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
 
     monkeypatch.setattr(
         "unclaw.core.runtime.create_default_tool_registry",
-        lambda _settings=None: search_registry,
+        lambda _settings=None, session_manager=None: search_registry,
     )
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)

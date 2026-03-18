@@ -10,6 +10,7 @@ from typing import Self
 from unclaw.db.repositories import EventRepository, MessageRepository, SessionRepository
 from unclaw.db.sqlite import initialize_schema, open_connection
 from unclaw.errors import UnclawError
+from unclaw.memory.chat_store import ChatMemoryStore
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.schemas.session import SessionRecord, SessionSummary
 from unclaw.settings import Settings
@@ -29,6 +30,7 @@ class SessionManager:
     message_repository: MessageRepository
     event_repository: EventRepository
     current_session_id: str | None = None
+    chat_store: ChatMemoryStore | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -40,6 +42,9 @@ class SessionManager:
             session_repository=SessionRepository(connection),
             message_repository=MessageRepository(connection),
             event_repository=EventRepository(connection),
+            chat_store=ChatMemoryStore(
+                settings.paths.data_dir / "memory" / "chats"
+            ),
         )
         manager.initialize()
         return manager
@@ -138,11 +143,19 @@ class SessionManager:
                 f"Session '{resolved_session_id}' is not available."
             )
 
-        return self.message_repository.add_message(
+        message = self.message_repository.add_message(
             session_id=resolved_session_id,
             role=role,
             content=content,
         )
+        if self.chat_store is not None:
+            self.chat_store.append_message(
+                session_id=resolved_session_id,
+                role=message.role.value,
+                content=message.content,
+                created_at=message.created_at,
+            )
+        return message
 
     def list_messages(self, session_id: str | None = None) -> list[ChatMessage]:
         """Return the stored messages for one session."""

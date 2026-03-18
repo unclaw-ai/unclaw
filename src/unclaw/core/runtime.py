@@ -217,7 +217,8 @@ def run_user_turn(
     selected_model = command_handler.current_model_profile
     thinking_enabled = command_handler.thinking_enabled is True
     active_tool_registry = tool_registry or create_default_tool_registry(
-        session_manager.settings
+        session_manager.settings,
+        session_manager=session_manager,
     )
     tool_guard_state = _RuntimeToolGuardState(
         tool_timeout_seconds=(

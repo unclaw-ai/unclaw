@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from unclaw.constants import NOTES_DIRECTORY_NAME
 from unclaw.settings import Settings
@@ -24,12 +25,16 @@ from unclaw.tools.notes_tools import (
     register_notes_tools,
 )
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION, register_session_tools
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
 from unclaw.tools.web_tools import (
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,
     register_web_tools,
 )
+
+if TYPE_CHECKING:
+    from unclaw.core.session_manager import SessionManager
 
 BUILTIN_TOOL_COMMANDS = MappingProxyType(
     {
@@ -53,28 +58,35 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     return registry
 
 
-def create_default_tool_registry(settings: Settings | None = None) -> ToolRegistry:
+def create_default_tool_registry(
+    settings: Settings | None = None,
+    session_manager: SessionManager | None = None,
+) -> ToolRegistry:
     """Create a registry populated with the initial built-in tools."""
     registry = ToolRegistry()
     if settings is None:
-        return register_default_tools(registry)
+        register_default_tools(registry)
+    else:
+        register_file_tools(
+            registry,
+            project_root=settings.paths.project_root,
+            configured_roots=settings.app.security.tools.files.allowed_roots,
+            default_write_dir=settings.paths.files_dir,
+            default_read_dir=settings.paths.files_dir,
+        )
+        register_web_tools(
+            registry,
+            allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
+        )
+        register_system_tools(registry)
+        register_notes_tools(
+            registry,
+            notes_dir=settings.paths.data_dir / NOTES_DIRECTORY_NAME,
+        )
 
-    register_file_tools(
-        registry,
-        project_root=settings.paths.project_root,
-        configured_roots=settings.app.security.tools.files.allowed_roots,
-        default_write_dir=settings.paths.files_dir,
-        default_read_dir=settings.paths.files_dir,
-    )
-    register_web_tools(
-        registry,
-        allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
-    )
-    register_system_tools(registry)
-    register_notes_tools(
-        registry,
-        notes_dir=settings.paths.data_dir / NOTES_DIRECTORY_NAME,
-    )
+    if session_manager is not None:
+        register_session_tools(registry, session_manager=session_manager)
+
     return registry
 
 
@@ -121,6 +133,7 @@ def execute_tool_call(
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
     "CREATE_NOTE_DEFINITION",
+    "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_NOTES_DEFINITION",
     "READ_NOTE_DEFINITION",
     "SYSTEM_INFO_DEFINITION",
