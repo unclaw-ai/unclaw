@@ -48,6 +48,40 @@ def test_terminal_assistant_stream_renders_final_reply_when_nothing_streamed(cap
     assert capsys.readouterr().out == "Unclaw> Saved reply\n"
 
 
+def test_terminal_assistant_stream_shows_refinement_signal_when_grounding_rewrites_answer(
+    capsys,
+) -> None:
+    """Divergence case: streamed draft differs from grounded final answer.
+
+    This is the P4-4 path: the grounding transform replaced the streamed text
+    with a different final answer. The signal must appear and the final answer
+    must be printed. Plain chat never reaches this branch because streamed text
+    equals the final text when no grounding transform is active.
+    """
+    stream = _TerminalAssistantStream()
+
+    stream.write("The answer is probably 42.")
+    stream.finish("The answer is 37, confirmed by three sources.")
+
+    out = capsys.readouterr().out
+    assert "[answer refined]" in out
+    assert "Unclaw> The answer is 37, confirmed by three sources." in out
+    # The streaming prefix and the final answer each emit "Unclaw>".
+    assert out.count("Unclaw>") == 2
+
+
+def test_terminal_assistant_stream_no_refinement_signal_for_plain_chat(capsys) -> None:
+    """Plain local chat turn: streamed text matches final — no refinement signal."""
+    stream = _TerminalAssistantStream()
+
+    stream.write("Hello, how can I help?")
+    stream.finish("Hello, how can I help?")
+
+    out = capsys.readouterr().out
+    assert "[answer refined]" not in out
+    assert "Unclaw> Hello, how can I help?" in out
+
+
 def test_terminal_main_requests_default_model_warm_load(
     monkeypatch,
     make_temp_project,

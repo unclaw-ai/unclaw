@@ -73,6 +73,8 @@ class _TerminalAssistantStream:
             return
 
         print()
+        print("[answer refined]")
+        print(f"Unclaw> {final_text}")
 
 
 def main(project_root: Path | None = None) -> int:
