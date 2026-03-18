@@ -4,7 +4,7 @@ profiles:
     model_name: llama3.2:3b
     temperature: 0.2
     thinking_supported: false
-    tool_mode: json_plan
+    tool_mode: native
     num_ctx: 4096
     keep_alive: 10m
   main:
@@ -28,6 +28,6 @@ profiles:
     model_name: qwen2.5-coder:7b
     temperature: 0.1
     thinking_supported: true
-    tool_mode: json_plan
+    tool_mode: native
     num_ctx: 4096
     keep_alive: 10m

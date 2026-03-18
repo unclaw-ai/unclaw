@@ -821,9 +821,40 @@ def test_v1_shipped_main_profile_is_native() -> None:
     )
 
 
+def test_v1_shipped_fast_profile_is_native() -> None:
+    """The shipped 'fast' profile must have tool_mode=native (P5-X mission change).
+
+    Regression guard: 'fast' was changed from json_plan to native in P5-X so all
+    shipped profiles use the agent loop. Reverting to json_plan would disable the
+    agent loop for this profile.
+    """
+    settings = _load_repo_settings()
+    fast_profile = settings.models["fast"]
+    assert fast_profile.tool_mode == "native", (
+        "The 'fast' profile must be tool_mode=native. "
+        "Reverting to json_plan would disable the agent loop for this profile."
+    )
+
+
+def test_v1_shipped_codex_profile_is_native() -> None:
+    """The shipped 'codex' profile must have tool_mode=native (P5-X mission change).
+
+    Regression guard: 'codex' was changed from json_plan to native in P5-X so all
+    shipped profiles use the agent loop. Reverting to json_plan would disable the
+    agent loop for this profile.
+    """
+    settings = _load_repo_settings()
+    codex_profile = settings.models["codex"]
+    assert codex_profile.tool_mode == "native", (
+        "The 'codex' profile must be tool_mode=native. "
+        "Reverting to json_plan would disable the agent loop for this profile."
+    )
+
+
 def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
     monkeypatch,
     make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     """For a json_plan profile, the model's chat() call must receive tools=None.
 
@@ -832,6 +863,9 @@ def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
     """
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    # Override "fast" to json_plan for this test: the shipped profile is now native,
+    # but this test specifically proves the non-native path behavior.
+    set_profile_tool_mode(settings, "fast", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     command_handler = CommandHandler(
         settings=settings,
@@ -861,7 +895,7 @@ def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
-    # Force "fast" (json_plan) to be the active profile.
+    # "fast" is overridden to json_plan above; set it as the active profile.
     # The echo registry has one tool — would be passed to native profile but not json_plan.
     command_handler.current_model_profile_name = "fast"
 

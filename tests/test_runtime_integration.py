@@ -803,9 +803,13 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
 def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_for_non_native_profile(
     monkeypatch,
     make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    # Override "fast" to json_plan: the shipped profile is now native, but this
+    # test specifically exercises the non-native (json_plan) execution path.
+    set_profile_tool_mode(settings, "fast", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -1478,9 +1482,13 @@ def test_run_search_command_preserves_unicode_grounding_and_sources(
 def test_run_search_command_non_native_profile_executes_search_inside_runtime_and_keeps_follow_up_context(
     monkeypatch,
     make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    # Override "fast" to json_plan: the shipped profile is now native, but this
+    # test specifically exercises the non-native (json_plan) /search command path.
+    set_profile_tool_mode(settings, "fast", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
@@ -3068,10 +3076,14 @@ def test_run_user_turn_raises_unclaw_error_when_agent_loop_returns_no_reply(
 def test_agent_loop_text_only_fallback_when_no_tool_calls(
     monkeypatch,
     make_temp_project,
+    set_profile_tool_mode,
 ) -> None:
-    """Non-native profiles stay on plain chat and do not send native tools."""
+    """Non-native (json_plan) profiles stay on plain chat and do not send native tools."""
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    # Override "fast" to json_plan: the shipped profile is now native, but this
+    # test specifically exercises the non-native path (tools must not be passed).
+    set_profile_tool_mode(settings, "fast", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     event_bus = EventBus()
     published_events: list[TraceEvent] = []
