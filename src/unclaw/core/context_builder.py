@@ -149,6 +149,12 @@ def _budget_history(
     tighter constraint wins.  System framing and the current user message
     are never passed here — they are protected by the caller.
 
+    USER and ASSISTANT messages are prioritised over TOOL messages.  An
+    oversized TOOL message is skipped (scan continues) so that older
+    conversational turns can still be included within the budget.  An
+    oversized USER or ASSISTANT message stops the scan to avoid injecting
+    disjointed conversation fragments.
+
     The result is always returned in chronological order (oldest first).
     Both constraints are deterministic and reversible.  Set either to None
     to skip that constraint independently.
@@ -165,6 +171,12 @@ def _budget_history(
     for message in reversed(count_limited):
         msg_chars = len(message.content)
         if chars_used + msg_chars > max_history_chars:
+            if message.role is MessageRole.TOOL:
+                # Skip oversized TOOL messages; keep scanning for older
+                # USER/ASSISTANT turns that may still fit within the budget.
+                continue
+            # Oversized USER or ASSISTANT message: stop scanning to avoid
+            # injecting disjointed conversation fragments.
             break
         included.append(message)
         chars_used += msg_chars

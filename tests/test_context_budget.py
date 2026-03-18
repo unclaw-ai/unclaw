@@ -7,6 +7,8 @@ Covers:
 4. Required system/capability messages still appear.
 5. Current user message is always preserved.
 6. Both constraints (count cap and char budget) operate independently.
+7. (P4-2 regression) Oversized TOOL messages are skipped instead of
+   blocking older USER/ASSISTANT turns from being included.
 """
 
 from __future__ import annotations
@@ -233,3 +235,66 @@ def test_build_context_messages_capability_summary_preserved_under_tight_budget(
     system_msgs = [m for m in context if m.role == LLMRole.SYSTEM]
     # At minimum: system prompt + capability summary
     assert len(system_msgs) >= 2
+
+
+# ---------------------------------------------------------------------------
+# P4-2 regression: oversized TOOL messages must not evict conversational turns
+# ---------------------------------------------------------------------------
+
+
+def test_budget_history_large_tool_does_not_block_older_conversational_turns() -> None:
+    """An oversized TOOL message is skipped; scanning continues for older USER/ASSISTANT turns."""
+    big_tool = "t" * 4_000  # 4000 chars — exceeds budget after two short messages
+    messages = [
+        _make_msg(MessageRole.USER, "first prompt", 0),      # 12 chars
+        _make_msg(MessageRole.ASSISTANT, "first answer", 1),  # 12 chars
+        _make_msg(MessageRole.TOOL, big_tool, 2),             # 4000 chars
+        _make_msg(MessageRole.ASSISTANT, "tool answer", 3),   # 11 chars
+        _make_msg(MessageRole.USER, "second prompt", 4),      # 13 chars
+    ]
+    # Budget 200: short messages fit, big TOOL does not.
+    # With the old code (break on overflow), scanning stops at msg_2 (TOOL),
+    # leaving msg_0 and msg_1 out. With the fix, msg_2 is skipped and
+    # msg_1 and msg_0 are included.
+    result = list(_budget_history(messages, max_history_size=20, max_history_chars=200))
+    ids = [m.id for m in result]
+    assert "msg_0" in ids, "first USER turn must survive the large TOOL message"
+    assert "msg_1" in ids, "first ASSISTANT turn must survive the large TOOL message"
+    assert "msg_2" not in ids, "oversized TOOL message must be excluded"
+
+
+def test_budget_history_first_and_second_prompt_recallable_with_large_tool_in_middle() -> None:
+    """First and second user prompts are present even when a large TOOL sits between them and recent turns."""
+    big_tool = "x" * 3_000  # 3000 chars
+    messages = [
+        _make_msg(MessageRole.USER, "What is my first prompt?", 0),   # 24 chars
+        _make_msg(MessageRole.ASSISTANT, "It is your first.", 1),      # 17 chars
+        _make_msg(MessageRole.USER, "What is my second prompt?", 2),   # 25 chars
+        _make_msg(MessageRole.ASSISTANT, "It is your second.", 3),     # 18 chars
+        _make_msg(MessageRole.TOOL, big_tool, 4),                      # 3000 chars
+        _make_msg(MessageRole.ASSISTANT, "Here are the results.", 5),  # 21 chars
+        _make_msg(MessageRole.USER, "What did I ask first?", 6),       # 21 chars
+    ]
+    # Budget 500: short messages total ~126 chars, fits easily; big TOOL does not.
+    result = list(_budget_history(messages, max_history_size=20, max_history_chars=500))
+    contents = [m.content for m in result]
+    assert "What is my first prompt?" in contents, "first user prompt must be recallable"
+    assert "What is my second prompt?" in contents, "second user prompt must be recallable"
+    assert big_tool not in contents, "oversized TOOL content must be excluded"
+
+
+def test_budget_history_chronological_order_preserved_when_tool_messages_skipped() -> None:
+    """Result is always oldest-to-newest even when TOOL messages are skipped mid-scan."""
+    big_tool = "z" * 2_000
+    messages = [
+        _make_msg(MessageRole.USER, "alpha", 0),
+        _make_msg(MessageRole.ASSISTANT, "beta", 1),
+        _make_msg(MessageRole.TOOL, big_tool, 2),
+        _make_msg(MessageRole.USER, "gamma", 3),
+    ]
+    result = list(_budget_history(messages, max_history_size=20, max_history_chars=100))
+    # Only short messages fit; TOOL is skipped.
+    assert "msg_2" not in [m.id for m in result]
+    # Remaining messages must be in chronological order.
+    ids = [m.id for m in result]
+    assert ids == sorted(ids), f"expected chronological order, got {ids}"
