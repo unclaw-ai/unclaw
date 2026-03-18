@@ -197,6 +197,7 @@ def run_user_turn(
     assistant_reply_transform: Callable[[str], str] | None = None,
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: RuntimeTurnCancellation | None = None,
+    on_search_route: Callable[[], None] | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -280,6 +281,8 @@ def run_user_turn(
         )
 
         if route.kind is RouteKind.WEB_SEARCH:
+            if on_search_route is not None:
+                on_search_route()
             (
                 route_context_notes,
                 active_assistant_reply_transform,

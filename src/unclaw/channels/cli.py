@@ -40,9 +40,24 @@ class _TerminalAssistantStream:
 
     chunks: list[str] = field(default_factory=list)
     started: bool = False
+    _suppressed: bool = field(default=False, init=False)
+
+    def suppress_live_output(self) -> None:
+        """Buffer chunks silently; finish() will render only the final answer.
+
+        Called when the runtime detects a WEB_SEARCH route so that the streamed
+        model draft is never shown. The final grounded reply is printed once by
+        finish(), eliminating the duplicate-answer-body problem.
+        """
+        self._suppressed = True
 
     def write(self, chunk: str) -> None:
         if not chunk:
+            return
+
+        if self._suppressed:
+            # Buffer silently — do not print the draft to the terminal.
+            self.chunks.append(chunk)
             return
 
         if not self.started:
@@ -54,6 +69,14 @@ class _TerminalAssistantStream:
         self.chunks.append(chunk)
 
     def finish(self, final_text: str) -> None:
+        # Suppressed path: stream was buffered; render only the final answer.
+        if self._suppressed:
+            print(f"Unclaw> {final_text}")
+            streamed_text = "".join(self.chunks)
+            if streamed_text.strip() != final_text.strip():
+                print("[answer refined]")
+            return
+
         if not self.started:
             print(f"Unclaw> {final_text}")
             return
@@ -74,7 +97,7 @@ class _TerminalAssistantStream:
 
         print()
         print("[answer refined]")
-        print(f"Unclaw> {final_text}")
+        print(final_text)
 
 
 def main(project_root: Path | None = None) -> int:
@@ -247,6 +270,7 @@ def run_cli(
             user_input=stripped_input,
             tracer=tracer,
             stream_output_func=assistant_stream.write,
+            on_search_route=assistant_stream.suppress_live_output,
         )
         assistant_stream.finish(assistant_reply)
         _refresh_session_summary(

@@ -65,9 +65,9 @@ def test_terminal_assistant_stream_shows_refinement_signal_when_grounding_rewrit
 
     out = capsys.readouterr().out
     assert "[answer refined]" in out
-    assert "Unclaw> The answer is 37, confirmed by three sources." in out
-    # The streaming prefix and the final answer each emit "Unclaw>".
-    assert out.count("Unclaw>") == 2
+    assert "The answer is 37, confirmed by three sources." in out
+    # "Unclaw>" appears only once — from the streaming prefix, not from the refined answer.
+    assert out.count("Unclaw>") == 1
 
 
 def test_terminal_assistant_stream_no_refinement_signal_for_plain_chat(capsys) -> None:
@@ -80,6 +80,45 @@ def test_terminal_assistant_stream_no_refinement_signal_for_plain_chat(capsys) -
     out = capsys.readouterr().out
     assert "[answer refined]" not in out
     assert "Unclaw> Hello, how can I help?" in out
+
+
+def test_terminal_assistant_stream_suppressed_shows_only_final_answer_not_draft(
+    capsys,
+) -> None:
+    """P5-3B: suppressed-stream path shows only the final answer, never the draft.
+
+    When suppress_live_output() is called before any writes, chunks are buffered
+    silently. finish() renders the final answer once with the refinement signal.
+    The draft text must never appear in the output.
+    """
+    stream = _TerminalAssistantStream()
+    stream.suppress_live_output()
+
+    stream.write("Draft: the answer is probably 42.")
+    stream.finish("The answer is 37, confirmed by sources.")
+
+    out = capsys.readouterr().out
+    assert "Draft" not in out
+    assert "probably 42" not in out
+    assert "Unclaw> The answer is 37, confirmed by sources." in out
+    assert "[answer refined]" in out
+    assert out.count("Unclaw>") == 1
+
+
+def test_terminal_assistant_stream_suppressed_no_signal_when_text_unchanged(
+    capsys,
+) -> None:
+    """P5-3B: suppressed-stream path — no refinement signal when grounding did not change the text."""
+    stream = _TerminalAssistantStream()
+    stream.suppress_live_output()
+
+    stream.write("Same answer.")
+    stream.finish("Same answer.")
+
+    out = capsys.readouterr().out
+    assert "[answer refined]" not in out
+    assert "Unclaw> Same answer." in out
+    assert out.count("Unclaw>") == 1
 
 
 def test_terminal_main_requests_default_model_warm_load(
