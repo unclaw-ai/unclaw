@@ -290,7 +290,6 @@ def run_user_turn(
                 user_input=user_input,
                 route=route,
                 assistant_reply_transform=assistant_reply_transform,
-                search_results_ready=tool_definitions is None,
             )
             system_context_notes = (*system_context_notes, *route_context_notes)
 
@@ -435,8 +434,21 @@ def _prepare_web_search_route(
     user_input: str,
     route: Any,
     assistant_reply_transform: Callable[[str], str] | None,
-    search_results_ready: bool,
 ) -> tuple[tuple[str, ...], Callable[[str], str] | None, ToolCall | None]:
+    # ---------------------------------------------------------------------------
+    # P5-2: guarantee one initial search_web execution on every WEB_SEARCH route,
+    # regardless of whether the model profile uses native tool calling.
+    # Previously, explicit_search_call was only created when search_results_ready=True
+    # (i.e. json_plan / non-native profiles).  Native profiles received no initial
+    # forced search — the model was expected to call search_web itself, which caused
+    # entity drift and weather-query refusals.
+    # This function now always creates the explicit ToolCall.  The caller's condition
+    #   `runtime_explicit_tool_call is not None and route.kind is WEB_SEARCH`
+    # already handles both native and non-native execution paths identically.
+    # Complies with mandatory_rules.md rule 5 allowed exception (explicitly required
+    # by mission P5-2, scoped to the WEB_SEARCH execution path only, not routing
+    # architecture) and rule 10 (explicitly justified, visibly scoped, easy to remove).
+    # ---------------------------------------------------------------------------
     from unclaw.core.research_flow import (
         apply_search_grounding_from_history,
         build_web_search_route_note,
@@ -450,7 +462,7 @@ def _prepare_web_search_route(
     system_context_notes = (
         build_web_search_route_note(
             query=search_query,
-            search_results_ready=search_results_ready,
+            search_results_ready=True,  # P5-2: search is always forced before model call
         ),
     )
 
@@ -472,12 +484,12 @@ def _prepare_web_search_route(
             turn_start_message_count=_turn_start_count,
         )
 
-    explicit_search_call: ToolCall | None = None
-    if search_results_ready:
-        explicit_search_call = ToolCall(
-            tool_name="search_web",
-            arguments={"query": search_query},
-        )
+    # P5-2: always create the explicit search call — native and non-native paths both
+    # need a guaranteed initial search_web execution with the routed query.
+    explicit_search_call = ToolCall(
+        tool_name="search_web",
+        arguments={"query": search_query},
+    )
 
     return (
         system_context_notes,

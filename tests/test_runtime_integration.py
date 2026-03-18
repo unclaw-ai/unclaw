@@ -977,6 +977,11 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
     make_temp_project,
     set_profile_tool_mode,
 ) -> None:
+    # P5-2 updated test: native WEB_SEARCH now forces the initial search BEFORE
+    # the model is called.  The model receives search results already in context
+    # and can answer directly without calling search_web again.
+    # Previous flow: model called first → returns tool_call → agent loop → model again.
+    # New flow:      forced search first → model called with results in context → replies.
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     set_profile_tool_mode(settings, "main", tool_mode="native")
@@ -1076,49 +1081,31 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
             turn_call_count += 1
             captured_turn_tools.append(tools)
             captured_turn_messages.append(list(messages))
-            if turn_call_count == 1:
-                assert tools is not None
-                assert any(tool.name == SEARCH_WEB_DEFINITION.name for tool in tools)
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and f"Ground this request: {reformulated_query}" in message.content
-                    for message in messages
-                )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name="qwen3.5:4b",
-                    content="",
-                    created_at="2026-03-16T10:00:00Z",
-                    finish_reason="stop",
-                    tool_calls=(
-                        ToolCall(
-                            tool_name="search_web",
-                            arguments={"query": reformulated_query},
-                        ),
-                    ),
-                    raw_payload={
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "search_web",
-                                        "arguments": {"query": reformulated_query},
-                                    }
-                                }
-                            ],
-                        }
-                    },
-                )
 
-            tool_messages = [
-                message.content
+            # P5-2: by the time the model is called (turn 1), the forced initial
+            # search has already executed and its result is in the session history,
+            # so the model's context already contains a TOOL message.
+            assert tools is not None
+            assert any(tool.name == SEARCH_WEB_DEFINITION.name for tool in tools)
+            assert any(
+                message.role is LLMRole.SYSTEM
+                and f"Ground this request: {reformulated_query}" in message.content
                 for message in messages
-                if message.role is LLMRole.TOOL
+            )
+            # Verify the forced search result is in context before the model call.
+            tool_messages_in_context = [
+                message for message in messages if message.role is LLMRole.TOOL
             ]
-            assert len(tool_messages) == 1
-            assert tool_messages[0].startswith("UNTRUSTED TOOL OUTPUT:")
-            assert f"Search query: {reformulated_query}" in tool_messages[0]
+            assert len(tool_messages_in_context) >= 1, (
+                "P5-2: forced initial search result must be in context "
+                "before the first model call."
+            )
+            assert any(
+                reformulated_query in msg.content for msg in tool_messages_in_context
+            ), (
+                "P5-2: the search result in context must contain the routed query."
+            )
+            # Simulate a smart model that sees results already in context and answers.
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -1151,11 +1138,18 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
         assert "Sources:" in reply
         assert "https://example.com/marine-leleu" in reply
         assert "https://example.com/athletes/marine-leleu" in reply
-        assert turn_call_count == 2
-        assert len(captured_search_calls) == 1
+        # P5-2: initial forced search + 1 model call (model sees results, replies directly).
+        assert turn_call_count == 1, (
+            "P5-2: model should be called once; search is forced before the model call."
+        )
+        assert len(captured_search_calls) == 1, (
+            "P5-2: exactly one search_web call (the forced initial search)."
+        )
         assert captured_search_calls[0].arguments["query"] == reformulated_query
-        assert len(captured_turn_tools) == 2
-        assert all(tools is not None for tools in captured_turn_tools)
+        assert len(captured_turn_tools) == 1
+        assert captured_turn_tools[0] is not None, (
+            "Native profile must still receive tool definitions on the model call."
+        )
         assert any(
             message.role is LLMRole.SYSTEM
             and f"Ground this request: {reformulated_query}" in message.content
@@ -1165,18 +1159,17 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
             MessageRole.USER,
-            MessageRole.TOOL,
+            MessageRole.TOOL,  # forced initial search result
             MessageRole.ASSISTANT,
         ]
         assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
 
+        # P5-2 event sequence: forced search emits tool events BEFORE the model call.
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
             "route.selected",
-            "model.called",
-            "model.succeeded",
-            "tool.started",
+            "tool.started",    # P5-2: forced initial search (before model)
             "tool.finished",
             "model.called",
             "model.succeeded",
@@ -2490,13 +2483,26 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
             )
 
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
-    monkeypatch.setattr(
-        "unclaw.core.orchestrator.OllamaProvider",
-        _build_search_agent_provider(
-            search_query=reformulated_query,
-            final_reply="Marine Leleu is a French endurance athlete and content creator.",
-        ),
-    )
+
+    # P5-2: with forced initial search, the model receives search results in context
+    # on the first call and answers directly — no agent-loop re-search needed.
+    class FirstTurnProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+            del profile, kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Marine Leleu is a French endurance athlete and content creator.",
+                created_at="2026-03-16T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FirstTurnProvider)
 
     try:
         session = session_manager.ensure_current_session()
@@ -2552,6 +2558,7 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
                     for message in messages
                     if message.role is LLMRole.TOOL
                 ]
+                # P5-2: exactly one TOOL message (the forced initial search result from turn 1).
                 assert len(tool_messages) == 1
                 assert tool_messages[0].startswith("UNTRUSTED TOOL OUTPUT:")
                 assert "Grounding rules:" in tool_messages[0]
@@ -2596,7 +2603,6 @@ def test_prepare_web_search_route_falls_back_to_user_input_without_reformulated_
             user_input=user_input,
             route=SimpleNamespace(search_query=None),
             assistant_reply_transform=None,
-            search_results_ready=True,
         )
     )
 

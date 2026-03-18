@@ -334,9 +334,9 @@ def test_v1_num_ctx_full_path_from_models_yaml_to_ollama_payload(monkeypatch) ->
 
 
 def test_v1_router_reformulated_query_used_in_explicit_search_call() -> None:
-    """For non-native (json_plan) profiles, _prepare_web_search_route must build
-    a search_web ToolCall whose query argument is the router's reformulated query,
-    not the raw user input.
+    """_prepare_web_search_route must build a search_web ToolCall whose query
+    argument is the router's reformulated query, not the raw user input.
+    This applies to both native and non-native (json_plan) profiles (P5-2).
 
     This validates the full pass-through path: RouteDecision.search_query →
     _prepare_web_search_route → ToolCall.arguments["query"].
@@ -361,7 +361,6 @@ def test_v1_router_reformulated_query_used_in_explicit_search_call() -> None:
         user_input=user_input,
         route=route,
         assistant_reply_transform=None,
-        search_results_ready=True,  # non-native: explicit search call is created
     )
 
     assert explicit_call is not None, (
@@ -399,7 +398,6 @@ def test_v1_router_raw_user_input_used_as_fallback_when_no_search_query() -> Non
         user_input=user_input,
         route=route,
         assistant_reply_transform=None,
-        search_results_ready=True,
     )
 
     assert explicit_call is not None
@@ -430,7 +428,7 @@ def test_v1_router_reformulated_query_appears_in_system_context_note() -> None:
         user_input=user_input,
         route=route,
         assistant_reply_transform=None,
-        search_results_ready=False,  # native path: no explicit call, but note still set
+        # P5-2: search_results_ready removed — explicit_search_call always created
     )
 
     assert len(context_notes) >= 1, "At least one system context note must be built."
@@ -439,6 +437,187 @@ def test_v1_router_reformulated_query_appears_in_system_context_note() -> None:
         f"System context note must contain the reformulated query {reformulated_query!r}. "
         f"Got: {combined_notes!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# P5-2: native WEB_SEARCH always executes initial search deterministically
+# ---------------------------------------------------------------------------
+
+
+def test_v1_p52_prepare_web_search_always_creates_explicit_search_call() -> None:
+    """P5-2: _prepare_web_search_route must always produce an explicit search_web
+    ToolCall, regardless of whether the profile is native or non-native.
+
+    This is the core fix: the explicit search is no longer gated on
+    search_results_ready (which was only True for json_plan profiles).
+    Native profiles must also force the initial search deterministically.
+    """
+    fake_session_manager = SimpleNamespace(
+        list_messages=lambda session_id: [],
+    )
+    route = RouteDecision(
+        kind=RouteKind.WEB_SEARCH,
+        model_profile_name="deep",
+        search_query="Marine Leleu biographie",
+    )
+
+    _context_notes, _transform, explicit_call = _prepare_web_search_route(
+        session_manager=fake_session_manager,
+        session_id="test-session",
+        user_input="fais une recherche sur Marine Leleu",
+        route=route,
+        assistant_reply_transform=None,
+    )
+
+    assert explicit_call is not None, (
+        "P5-2: _prepare_web_search_route must always produce an explicit "
+        "search_web ToolCall — not depend on the model to call it first."
+    )
+    assert explicit_call.tool_name == "search_web"
+    assert explicit_call.arguments["query"] == "Marine Leleu biographie"
+
+
+def test_v1_p52_prepare_web_search_fallback_to_user_input_when_no_search_query() -> None:
+    """P5-2: when route.search_query is None (e.g. entity guard dropped it),
+    the explicit search must use the exact user input, not an empty or wrong query.
+    """
+    user_input = "fais une recherche sur la météo à Lille"
+    fake_session_manager = SimpleNamespace(
+        list_messages=lambda session_id: [],
+    )
+    route = RouteDecision(
+        kind=RouteKind.WEB_SEARCH,
+        model_profile_name="deep",
+        search_query=None,
+    )
+
+    _context_notes, _transform, explicit_call = _prepare_web_search_route(
+        session_manager=fake_session_manager,
+        session_id="test-session",
+        user_input=user_input,
+        route=route,
+        assistant_reply_transform=None,
+    )
+
+    assert explicit_call is not None
+    assert explicit_call.arguments["query"] == user_input.strip(), (
+        "P5-2: when no routed search_query is present, exact user input must be used."
+    )
+
+
+def test_v1_p52_native_web_search_executes_initial_search_deterministically(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """P5-2 E2E: in native mode, WEB_SEARCH route must execute search_web exactly
+    once with the routed query BEFORE the model is called — not rely on the model.
+
+    This is the regression the mission targets: previously, native profiles skipped
+    the forced initial search, so the model could refuse or use a drifted query.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    user_input = "fais une recherche sur Marine Leleu"
+    reformulated_query = "Marine Leleu biographie"
+    captured_search_queries: list[str] = []
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):
+            del profile, kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name="test",
+                content=json.dumps(
+                    {"route": "web_search", "search_query": reformulated_query}
+                ),
+                created_at="2026-03-18T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    registry = ToolRegistry()
+
+    def _fake_search(call: ToolCall) -> ToolResult:
+        captured_search_queries.append(call.arguments.get("query", ""))
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text="Fake results for Marine Leleu.",
+            payload={
+                "query": call.arguments.get("query", ""),
+                "summary_points": ["Marine Leleu is a French artist."],
+                "display_sources": [],
+            },
+        )
+
+    from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+
+    registry.register(SEARCH_WEB_DEFINITION, _fake_search)
+
+    class FakeOrchestratorProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):
+            del profile, kwargs
+            # Return a plain text reply — no tool calls — to verify the initial
+            # search was already done before this model call.
+            return LLMResponse(
+                provider="ollama",
+                model_name="test",
+                content="Marine Leleu est une artiste française.",
+                created_at="2026-03-18T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOrchestratorProvider)
+
+    # Use the native profile ("deep") to exercise the P5-2 fix.
+    # Previously this path skipped the forced search; now it must execute it.
+    command_handler.current_model_profile_name = "deep"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, user_input, session_id=session.id
+        )
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            tool_registry=registry,
+        )
+
+        assert reply, "Runtime must return a non-empty reply."
+        assert len(captured_search_queries) >= 1, (
+            "P5-2: native WEB_SEARCH route must execute at least one search_web call "
+            "deterministically, not rely on the model choosing to call it."
+        )
+        assert captured_search_queries[0] == reformulated_query, (
+            f"P5-2: first search_web call used {captured_search_queries[0]!r} "
+            f"instead of routed query {reformulated_query!r}. "
+            "Entity drift in native path — P5-2 fix not applied correctly."
+        )
+    finally:
+        session_manager.close()
 
 
 def test_v1_router_pass_through_end_to_end_with_fake_classifier(
@@ -526,9 +705,9 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOrchestratorProvider)
 
-    # Force "fast" (json_plan) so tool_definitions=None → search_results_ready=True.
-    # This triggers the explicit ToolCall path: the runtime pre-executes search_web
-    # with the reformulated query before calling the model.
+    # Force "fast" (json_plan) to keep this test focused on the non-native path.
+    # P5-2: the explicit ToolCall path is now active for both native and non-native
+    # profiles — the runtime always pre-executes search_web with the routed query.
     command_handler.current_model_profile_name = "fast"
 
     try:

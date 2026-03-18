@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import date
 from enum import StrEnum
@@ -23,7 +24,41 @@ _ROUTER_SYSTEM_PROMPT = (
     "a responsible answer needs current or externally verifiable public facts. "
     "Use chat for conversation, stable general knowledge, local reasoning, "
     "and local actions such as system information, notes, or file operations. "
-    "Keep search_query empty unless route is web_search."
+    "Keep search_query empty unless route is web_search. "
+    "When route is web_search, copy all proper nouns, person names, usernames, "
+    "repo names, quoted strings, and technical identifiers verbatim from the "
+    "user request into search_query. Do not substitute or paraphrase named entities."
+)
+
+
+# ---------------------------------------------------------------------------
+# Exact-span anchor extraction for search query fidelity guard — P5-1.
+# Explicitly required by mission P5-1.  Complies with mandatory_rules.md
+# rule 5 allowed exception: scoped to query preparation only; structural
+# (no language-specific lists); not core routing architecture; easy to remove.
+# ---------------------------------------------------------------------------
+
+# Quoted spans: content between double quotes, single quotes, or guillemets.
+_QUOTED_SPAN_RE = re.compile(
+    r'"([^"]{2,80})"'
+    r"|'([^']{2,80})'"
+    r"|«([^»]{2,80})»",
+)
+
+# Multi-word capitalized span: two or more consecutive words each starting
+# with an uppercase letter (likely person names, brand names, proper nouns).
+_CAPITALIZED_MULTI_WORD_RE = re.compile(
+    r"\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)+\b",
+)
+
+# Technical token: single tokens with non-common structure.
+# Covers: path-like (user/repo), ALL-CAPS-HYPHEN (GLM-OCR), CamelCase (OpenClaw).
+_TECHNICAL_TOKEN_RE = re.compile(
+    r"(?:"
+    r"\b[a-zA-Z0-9][a-zA-Z0-9_-]{2,}/[a-zA-Z0-9][a-zA-Z0-9_-]{2,}\b"  # path: user/repo
+    r"|\b[A-Z]{2,}(?:-[A-Z0-9]+)+\b"  # ALL-CAPS-HYPHEN: GLM-OCR
+    r"|\b[A-Z][a-z]+(?:[A-Z][a-z0-9]*)+\b"  # CamelCase: OpenClaw, SqueezeIE
+    r")",
 )
 
 
@@ -117,10 +152,85 @@ def route_request(
     return RouteDecision(
         kind=RouteKind.WEB_SEARCH,
         model_profile_name=model_profile_name,
-        # Carry the router's reformulated query through when present. The
-        # runtime keeps the original user input as a fallback if this is None.
-        search_query=classifier_decision.search_query,
+        # Guard the reformulated query against exact-span drift.
+        # Returns None when risky spans from user_input were dropped,
+        # signalling the runtime to fall back to the original user input.
+        search_query=_guard_exact_spans(
+            normalized_user_input, classifier_decision.search_query
+        ),
     )
+
+
+def _extract_anchor_spans(text: str) -> list[str]:
+    """Extract exact spans from user input that must survive search query reformulation.
+
+    Returns unique anchor strings: quoted content, multi-word proper-name
+    sequences, and technical identifiers that the reformulated query must keep.
+
+    Does not use language-specific lists (complies with mandatory_rules.md rule 5).
+    Called only from _guard_exact_spans; not part of the main routing logic.
+    """
+    anchors: list[str] = []
+    seen: set[str] = set()
+
+    def _add(span: str) -> None:
+        normalized = span.strip()
+        key = normalized.lower()
+        if normalized and key not in seen:
+            anchors.append(normalized)
+            seen.add(key)
+
+    # 1. Quoted spans — always treat as exact user intent.
+    for match in _QUOTED_SPAN_RE.finditer(text):
+        _add(match.group(1) or match.group(2) or match.group(3) or "")
+
+    # 2. Multi-word capitalized spans (two or more consecutive Title-case words).
+    for match in _CAPITALIZED_MULTI_WORD_RE.finditer(text):
+        _add(match.group(0))
+
+    # 3. Technical tokens (path-like, ALL-CAPS-HYPHEN, CamelCase).
+    for match in _TECHNICAL_TOKEN_RE.finditer(text):
+        _add(match.group(0))
+
+    return anchors
+
+
+def _guard_exact_spans(user_input: str, search_query: str | None) -> str | None:
+    """Guard the reformulated search query against exact-span drift.
+
+    Extracts risky exact spans (quoted strings, multi-word proper-name sequences,
+    technical identifiers) from ``user_input`` and checks whether each is present
+    (case-insensitively) in ``search_query``.
+
+    Returns ``search_query`` unchanged when:
+    - no risky spans are found in user_input (broad informational queries), or
+    - all spans survive in the reformulation.
+
+    Returns ``None`` when any span is absent, signalling the caller
+    (_prepare_web_search_route) to fall back to the original user input so the
+    exact entity name reaches the search engine.
+
+    Explicitly required by mission P5-1.  Complies with mandatory_rules.md
+    rule 5 allowed exception and rule 10: explicitly justified, visibly scoped,
+    easy to audit, easy to remove.
+    """
+    if not search_query:
+        return None
+
+    anchors = _extract_anchor_spans(user_input)
+    if not anchors:
+        # No risky spans detected — normal reformulation is safe to use.
+        return search_query
+
+    lowered_query = search_query.lower()
+    if all(anchor.lower() in lowered_query for anchor in anchors):
+        # All anchors survived in the reformulation — reformulation is faithful.
+        return search_query
+
+    # At least one exact span was dropped during reformulation.
+    # Return None to signal the caller to fall back to the original user input,
+    # which preserves the exact entity name(s) for the search engine.
+    return None
 
 
 def _resolve_default_chat_route(
