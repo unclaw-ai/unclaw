@@ -9,11 +9,26 @@ from unclaw.tools.file_tools import (
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
 )
+from unclaw.tools.long_term_memory_tools import (
+    FORGET_LONG_TERM_MEMORY_DEFINITION,
+    LIST_LONG_TERM_MEMORY_DEFINITION,
+    REMEMBER_LONG_TERM_MEMORY_DEFINITION,
+    SEARCH_LONG_TERM_MEMORY_DEFINITION,
+)
 from unclaw.tools.notes_tools import CREATE_NOTE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+
+_LONG_TERM_MEMORY_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
+        SEARCH_LONG_TERM_MEMORY_DEFINITION.name,
+        LIST_LONG_TERM_MEMORY_DEFINITION.name,
+        FORGET_LONG_TERM_MEMORY_DEFINITION.name,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +46,7 @@ class RuntimeCapabilitySummary:
     notes_available: bool = False
     local_file_write_available: bool = False
     session_history_recall_available: bool = False
+    long_term_memory_available: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -68,6 +84,9 @@ def build_runtime_capability_summary(
         local_file_write_available=WRITE_TEXT_FILE_DEFINITION.name in available_tool_name_set,
         session_history_recall_available=(
             INSPECT_SESSION_HISTORY_DEFINITION.name in available_tool_name_set
+        ),
+        long_term_memory_available=bool(
+            _LONG_TERM_MEMORY_TOOL_NAMES & available_tool_name_set
         ),
     )
 
@@ -130,9 +149,29 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
             )
         )
         if summary.session_history_recall_available:
-            lines.append(
-                "- Use inspect_session_history to answer exact questions about "
-                "prior prompts, message order, or counts. Do not guess from memory."
+            lines.extend(
+                (
+                    "- Use inspect_session_history to answer exact questions about "
+                    "prior prompts, message order, or counts. "
+                    "Do not guess from memory — call the tool for exact recall. "
+                    "The tool supports filter_role (user/assistant/tool), "
+                    "nth (1-indexed lookup), and limit. "
+                    "Reply to the user in their language after reading the tool result.",
+                )
+            )
+        if summary.long_term_memory_available:
+            lines.extend(
+                (
+                    "- Long-term memory tools (remember_long_term_memory, "
+                    "search_long_term_memory, list_long_term_memory, "
+                    "forget_long_term_memory) let you store and retrieve persistent "
+                    "facts across sessions. "
+                    "Long-term memory is NOT injected into context automatically — "
+                    "call the tools explicitly when needed. "
+                    "Store memories only when the user explicitly asks to remember "
+                    "something, or when a clearly important preference is stated. "
+                    "Do not auto-store random facts.",
+                )
             )
     else:
         lines.extend(
@@ -216,6 +255,14 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Supports filter_role (user/assistant/tool), nth (1-indexed lookup), "
             "and limit. Use this tool for exact questions about prior prompts, "
             "their order, or message counts."
+        )
+    if summary.long_term_memory_available:
+        lines.append(
+            "remember_long_term_memory / search_long_term_memory / "
+            "list_long_term_memory / forget_long_term_memory: "
+            "store, search, list, or delete persistent cross-session user memories. "
+            "Use only on explicit user request or for clearly important preferences. "
+            "Not injected automatically — call tools to retrieve."
         )
     return tuple(lines)
 

@@ -49,12 +49,7 @@ Thumbs.db
 config/secrets.yaml
 
 # Project data
-data/app.db
-data/logs/
-data/cache/
-data/sessions/
-data/files/
-data/notes/
+data/
 
 # Logs
 *.log

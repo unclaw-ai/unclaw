@@ -114,7 +114,27 @@ class SessionManager:
         if switched_session is None:
             raise SessionManagerError(f"Session '{session_id}' could not be reloaded.")
         self.current_session_id = session_id
+        self.ensure_jsonl_backfilled(session_id)
         return switched_session
+
+    def ensure_jsonl_backfilled(self, session_id: str) -> None:
+        """Backfill the JSONL chat mirror from SQLite if it is empty or missing.
+
+        Must be called from the main thread (SQLite thread-affinity).
+        No-op if the JSONL already has content or chat_store is absent.
+
+        This covers sessions created before the JSONL mirror existed, so that
+        inspect_session_history always has a complete history to read from.
+        """
+        if self.chat_store is None:
+            return
+        messages = self.message_repository.list_messages(session_id)
+        if not messages:
+            return
+        self.chat_store.backfill_from_messages(
+            session_id=session_id,
+            messages=[(m.role.value, m.content, m.created_at) for m in messages],
+        )
 
     def rename_session(self, session_id: str, title: str) -> SessionRecord:
         """Rename an existing session."""
@@ -173,6 +193,7 @@ class SessionManager:
         active_session = next((session for session in sessions if session.is_active), None)
         selected_session = active_session or sessions[0]
         self.current_session_id = selected_session.id
+        self.ensure_jsonl_backfilled(selected_session.id)
 
     def _default_session_title(self) -> str:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")

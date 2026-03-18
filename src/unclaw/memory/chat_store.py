@@ -82,6 +82,41 @@ class ChatMemoryStore:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(entry + "\n")
 
+    def backfill_from_messages(
+        self,
+        *,
+        session_id: str,
+        messages: list[tuple[str, str, str]],
+    ) -> None:
+        """Write messages to the JSONL file only if it does not already have content.
+
+        Call this from the main thread when a session is made active and the JSONL
+        file is missing or empty — typically for sessions created before the JSONL
+        mirror existed. Skips silently if the file already has content.
+
+        Args:
+            session_id: the session to backfill.
+            messages: list of (role, content, created_at) tuples in chronological order.
+        """
+        path = self._session_path(session_id)
+        # Fast-path: file exists and is non-empty — skip backfill.
+        if path.exists() and path.read_text(encoding="utf-8").strip():
+            return
+        if not messages:
+            return
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+        lock = self._get_session_lock(session_id)
+        with lock:
+            # Re-check inside lock to avoid double-write from a race.
+            if path.exists() and path.read_text(encoding="utf-8").strip():
+                return
+            lines = [
+                json.dumps({"role": role, "content": content, "ts": created_at}, ensure_ascii=False)
+                for role, content, created_at in messages
+            ]
+            with path.open("w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+
     def read_messages(self, session_id: str) -> list[ChatMemoryRecord]:
         """Return all persisted messages for a session in chronological order.
 

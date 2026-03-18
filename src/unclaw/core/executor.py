@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from unclaw.constants import NOTES_DIRECTORY_NAME
+from unclaw.memory.long_term_store import LongTermStore
 from unclaw.settings import Settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
@@ -16,6 +17,13 @@ from unclaw.tools.file_tools import (
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
     register_file_tools,
+)
+from unclaw.tools.long_term_memory_tools import (
+    FORGET_LONG_TERM_MEMORY_DEFINITION,
+    LIST_LONG_TERM_MEMORY_DEFINITION,
+    REMEMBER_LONG_TERM_MEMORY_DEFINITION,
+    SEARCH_LONG_TERM_MEMORY_DEFINITION,
+    register_long_term_memory_tools,
 )
 from unclaw.tools.notes_tools import (
     CREATE_NOTE_DEFINITION,
@@ -87,6 +95,13 @@ def create_default_tool_registry(
     if session_manager is not None:
         register_session_tools(registry, session_manager=session_manager)
 
+    if settings is not None:
+        long_term_db_path = settings.paths.data_dir / "memory" / "long_term.db"
+        register_long_term_memory_tools(
+            registry,
+            long_term_store=LongTermStore(long_term_db_path),
+        )
+
     return registry
 
 
@@ -133,9 +148,13 @@ def execute_tool_call(
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
     "CREATE_NOTE_DEFINITION",
+    "FORGET_LONG_TERM_MEMORY_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
+    "LIST_LONG_TERM_MEMORY_DEFINITION",
     "LIST_NOTES_DEFINITION",
     "READ_NOTE_DEFINITION",
+    "REMEMBER_LONG_TERM_MEMORY_DEFINITION",
+    "SEARCH_LONG_TERM_MEMORY_DEFINITION",
     "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",
     "UPDATE_NOTE_DEFINITION",
