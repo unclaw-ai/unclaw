@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,9 @@ from unclaw.startup import (
     build_startup_report,
     format_startup_report,
 )
-from unclaw.tools.contracts import ToolDefinition, ToolResult
+from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
+
+_TOOL_CALL_ARGUMENT_CHAR_LIMIT = 200
 
 
 @dataclass(slots=True)
@@ -41,6 +44,7 @@ class _TerminalAssistantStream:
     chunks: list[str] = field(default_factory=list)
     started: bool = False
     _suppressed: bool = field(default=False, init=False)
+    _resume_prefix: bool = field(default=False, init=False)
 
     def suppress_live_output(self) -> None:
         """Buffer chunks silently; finish() will render only the final answer.
@@ -60,13 +64,23 @@ class _TerminalAssistantStream:
             self.chunks.append(chunk)
             return
 
-        if not self.started:
+        if not self.started or self._resume_prefix:
             sys.stdout.write("Unclaw> ")
             self.started = True
+            self._resume_prefix = False
 
         sys.stdout.write(chunk)
         sys.stdout.flush()
         self.chunks.append(chunk)
+
+    def render_status(self, line: str) -> None:
+        if self.started and not self._suppressed:
+            if not self.chunks or not self.chunks[-1].endswith("\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            self._resume_prefix = True
+
+        print(line, flush=True)
 
     def finish(self, final_text: str) -> None:
         # Suppressed path: stream was buffered; render only the final answer.
@@ -220,6 +234,9 @@ def run_cli(
                         tool_call=result.tool_call,
                         stream_output_func=assistant_stream.write,
                         tool_registry=tool_executor.registry,
+                        tool_call_callback=lambda tool_call: assistant_stream.render_status(
+                            _build_tool_call_visibility_line(tool_call)
+                        ),
                     ).assistant_reply
                     assistant_stream.finish(assistant_reply)
                     _refresh_session_summary(
@@ -271,6 +288,9 @@ def run_cli(
             tracer=tracer,
             stream_output_func=assistant_stream.write,
             on_search_route=assistant_stream.suppress_live_output,
+            tool_call_callback=lambda tool_call: assistant_stream.render_status(
+                _build_tool_call_visibility_line(tool_call)
+            ),
         )
         assistant_stream.finish(assistant_reply)
         _refresh_session_summary(
@@ -390,6 +410,32 @@ def _render_tool_result(result: ToolResult) -> None:
 
 def _render_assistant_reply(reply_text: str) -> None:
     print(f"Unclaw> {reply_text}")
+
+
+def _build_tool_call_visibility_line(tool_call: ToolCall) -> str:
+    rendered_arguments = _format_tool_call_arguments(tool_call.arguments)
+    return f"[tool] {tool_call.tool_name} {rendered_arguments}"
+
+
+def _format_tool_call_arguments(arguments: object) -> str:
+    if not isinstance(arguments, dict):
+        return "{}"
+
+    try:
+        rendered = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(", ", ": "),
+        )
+    except TypeError:
+        rendered = repr(arguments)
+
+    single_line = rendered.replace("\r", "\\r").replace("\n", "\\n")
+    if len(single_line) <= _TOOL_CALL_ARGUMENT_CHAR_LIMIT:
+        return single_line
+
+    return f"{single_line[:_TOOL_CALL_ARGUMENT_CHAR_LIMIT - 3]}..."
 
 
 def _refresh_session_summary(

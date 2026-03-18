@@ -14,7 +14,12 @@ from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.contracts import (
+    ToolCall,
+    ToolDefinition,
+    ToolPermissionLevel,
+    ToolResult,
+)
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
@@ -148,6 +153,230 @@ def test_terminal_main_requests_default_model_warm_load(
     assert cli_channel.main(project_root=project_root) == 1
     assert captured["warm_default_model"] is True
     assert capsys.readouterr().out == "banner\nreport\n"
+
+
+def test_cli_shows_model_requested_tool_call_before_final_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+    call_count = 0
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Example Domain content",
+        ),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            nonlocal call_count
+            call_count += 1
+            del messages, timeout_seconds, thinking_enabled, tools
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-18T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {"url": "https://example.com"},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+            reply = "The page contains example content."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=reply,
+                created_at="2026-03-18T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    scripted_inputs = iter(["Fetch example.com"])
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=tool_registry,
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    tool_line = '[tool] fetch_url_text {"url": "https://example.com"}'
+    reply_line = "Unclaw> The page contains example content."
+    assert tool_line in output
+    assert reply_line in output
+    assert output.index(tool_line) < output.index(reply_line)
+
+
+def test_cli_plain_chat_does_not_print_tool_visibility_without_tool_calls(
+    monkeypatch,
+    make_temp_project,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, tools
+            reply = "Plain answer without tools."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=reply,
+                created_at="2026-03-18T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    scripted_inputs = iter(["Just answer directly."])
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=ToolRegistry(),
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[tool]" not in output
+    assert "Unclaw> Plain answer without tools." in output
 
 
 def test_cli_search_returns_a_natural_reply_with_compact_sources(

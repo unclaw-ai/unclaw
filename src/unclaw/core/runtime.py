@@ -195,6 +195,7 @@ def run_user_turn(
     tool_registry: ToolRegistry | None = None,
     explicit_tool_call: ToolCall | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
+    tool_call_callback: Callable[[ToolCall], None] | None = None,
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: RuntimeTurnCancellation | None = None,
     on_search_route: Callable[[], None] | None = None,
@@ -359,6 +360,7 @@ def run_user_turn(
                     content_callback=stream_output_func,
                     max_steps=max_agent_steps,
                     tool_guard_state=tool_guard_state,
+                    tool_call_callback=tool_call_callback,
                     user_input=user_input,
                 )
             else:
@@ -530,6 +532,7 @@ def _run_agent_loop(
     content_callback: LLMContentCallback | None,
     max_steps: int,
     tool_guard_state: _RuntimeToolGuardState,
+    tool_call_callback: Callable[[ToolCall], None] | None,
     user_input: str = "",
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
@@ -568,6 +571,7 @@ def _run_agent_loop(
             tool_registry=tool_registry,
             tool_calls=tool_calls,
             tool_guard_state=tool_guard_state,
+            tool_call_callback=tool_call_callback,
         )
         for tool_result in tool_results:
             context_messages.append(
@@ -639,6 +643,7 @@ def _execute_runtime_tool_calls(
     tool_registry: ToolRegistry,
     tool_calls: Sequence[ToolCall],
     tool_guard_state: _RuntimeToolGuardState,
+    tool_call_callback: Callable[[ToolCall], None] | None = None,
 ) -> tuple[ToolResult, ...]:
     """Execute one tool-call batch while keeping context and persistence ordered."""
     pending_calls = _start_pending_tool_executions(
@@ -647,6 +652,7 @@ def _execute_runtime_tool_calls(
         tool_registry=tool_registry,
         tool_calls=tool_calls,
         tool_guard_state=tool_guard_state,
+        tool_call_callback=tool_call_callback,
     )
     if not pending_calls:
         return ()
@@ -680,6 +686,7 @@ def _start_pending_tool_executions(
     tool_registry: ToolRegistry,
     tool_calls: Sequence[ToolCall],
     tool_guard_state: _RuntimeToolGuardState,
+    tool_call_callback: Callable[[ToolCall], None] | None = None,
 ) -> list[_PendingToolExecution]:
     pending_calls: list[_PendingToolExecution] = []
     for tool_call in tool_calls:
@@ -687,6 +694,8 @@ def _start_pending_tool_executions(
             break
 
         started_at = perf_counter()
+        if tool_call_callback is not None:
+            tool_call_callback(tool_call)
         tracer.trace_tool_started(
             session_id=session_id,
             tool_name=tool_call.tool_name,

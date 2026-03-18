@@ -3250,6 +3250,7 @@ def test_agent_loop_one_tool_call_then_final_response(
     )
     call_count = 0
     captured_tools: list[object | None] = []
+    observed_tool_calls: list[ToolCall] = []
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -3320,12 +3321,19 @@ def test_agent_loop_one_tool_call_then_final_response(
             user_input="Fetch example.com",
             tracer=tracer,
             tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
         )
 
         assert reply == "The page contains example content."
         assert call_count == 2
         assert len(captured_tools) == 2
         assert all(tools is not None for tools in captured_tools)
+        assert observed_tool_calls == [
+            ToolCall(
+                tool_name="fetch_url_text",
+                arguments={"url": "https://example.com"},
+            )
+        ]
 
         # Verify tool tracing events.
         event_types = [e.event_type for e in published_events]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING, Any
@@ -97,6 +97,7 @@ def run_search_command(
     tool_call: ToolCall,
     stream_output_func: LLMContentCallback | None = None,
     tool_registry: ToolRegistry | None = None,
+    tool_call_callback: Callable[[ToolCall], None] | None = None,
 ) -> ResearchTurnResult:
     """Route /search through the shared runtime path without pre-executing.
 
@@ -142,6 +143,7 @@ def run_search_command(
         stream_output_func=stream_output_func,
         explicit_tool_call=tool_call,
         assistant_reply_transform=_grounding_transform,
+        tool_call_callback=tool_call_callback,
     )
     return ResearchTurnResult(assistant_reply=assistant_reply)
 
