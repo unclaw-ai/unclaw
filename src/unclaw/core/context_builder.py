@@ -6,7 +6,10 @@ from collections.abc import Sequence
 from datetime import date
 import re
 
-from unclaw.constants import DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT
+from unclaw.constants import (
+    DEFAULT_CONTEXT_HISTORY_CHAR_BUDGET,
+    DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT,
+)
 from unclaw.core.capabilities import (
     RuntimeCapabilitySummary,
     build_runtime_capability_context,
@@ -77,6 +80,7 @@ def build_context_messages(
     session_id: str,
     user_message: str,
     max_history_size: int | None = DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT,
+    max_history_chars: int | None = DEFAULT_CONTEXT_HISTORY_CHAR_BUDGET,
     capability_summary: RuntimeCapabilitySummary | None = None,
     system_context_notes: Sequence[str] | None = None,
 ) -> list[LLMMessage]:
@@ -86,7 +90,7 @@ def build_context_messages(
         raise ValueError("user_message must be a non-empty string.")
 
     history = session_manager.list_messages(session_id)
-    recent_history = _limit_history(history, max_history_size)
+    recent_history = _budget_history(history, max_history_size, max_history_chars)
 
     context_messages = [
         LLMMessage(role=LLMRole.SYSTEM, content=session_manager.settings.system_prompt)
@@ -130,6 +134,43 @@ def _limit_history(
     if max_history_size < 1:
         return ()
     return history[-max_history_size:]
+
+
+def _budget_history(
+    history: Sequence[ChatMessage],
+    max_history_size: int | None,
+    max_history_chars: int | None,
+) -> Sequence[ChatMessage]:
+    """Apply message-count cap then char budget to conversation history.
+
+    The message-count cap is applied first (newest N messages).  The char
+    budget is then applied from newest to oldest: messages are included as
+    long as the cumulative character count stays within the budget.  The
+    tighter constraint wins.  System framing and the current user message
+    are never passed here — they are protected by the caller.
+
+    The result is always returned in chronological order (oldest first).
+    Both constraints are deterministic and reversible.  Set either to None
+    to skip that constraint independently.
+    """
+    # Apply count cap first.
+    count_limited = _limit_history(history, max_history_size)
+
+    if max_history_chars is None:
+        return count_limited
+
+    # Apply char budget newest-to-oldest, then restore chronological order.
+    included: list[ChatMessage] = []
+    chars_used = 0
+    for message in reversed(count_limited):
+        msg_chars = len(message.content)
+        if chars_used + msg_chars > max_history_chars:
+            break
+        included.append(message)
+        chars_used += msg_chars
+
+    included.reverse()
+    return included
 
 
 def _to_llm_message(message: ChatMessage) -> LLMMessage:
