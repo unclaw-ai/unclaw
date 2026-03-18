@@ -21,8 +21,8 @@ from unclaw.constants import (
     OLLAMA_STARTUP_WAIT_TIMEOUT_SECONDS,
 )
 from unclaw.errors import ConfigurationError
-from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
-from unclaw.llm.model_profiles import get_default_model_profile
+from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole, ResolvedModelProfile
+from unclaw.llm.model_profiles import get_default_model_profile, resolve_model_profile
 from unclaw.local_secrets import local_secrets_path, resolve_telegram_bot_token
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
@@ -251,25 +251,41 @@ def build_startup_report(
     return StartupReport(channel_name=channel_name, checks=tuple(checks))
 
 
-def _build_default_model_warm_load_check(settings: Settings) -> StartupCheck | None:
-    """Warm-load the default Ollama model without making startup failures fatal."""
+def warm_load_model_profile(settings: Settings, *, profile_name: str) -> None:
+    """Warm-load one configured model profile using the standard startup ping."""
 
-    default_model = settings.default_model
-    if default_model.provider != OllamaProvider.provider_name:
-        return None
+    resolved_profile = resolve_model_profile(settings, profile_name)
+    _warm_load_resolved_model_profile(settings, profile=resolved_profile)
 
-    resolved_profile = get_default_model_profile(settings)
+
+def _warm_load_resolved_model_profile(
+    settings: Settings,
+    *,
+    profile: ResolvedModelProfile,
+) -> None:
+    if profile.provider != OllamaProvider.provider_name:
+        return
+
     provider = OllamaProvider(
         default_timeout_seconds=settings.app.providers.ollama.timeout_seconds,
     )
+    provider.chat(
+        profile=profile,
+        messages=[LLMMessage(role=LLMRole.USER, content=" ")],
+        timeout_seconds=settings.app.providers.ollama.timeout_seconds,
+        thinking_enabled=False,
+    )
+
+
+def _build_default_model_warm_load_check(settings: Settings) -> StartupCheck | None:
+    """Warm-load the default Ollama model without making startup failures fatal."""
+
+    resolved_profile = get_default_model_profile(settings)
+    if resolved_profile.provider != OllamaProvider.provider_name:
+        return None
 
     try:
-        provider.chat(
-            profile=resolved_profile,
-            messages=[LLMMessage(role=LLMRole.USER, content=" ")],
-            timeout_seconds=settings.app.providers.ollama.timeout_seconds,
-            thinking_enabled=False,
-        )
+        _warm_load_resolved_model_profile(settings, profile=resolved_profile)
     except Exception as exc:
         error_detail = " ".join(str(exc).split()) or "unknown error"
         return StartupCheck(

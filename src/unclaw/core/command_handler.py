@@ -11,6 +11,7 @@ from unclaw.core.executor import resolve_builtin_tool_command
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.memory.diagnostics import collect_memory_diagnostics, render_memory_diagnostics
 from unclaw.schemas.session import SessionSummary
+from unclaw.startup import warm_load_model_profile
 from unclaw.settings import ModelProfile, Settings
 from unclaw.tools.contracts import ToolCall
 
@@ -243,6 +244,7 @@ class CommandHandler:
                 f"Available profiles: {available_profiles}."
             )
 
+        previous_profile_name = self.current_model_profile_name
         self.current_model_profile_name = profile_name
         self._trace_model_profile_selected(profile, reason="command")
         lines = [
@@ -253,6 +255,9 @@ class CommandHandler:
             self.thinking_enabled = False
             lines.append(self._thinking_disabled_reason())
             self._trace_thinking_changed(reason=self._thinking_disabled_reason())
+
+        if previous_profile_name != profile_name:
+            self._warm_load_selected_model_profile(profile_name)
 
         return self._ok(*lines)
 
@@ -530,6 +535,12 @@ class CommandHandler:
             model_name=profile.model_name,
             reason=reason,
         )
+
+    def _warm_load_selected_model_profile(self, profile_name: str) -> None:
+        try:
+            warm_load_model_profile(self.settings, profile_name=profile_name)
+        except Exception:
+            return
 
     def _trace_thinking_changed(self, *, reason: str) -> None:
         if self.tracer is None:

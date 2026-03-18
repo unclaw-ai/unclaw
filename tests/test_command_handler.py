@@ -100,6 +100,85 @@ def test_switching_to_fast_turns_thinking_off_cleanly() -> None:
     )
 
 
+def test_switching_model_profile_warm_loads_the_selected_profile(monkeypatch) -> None:
+    warmed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: warmed_profiles.append(profile_name),
+    )
+
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+        thinking_enabled=False,
+    )
+
+    result = handler.handle("/model deep")
+
+    assert result.status is CommandStatus.OK
+    assert handler.current_model_profile_name == "deep"
+    assert warmed_profiles == ["deep"]
+
+
+def test_model_status_does_not_trigger_warm_load(monkeypatch) -> None:
+    warmed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: warmed_profiles.append(profile_name),
+    )
+
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/model")
+
+    assert result.status is CommandStatus.OK
+    assert warmed_profiles == []
+
+
+def test_unknown_model_profile_does_not_trigger_warm_load(monkeypatch) -> None:
+    warmed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: warmed_profiles.append(profile_name),
+    )
+
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/model ghost")
+
+    assert result.status is CommandStatus.ERROR
+    assert warmed_profiles == []
+
+
+def test_warm_load_failure_does_not_block_model_switch(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+        thinking_enabled=False,
+    )
+
+    result = handler.handle("/model deep")
+
+    assert result.status is CommandStatus.OK
+    assert handler.current_model_profile_name == "deep"
+
+
 def test_think_status_on_fast_explains_that_thinking_is_unsupported() -> None:
     handler = CommandHandler(
         settings=_load_repo_settings(),
