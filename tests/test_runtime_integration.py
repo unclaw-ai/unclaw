@@ -1231,7 +1231,8 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
     captured_messages: list[list[LLMMessage]] = []
     follow_up_reply_texts = iter(["Shorter recap."])
 
-    # Agent loop: call 1 → tool_call; call 2 → grounded reply; call 3 → follow-up
+    # Agent loop: call 1 -> tool_call; call 2 -> grounded reply.
+    # Obvious follow-ups stay grounded without an extra semantic pass.
     call_count = 0
 
     class FakeOllamaProvider:
@@ -1245,6 +1246,32 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
             nonlocal call_count
             call_count += 1
             captured_messages.append(list(messages))
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "Review a candidate answer against grounded search evidence"
+                in messages[0].content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content='{"rewrite_required": false, "query_kind": "general", "safe_answer": "", "issues": []}',
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                )
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "stay grounded in the most recent search grounding context"
+                in messages[0].content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content='{"applies_to_grounding": true, "query_kind": "general", "is_follow_up": true}',
+                    created_at="2026-03-13T12:00:00Z",
+                    finish_reason="stop",
+                )
             if call_count == 1:
                 return LLMResponse(
                     provider="ollama",
@@ -1314,8 +1341,9 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
         assert any("Supported facts:" in m.content for m in tool_messages)
         assert any("Sources:" in m.content for m in tool_messages)
 
-        # Verify runtime.started fires before tool.started (agent loop).
-        assert call_count == 2  # tool_call request + final answer
+        # Search turn: tool call + final answer. Safe generic search replies do
+        # not pay for an extra semantic review pass.
+        assert call_count == 2
 
         # Follow-up context still works.
         session_manager.add_message(
@@ -2556,6 +2584,19 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
             ):
                 del profile, timeout_seconds, thinking_enabled, content_callback, tools
                 captured_follow_up_messages.append(list(messages))
+                if (
+                    messages
+                    and messages[0].role is LLMRole.SYSTEM
+                    and "stay grounded in the most recent search grounding context"
+                    in messages[0].content
+                ):
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name="qwen3.5:4b",
+                        content='{"applies_to_grounding": true, "query_kind": "general", "is_follow_up": true}',
+                        created_at="2026-03-16T10:00:00Z",
+                        finish_reason="stop",
+                    )
                 assert any(
                     message.role is LLMRole.SYSTEM
                     and "Search-backed answer contract:" in message.content
@@ -2596,6 +2637,8 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
         )
 
         assert follow_up_reply == "Shorter recap."
+        # Obvious grounded follow-ups reuse the stored search context without
+        # spending an extra semantic analyzer call first.
         assert len(captured_follow_up_messages) == 1
     finally:
         session_manager.close()

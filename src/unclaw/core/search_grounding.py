@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+import json
 import re
 import unicodedata
 from typing import Any
@@ -13,11 +14,42 @@ from unclaw.core.search_payload_helpers import (
     read_search_display_sources,
     read_search_string_items,
 )
+from unclaw.errors import ConfigurationError
+from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
+from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.schemas.chat import ChatMessage, MessageRole
+from unclaw.settings import Settings
 from unclaw.tools.contracts import SearchWebPayload
 
 _MAX_COMPOSED_FACTS = 5
 _SEARCH_TOOL_PREFIX = "Tool: search_web\n"
+_SEARCH_GROUNDING_QUERY_ANALYZER_TIMEOUT_SECONDS = 8.0
+_SEARCH_GROUNDING_REPLY_REVIEW_TIMEOUT_SECONDS = 8.0
+_SEMANTIC_QUERY_KINDS = frozenset({"age_request", "person_profile", "general"})
+_SEARCH_GROUNDING_QUERY_ANALYZER_SYSTEM_PROMPT = (
+    "Decide whether the user's latest turn should stay grounded in the most "
+    "recent search grounding context. Work semantically across languages. "
+    "Return JSON only with keys applies_to_grounding, query_kind, and "
+    "is_follow_up. applies_to_grounding and is_follow_up must be booleans. "
+    "query_kind must be one of: age_request, person_profile, general. "
+    "Set applies_to_grounding true when the current turn is still about the "
+    "same entity/topic or clearly refers back to the grounded search context."
+)
+_SEARCH_GROUNDING_REPLY_REVIEW_SYSTEM_PROMPT = (
+    "Review a candidate answer against grounded search evidence. Work "
+    "semantically across languages. Return JSON only with keys "
+    "rewrite_required, query_kind, safe_answer, and issues. "
+    "rewrite_required must be a boolean. query_kind must be one of: "
+    "age_request, person_profile, general. safe_answer must be a short "
+    "natural-language string and should be empty when no rewrite is needed. "
+    "issues must be a JSON array of short lowercase codes. If the candidate "
+    "answer is unsupported, stale, or overconfident, set rewrite_required "
+    "true and write a safe_answer in the same language as the user's query. "
+    "For age questions, give age only when a birth date is available and "
+    "compute it from grounding_date and birth_date. Otherwise give the birth "
+    "date only or say the age is not confirmed. Never confirm social handles, "
+    "usernames, or weak profile details unless the grounding clearly supports them."
+)
 _STALE_AS_OF_PATTERN = re.compile(
     r"\bas of\s+(?:"
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
@@ -142,6 +174,21 @@ class _SearchToolHistoryState:
     section: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class _SemanticQueryAnalysis:
+    applies_to_grounding: bool
+    query_kind: str
+    is_follow_up: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _SemanticReplyReview:
+    rewrite_required: bool
+    query_kind: str
+    safe_answer: str
+    issues: tuple[str, ...]
+
+
 def build_search_answer_contract(*, current_date: date | None = None) -> str:
     """Build the system note for grounded search-backed answering."""
     resolved_date = current_date or date.today()
@@ -247,6 +294,8 @@ def shape_search_backed_reply(
     payload: SearchWebPayload | Mapping[str, Any] | None,
     query: str,
     current_date: date | None = None,
+    settings: Settings | None = None,
+    model_profile_name: str | None = None,
 ) -> str:
     """Rewrite risky search-backed replies into grounded, compact prose."""
     grounding = build_search_grounding_context(
@@ -254,7 +303,13 @@ def shape_search_backed_reply(
         query=query,
         current_date=current_date,
     )
-    return shape_reply_with_grounding(reply_text, grounding=grounding, query=query)
+    return shape_reply_with_grounding(
+        reply_text,
+        grounding=grounding,
+        query=query,
+        settings=settings,
+        model_profile_name=model_profile_name,
+    )
 
 
 def shape_reply_with_grounding(
@@ -262,11 +317,44 @@ def shape_reply_with_grounding(
     *,
     grounding: SearchGroundingContext | None,
     query: str,
+    settings: Settings | None = None,
+    model_profile_name: str | None = None,
 ) -> str:
     """Rewrite risky search-backed replies using a pre-parsed grounding context."""
     stripped_reply = reply_text.strip()
     if grounding is None or not stripped_reply:
         return stripped_reply
+
+    semantic_review = None
+    if (
+        settings is not None
+        and model_profile_name is not None
+        and _should_run_semantic_reply_review(
+            query=query,
+            grounding=grounding,
+            reply_text=stripped_reply,
+        )
+    ):
+        semantic_review = _review_reply_semantically(
+            query=query,
+            grounding=grounding,
+            reply_text=stripped_reply,
+            settings=settings,
+            model_profile_name=model_profile_name,
+        )
+
+    if semantic_review is not None:
+        if not semantic_review.rewrite_required:
+            return _sanitize_reply(stripped_reply)
+
+        safe_answer = semantic_review.safe_answer.strip()
+        if safe_answer:
+            return safe_answer
+
+        return _compose_grounded_answer_for_query_kind(
+            query_kind=semantic_review.query_kind,
+            grounding=grounding,
+        )
 
     if not _reply_needs_rewrite(stripped_reply, grounding=grounding, query=query):
         return _sanitize_reply(stripped_reply)
@@ -297,11 +385,49 @@ def should_apply_search_grounding(
     *,
     query: str,
     grounding: SearchGroundingContext | None,
+    settings: Settings | None = None,
+    model_profile_name: str | None = None,
 ) -> bool:
     """Return whether the current user turn likely refers to recent search context."""
     if grounding is None:
         return False
 
+    if _should_apply_search_grounding_fallback(query=query, grounding=grounding):
+        return True
+
+    if settings is not None and model_profile_name is not None:
+        semantic_analysis = _analyze_query_semantically(
+            query=query,
+            grounding=grounding,
+            settings=settings,
+            model_profile_name=model_profile_name,
+        )
+        if semantic_analysis is not None:
+            return semantic_analysis.applies_to_grounding
+
+    return False
+
+
+def _should_run_semantic_reply_review(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+    reply_text: str,
+) -> bool:
+    if grounding.birth_date is not None or _query_is_age_request(query):
+        return True
+
+    if not _reply_needs_rewrite(reply_text, grounding=grounding, query=query):
+        return False
+
+    return _query_is_person_profile(query)
+
+
+def _should_apply_search_grounding_fallback(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+) -> bool:
     normalized_query = _fold_for_match(query)
     if not normalized_query:
         return False
@@ -319,6 +445,290 @@ def should_apply_search_grounding(
         return True
 
     return _FOLLOW_UP_QUERY_PATTERN.search(query) is not None
+
+
+def _analyze_query_semantically(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+    settings: Settings,
+    model_profile_name: str,
+) -> _SemanticQueryAnalysis | None:
+    content = _run_semantic_grounding_request(
+        settings=settings,
+        model_profile_name=model_profile_name,
+        messages=_build_query_analysis_messages(query=query, grounding=grounding),
+        timeout_seconds=_SEARCH_GROUNDING_QUERY_ANALYZER_TIMEOUT_SECONDS,
+    )
+    if content is None:
+        return None
+    return _parse_semantic_query_analysis(content)
+
+
+def _review_reply_semantically(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+    reply_text: str,
+    settings: Settings,
+    model_profile_name: str,
+) -> _SemanticReplyReview | None:
+    content = _run_semantic_grounding_request(
+        settings=settings,
+        model_profile_name=model_profile_name,
+        messages=_build_reply_review_messages(
+            query=query,
+            grounding=grounding,
+            reply_text=reply_text,
+        ),
+        timeout_seconds=_SEARCH_GROUNDING_REPLY_REVIEW_TIMEOUT_SECONDS,
+    )
+    if content is None:
+        return None
+    return _parse_semantic_reply_review(content)
+
+
+def _run_semantic_grounding_request(
+    *,
+    settings: Settings,
+    model_profile_name: str,
+    messages: Sequence[LLMMessage],
+    timeout_seconds: float,
+) -> str | None:
+    try:
+        profile = resolve_model_profile(settings, model_profile_name)
+    except ConfigurationError:
+        return None
+
+    provider = _create_semantic_provider(settings, provider_name=profile.provider)
+    if provider is None:
+        return None
+
+    semantic_profile = replace(profile, temperature=0.0)
+    try:
+        response = provider.chat(
+            profile=semantic_profile,
+            messages=messages,
+            timeout_seconds=timeout_seconds,
+            thinking_enabled=False,
+        )
+    except LLMProviderError:
+        return None
+
+    return response.content
+
+
+def _create_semantic_provider(
+    settings: Settings,
+    *,
+    provider_name: str,
+) -> Any | None:
+    from unclaw.core import orchestrator as orchestrator_module
+
+    provider_class = getattr(orchestrator_module, "OllamaProvider", None)
+    if provider_class is None:
+        return None
+
+    expected_provider_name = getattr(provider_class, "provider_name", "")
+    if provider_name != expected_provider_name:
+        return None
+
+    return provider_class(
+        default_timeout_seconds=settings.app.providers.ollama.timeout_seconds,
+    )
+
+
+def _build_query_analysis_messages(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+) -> tuple[LLMMessage, LLMMessage]:
+    return (
+        LLMMessage(
+            role=LLMRole.SYSTEM,
+            content=_SEARCH_GROUNDING_QUERY_ANALYZER_SYSTEM_PROMPT,
+        ),
+        LLMMessage(
+            role=LLMRole.USER,
+            content=_build_query_analysis_payload(query=query, grounding=grounding),
+        ),
+    )
+
+
+def _build_query_analysis_payload(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+) -> str:
+    lines = [
+        f"Grounding date: {grounding.current_date.isoformat()}",
+        f"Current user turn: {query}",
+    ]
+    if grounding.query:
+        lines.append(f"Most recent grounded search request: {grounding.query}")
+    lines.extend(_build_semantic_grounding_fact_lines(grounding))
+    lines.append("Return JSON only.")
+    return "\n".join(lines)
+
+
+def _build_reply_review_messages(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+    reply_text: str,
+) -> tuple[LLMMessage, LLMMessage]:
+    return (
+        LLMMessage(
+            role=LLMRole.SYSTEM,
+            content=_SEARCH_GROUNDING_REPLY_REVIEW_SYSTEM_PROMPT,
+        ),
+        LLMMessage(
+            role=LLMRole.USER,
+            content=_build_reply_review_payload(
+                query=query,
+                grounding=grounding,
+                reply_text=reply_text,
+            ),
+        ),
+    )
+
+
+def _build_reply_review_payload(
+    *,
+    query: str,
+    grounding: SearchGroundingContext,
+    reply_text: str,
+) -> str:
+    lines = [
+        f"Grounding date: {grounding.current_date.isoformat()}",
+        f"User query: {query}",
+        f"Candidate answer: {reply_text}",
+    ]
+    if grounding.birth_date is not None:
+        lines.append(f"Retrieved birth date: {grounding.birth_date.isoformat()}")
+    lines.extend(_build_semantic_grounding_fact_lines(grounding))
+    lines.append("Return JSON only.")
+    return "\n".join(lines)
+
+
+def _build_semantic_grounding_fact_lines(
+    grounding: SearchGroundingContext,
+) -> list[str]:
+    lines = ["Supported facts:"]
+    if grounding.supported_findings:
+        lines.extend(
+            _format_semantic_finding_line(finding)
+            for finding in grounding.supported_findings[:_MAX_COMPOSED_FACTS + 1]
+        )
+    else:
+        lines.append("- none")
+
+    lines.append("Uncertain details:")
+    if grounding.uncertain_findings:
+        lines.extend(
+            _format_semantic_finding_line(finding)
+            for finding in grounding.uncertain_findings[:3]
+        )
+    else:
+        lines.append("- none")
+    return lines
+
+
+def _format_semantic_finding_line(finding: SearchGroundingFinding) -> str:
+    return (
+        f"- [{finding.confidence}; {finding.support_count} source"
+        f"{'' if finding.support_count == 1 else 's'}] {finding.text}"
+    )
+
+
+def _parse_semantic_query_analysis(content: str) -> _SemanticQueryAnalysis | None:
+    payload = _parse_semantic_json_object(content)
+    if payload is None:
+        return None
+
+    applies_to_grounding = payload.get("applies_to_grounding")
+    query_kind = payload.get("query_kind")
+    is_follow_up = payload.get("is_follow_up")
+    if not isinstance(applies_to_grounding, bool):
+        return None
+    if query_kind not in _SEMANTIC_QUERY_KINDS:
+        return None
+    if not isinstance(is_follow_up, bool):
+        return None
+
+    return _SemanticQueryAnalysis(
+        applies_to_grounding=applies_to_grounding,
+        query_kind=query_kind,
+        is_follow_up=is_follow_up,
+    )
+
+
+def _parse_semantic_reply_review(content: str) -> _SemanticReplyReview | None:
+    payload = _parse_semantic_json_object(content)
+    if payload is None:
+        return None
+
+    rewrite_required = payload.get("rewrite_required")
+    query_kind = payload.get("query_kind")
+    safe_answer = payload.get("safe_answer")
+    if not isinstance(rewrite_required, bool):
+        return None
+    if query_kind not in _SEMANTIC_QUERY_KINDS:
+        return None
+    if not isinstance(safe_answer, str):
+        return None
+
+    raw_issues = payload.get("issues")
+    issues: tuple[str, ...]
+    if isinstance(raw_issues, list):
+        issues = tuple(
+            item.strip()
+            for item in raw_issues
+            if isinstance(item, str) and item.strip()
+        )
+    else:
+        issues = ()
+
+    return _SemanticReplyReview(
+        rewrite_required=rewrite_required,
+        query_kind=query_kind,
+        safe_answer=safe_answer.strip(),
+        issues=issues,
+    )
+
+
+def _parse_semantic_json_object(content: str) -> dict[str, Any] | None:
+    normalized = content.strip()
+    if not normalized:
+        return None
+
+    candidates = [normalized]
+    if normalized.startswith("```"):
+        stripped = re.sub(
+            r"^```(?:json)?\s*",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        stripped = re.sub(r"\s*```$", "", stripped)
+        candidates.append(stripped.strip())
+
+    start_index = normalized.find("{")
+    end_index = normalized.rfind("}")
+    if 0 <= start_index < end_index:
+        candidates.append(normalized[start_index : end_index + 1].strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+
+    return None
 
 
 def _read_query(payload: Mapping[str, Any], *, fallback: str) -> str:
@@ -656,17 +1066,43 @@ def _compose_grounded_answer(
     grounding: SearchGroundingContext,
 ) -> str:
     if _query_is_age_request(query):
+        return _compose_grounded_answer_for_query_kind(
+            query_kind="age_request",
+            grounding=grounding,
+        )
+    if _query_is_person_profile(query):
+        return _compose_grounded_answer_for_query_kind(
+            query_kind="person_profile",
+            grounding=grounding,
+        )
+    return _compose_grounded_answer_for_query_kind(
+        query_kind="general",
+        grounding=grounding,
+    )
+
+
+def _compose_grounded_answer_for_query_kind(
+    *,
+    query_kind: str,
+    grounding: SearchGroundingContext,
+) -> str:
+    if query_kind == "age_request":
         age_answer = _compose_age_answer(grounding)
         if age_answer:
             return age_answer
 
     supported_facts = _select_supported_facts(grounding)
     if supported_facts:
-        return _compose_supported_answer(
-            query=query,
-            supported_facts=supported_facts,
+        if query_kind == "person_profile":
+            return _compose_person_answer(
+                supported_facts=supported_facts,
+                grounding=grounding,
+            )
+        return _compose_fact_answer(
+            facts=supported_facts[:_MAX_COMPOSED_FACTS],
             grounding=grounding,
         )
+
     if grounding.uncertain_findings:
         return _compose_uncertain_only_answer(grounding)
     return "I couldn't confirm any strong details from the retrieved sources."

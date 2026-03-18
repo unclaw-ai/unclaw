@@ -187,6 +187,32 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
                     created_at="2026-03-16T10:00:00Z",
                     finish_reason="stop",
                 )
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "Review a candidate answer against grounded search evidence"
+                in messages[0].content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=settings.default_model.model_name,
+                    content='{"rewrite_required": false, "query_kind": "general", "safe_answer": "", "issues": []}',
+                    created_at="2026-03-16T10:00:00Z",
+                    finish_reason="stop",
+                )
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "stay grounded in the most recent search grounding context"
+                in messages[0].content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=settings.default_model.model_name,
+                    content='{"applies_to_grounding": true, "query_kind": "general", "is_follow_up": true}',
+                    created_at="2026-03-16T10:00:01Z",
+                    finish_reason="stop",
+                )
 
             captured_messages.append(list(messages))
             last_user_message = next(

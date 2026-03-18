@@ -132,6 +132,7 @@ def run_search_command(
             session_manager=session_manager,
             session_id=session.id,
             turn_start_message_count=_turn_start_count,
+            model_profile_name=command_handler.current_model_profile.name,
         )
 
     assistant_reply = run_user_turn(
@@ -290,6 +291,7 @@ def apply_search_grounding_from_history(
     session_manager: Any,
     session_id: str,
     turn_start_message_count: int = 0,
+    model_profile_name: str | None = None,
 ) -> str:
     """Apply grounding rewrite and sources using tool results from session history.
 
@@ -307,7 +309,13 @@ def apply_search_grounding_from_history(
     if grounding is None:
         return reply
 
-    shaped = shape_reply_with_grounding(reply, grounding=grounding, query=query)
+    shaped = shape_reply_with_grounding(
+        reply,
+        grounding=grounding,
+        query=query,
+        settings=getattr(session_manager, "settings", None),
+        model_profile_name=model_profile_name,
+    )
     return append_compact_search_sources(shaped, sources=grounding.display_sources)
 
 

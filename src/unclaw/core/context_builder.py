@@ -16,7 +16,8 @@ from unclaw.core.capabilities import (
 )
 from unclaw.core.search_grounding import (
     build_search_answer_contract,
-    has_search_grounding_context,
+    parse_search_tool_history,
+    should_apply_search_grounding,
 )
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMRole
@@ -83,6 +84,7 @@ def build_context_messages(
     max_history_chars: int | None = DEFAULT_CONTEXT_HISTORY_CHAR_BUDGET,
     capability_summary: RuntimeCapabilitySummary | None = None,
     system_context_notes: Sequence[str] | None = None,
+    model_profile_name: str | None = None,
 ) -> list[LLMMessage]:
     """Build the minimal message list sent to the selected model."""
     normalized_user_message = user_message.strip()
@@ -91,6 +93,25 @@ def build_context_messages(
 
     history = session_manager.list_messages(session_id)
     recent_history = _budget_history(history, max_history_size, max_history_chars)
+    latest_search_grounding = _find_latest_search_grounding(recent_history)
+    search_grounding_applies = False
+    if latest_search_grounding is not None:
+        if _latest_message_is_search_grounding(recent_history):
+            search_grounding_applies = True
+        else:
+            search_grounding_applies = should_apply_search_grounding(
+                query=normalized_user_message,
+                grounding=latest_search_grounding,
+                settings=session_manager.settings,
+                model_profile_name=model_profile_name,
+            )
+
+        if not search_grounding_applies:
+            recent_history = tuple(
+                message
+                for message in recent_history
+                if not _is_search_grounding_tool_message(message)
+            )
 
     context_messages = [
         LLMMessage(role=LLMRole.SYSTEM, content=session_manager.settings.system_prompt)
@@ -108,7 +129,7 @@ def build_context_messages(
             for note in system_context_notes
             if note.strip()
         )
-    if has_search_grounding_context(recent_history):
+    if latest_search_grounding is not None and search_grounding_applies:
         context_messages.append(
             LLMMessage(
                 role=LLMRole.SYSTEM,
@@ -183,6 +204,27 @@ def _budget_history(
 
     included.reverse()
     return included
+
+
+def _find_latest_search_grounding(
+    history: Sequence[ChatMessage],
+) -> object | None:
+    for message in reversed(history):
+        grounding = parse_search_tool_history(message.content)
+        if grounding is not None:
+            return grounding
+    return None
+
+
+def _latest_message_is_search_grounding(history: Sequence[ChatMessage]) -> bool:
+    return bool(history) and _is_search_grounding_tool_message(history[-1])
+
+
+def _is_search_grounding_tool_message(message: ChatMessage) -> bool:
+    return (
+        message.role is MessageRole.TOOL
+        and parse_search_tool_history(message.content) is not None
+    )
 
 
 def _to_llm_message(message: ChatMessage) -> LLMMessage:

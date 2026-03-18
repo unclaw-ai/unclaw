@@ -84,6 +84,7 @@ class Orchestrator:
             max_history_size=max_history_size,
             capability_summary=capability_summary,
             system_context_notes=system_context_notes,
+            model_profile_name=model_profile_name,
         )
 
         self.tracer.trace_model_called(

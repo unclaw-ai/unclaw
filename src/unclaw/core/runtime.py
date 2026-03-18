@@ -487,6 +487,7 @@ def _prepare_web_search_route(
             session_manager=session_manager,
             session_id=session_id,
             turn_start_message_count=_turn_start_count,
+            model_profile_name=route.model_profile_name,
         )
 
     # P5-2: always create the explicit search call — native and non-native paths both
