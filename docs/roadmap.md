@@ -24,7 +24,8 @@ The remaining work is to make that agent/runtime behavior broader, more default,
 
 ### Completed in the current repo
 
-- one shipped profile now enables native tool calling by default: `deep`
+- `main` (default) and `deep` profiles both have `tool_mode: native`; `fast` and `codex` remain `json_plan`
+- all profiles now have explicit `num_ctx` values (4096 or 8192) passed to Ollama to prevent silent context overflow
 - the system prompt now includes tool-use, anti-injection, and citation guidance
 - Ollama requests now send per-profile `keep_alive`
 - normal routed web-backed turns and `/search` both use the shared runtime path
@@ -34,6 +35,7 @@ The remaining work is to make that agent/runtime behavior broader, more default,
 - committed Telegram config is now deny-by-default with `allowed_chat_ids: []`
 - local secret files and the SQLite database are hardened to owner-only permissions on POSIX
 - tool and search output is wrapped as untrusted content before being fed back to the model
+- `system_info` tool, notes tool family (`create_note`, `read_note`, `list_notes`, `update_note`), `write_text_file`, `inspect_session_history`, and long-term memory tools are now registered and active
 
 ### Still remaining
 
@@ -123,16 +125,17 @@ In progress.
 
 - native tool definitions and tool-call parsing in the Ollama provider
 - a bounded observation-action loop in the shared runtime
-- one shipped native-tool profile: `deep`
+- `main` (default) and `deep` profiles both use native tool calling; `fast` and `codex` remain `json_plan`
+- explicit `num_ctx` per profile prevents silent context overflow
 - expanded system prompt for tool use and anti-injection behavior
 - per-profile `keep_alive`
 - model-assisted routing between chat and web-backed search
 - shared `/search` handling through the same runtime path as normal turns
 - native `search_web` calls inside the normal agent loop when a native profile is selected
+- `system_info`, notes family, `write_text_file`, `inspect_session_history`, and long-term memory tools are now shipped
 
 ### Still missing before this phase can be called complete
 
-- make broader model-driven tool use normal in day-to-day defaults, not only available through `deep`
 - reduce reliance on `/read`, `/ls`, and `/fetch` as the primary access path for those capabilities
 - broaden capability routing beyond the current chat versus web-search split
 - make the default UX feel less command-heavy while keeping power-user commands
@@ -149,17 +152,18 @@ Partially complete.
 
 ### Landed already
 
-- persisted session history
+- persisted session history in SQLite (`data/memory/app.db`)
 - deterministic session summaries
 - retained grounded facts and uncertainties from prior search results
 - bounded session-memory context injection
+- per-session JSONL chat mirror under `data/memory/chats/` (thread-safe access via `inspect_session_history` tool)
+- long-term cross-session memory in `data/memory/long_term.db` with explicit recall tools; not injected automatically
 
 ### Remaining
 
-- richer user memory
 - richer project memory
-- selective retrieval across multiple memory stores
-- clearer memory write and retention policies beyond the current session-summary model
+- selective retrieval across memory stores beyond the current explicit-call model
+- clearer memory write and retention policies for longer-running sessions
 
 ---
 
@@ -217,15 +221,20 @@ Not complete.
 Expand capability surface carefully.
 
 ### Status
-Mostly future work.
+Partially landed; most scope is still future work.
 
-### Possible scope
+### Already landed
+
+- `system_info` (read-only local machine info: OS, hostname, date/time, locale)
+- notes tool family (`create_note`, `read_note`, `list_notes`, `update_note` in `data/notes/`)
+- `write_text_file` (permissioned writes inside allowed roots; relative paths go to `data/files/`)
+
+### Remaining scope
 
 - browser automation
-- note creation
 - draft generation
 - code and project tools
-- local system actions
+- deeper local system actions
 - stronger permission boundaries
 - possible skill packages
 

@@ -21,9 +21,11 @@ Today Unclaw ships as:
 - local SQLite persistence plus local JSONL and SQLite tracing
 - a bounded native tool loop on profiles configured for native tool calling
 
-Important current limit:
+Current profile posture:
 
-- the shipped `deep` profile uses `tool_mode: native`, while the default `main` profile still uses `tool_mode: json_plan`
+- `main` (default) and `deep` use `tool_mode: native` — agent loop is active by default
+- `fast` and `codex` use `tool_mode: json_plan`
+- all profiles now set explicit `num_ctx` (4096 or 8192)
 
 ---
 
@@ -81,8 +83,13 @@ Current built-in tools include:
 
 - `search_web`
 - `fetch_url_text`
-- `read_text_file`
+- `read_text_file` (`.txt`, `.md`, `.json`, `.csv` only; binary formats not supported in V1)
 - `list_directory`
+- `write_text_file` (permissioned; fails on existing files unless `overwrite=true`; relative paths go to `data/files/`)
+- `system_info` (read-only local machine snapshot)
+- `create_note`, `read_note`, `list_notes`, `update_note` (notes in `data/notes/`)
+- `inspect_session_history` (exact recall of persisted session messages)
+- `remember_long_term_memory`, `search_long_term_memory`, `list_long_term_memory`, `forget_long_term_memory`
 
 Tools return data. The runtime owns final answer composition.
 
@@ -92,19 +99,19 @@ The local persistence layer is SQLite plus flat files under `data/`.
 
 Current persisted state includes:
 
-- sessions
-- messages
-- runtime events
+- sessions and messages in `data/memory/app.db` (SQLite)
+- runtime events in the same SQLite database and JSONL traces in `data/logs/runtime.log`
 - deterministic session summaries stored in the session record
-- JSONL runtime traces in `data/logs/runtime.log` when file logging is enabled
+- per-session JSONL chat mirrors under `data/memory/chats/` (thread-safe history access)
+- long-term cross-session memory in `data/memory/long_term.db` (SQLite)
 
-Memory today is intentionally small in scope:
+Memory layers today:
 
-- recent conversation history
-- one deterministic session summary
-- retained grounded facts and uncertainties extracted from prior search tool results
+- **Session layer**: recent conversation history (up to 20 messages) plus one deterministic session summary (no LLM call; extracts last few intents, grounded facts, uncertainties, and snippets)
+- **Chat mirror**: append-only JSONL per session for `inspect_session_history` tool access from any thread
+- **Long-term layer**: explicit cross-session facts and preferences in `long_term.db`; not injected automatically; the model retrieves via recall tools on explicit user request
 
-This is not yet the richer memory direction described in [docs/vision.md](vision.md) and [docs/roadmap.md](roadmap.md).
+The long-term memory layer is intentionally conservative: the model stores only when the user explicitly asks, and retrieves only when the user asks.
 
 ---
 
@@ -150,8 +157,9 @@ It currently:
 
 The shipped onboarding recommendations currently match the repo defaults:
 
-- `main` stays conservative
-- `deep` is the shipped native-tool profile
+- `main` is the default profile and uses native tool calling
+- `deep` is the heavier-model native-tool profile, recommended for complex or multi-step tasks
+- `fast` and `codex` remain `json_plan`
 
 ---
 

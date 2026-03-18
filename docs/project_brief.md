@@ -25,11 +25,12 @@ Unclaw currently ships as a local-first assistant/runtime with:
 - and a bounded native tool loop on compatible profiles.
 
 Current reality contributors must keep in mind:
-- the shipped `deep` profile is native-tool capable,
-- the default `main` profile remains conservative (`tool_mode: json_plan`),
+- the `main` (default) and `deep` profiles are both native-tool capable with explicit `num_ctx`,
+- the `fast` and `codex` profiles remain `tool_mode: json_plan` and do not activate the agent loop,
 - grounded search is the most integrated model-driven tool path today,
 - `/read`, `/ls`, and `/fetch` are still mainly slash-command-driven in normal use,
-- and the product is not yet a broadly autonomous default experience.
+- local tools (system_info, notes, write_text_file, LTM memory) are now shipped but the agent loop's reliability scales with model size,
+- and the product is still moving toward a more broadly autonomous default experience — the foundation is in place but task complexity limits remain for small models.
 
 Assume technical users on consumer hardware and keep claims honest about those current limits.
 
