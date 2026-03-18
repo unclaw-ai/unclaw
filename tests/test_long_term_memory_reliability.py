@@ -39,7 +39,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from unclaw.memory.long_term_store import LongTermStore, _extract_search_tokens
+from unclaw.memory.long_term_store import (
+    LongTermStore,
+    _extract_search_tokens,
+    _fold_for_search,
+)
 from unclaw.tools.contracts import ToolCall
 from unclaw.tools.long_term_memory_tools import (
     FORGET_LONG_TERM_MEMORY_DEFINITION,
@@ -459,3 +463,369 @@ class TestNegativeCases:
         assert "souviens" not in src
         assert "remember" not in src
         assert "enregistre" not in src
+
+
+# ---------------------------------------------------------------------------
+# V2.A: French recall — category fallback and normalized accent search
+# ---------------------------------------------------------------------------
+
+class TestV2FrenchRecall:
+    """French recall robustness: category fallback + accent normalization."""
+
+    def test_category_fallback_when_french_query_misses_lexically(
+        self, tmp_path: Path
+    ) -> None:
+        """query='prénom' misses stored key='user name' lexically but category='identity'
+        fallback returns the record."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(key="user name", value="Vincent", category="identity")
+        # 'prénom' doesn't appear in key/value/tags/category → passes 1-3 miss
+        # → Pass 4 category fallback returns all 'identity' records
+        results = store.search(query="prénom", category="identity")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_category_fallback_triggered_by_nom_query(
+        self, tmp_path: Path
+    ) -> None:
+        """'nom' doesn't appear in key='user name' via LIKE (partial substring) but
+        token 'nom' (3 chars) does appear as a substring — verifies Pass 2 works."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(key="user name", value="Vincent", category="identity")
+        # 'nom' is a 3-char substring of 'user name'? No — 'name' contains 'nam',
+        # but 'nom' as a LIKE '%nom%' doesn't match 'name'. Fallback should apply.
+        results = store.search(query="nom", category="identity")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_normalized_search_finds_tag_with_accent(self, tmp_path: Path) -> None:
+        """query='prenom' (no accent) finds record with tags='nom,prénom' via Pass 3."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(
+            key="user name",
+            value="Vincent",
+            category="identity",
+            tags="nom,prénom",
+        )
+        # SQLite LIKE '%prenom%' won't match 'prénom' (accent-sensitive)
+        # Pass 3 normalized: fold('prénom')='prenom' → matches fold query 'prenom'
+        results = store.search(query="prenom")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_normalized_query_with_accent_finds_unaccented_stored_tag(
+        self, tmp_path: Path
+    ) -> None:
+        """query='prénom' finds record with tags='nom,prenom' (no accent) via Pass 3."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(
+            key="user name",
+            value="Vincent",
+            category="identity",
+            tags="nom,prenom",
+        )
+        results = store.search(query="prénom")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_fold_for_search_strips_accents(self) -> None:
+        """_fold_for_search correctly normalizes accented characters."""
+        assert _fold_for_search("prénom") == "prenom"
+        assert _fold_for_search("PRÉNOM") == "prenom"
+        assert _fold_for_search("matériel") == "materiel"
+        assert _fold_for_search("Ñoño") == "nono"
+        assert _fold_for_search("résumé") == "resume"
+
+    def test_fold_for_search_preserves_ascii(self) -> None:
+        """_fold_for_search doesn't corrupt ASCII strings."""
+        assert _fold_for_search("Vincent") == "vincent"
+        assert _fold_for_search("RTX 4080") == "rtx 4080"
+        assert _fold_for_search("GPU") == "gpu"
+
+    def test_english_name_query_recalls_french_stored_identity(
+        self, tmp_path: Path
+    ) -> None:
+        """query='name' (English semantic) reliably recalls French-stored 'user name'."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(key="user name", value="Vincent", category="identity")
+        # English semantic query as guided by tool description
+        results = store.search(query="name")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_no_category_fallback_without_category_arg(self, tmp_path: Path) -> None:
+        """Category fallback does NOT fire when category is not specified.
+        'zzznomatch' with no category returns empty — no false positives."""
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(key="user name", value="Vincent", category="identity")
+        # No category arg → Pass 4 does not trigger
+        results = store.search(query="zzznomatch")
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# V2.B: Explicit fact correction / upsert flow
+# ---------------------------------------------------------------------------
+
+class TestV2CorrectionFlow:
+    """Explicit corrections are persisted as in-place updates, not duplicates."""
+
+    def test_upsert_creates_new_when_key_category_absent(
+        self, tmp_path: Path
+    ) -> None:
+        store = LongTermStore(tmp_path / "lt.db")
+        mem_id, created = store.upsert(
+            key="user name", value="Alice", category="identity"
+        )
+        assert created is True
+        results = store.search(query="name")
+        assert len(results) == 1
+        assert results[0].value == "Alice"
+        assert results[0].id == mem_id
+
+    def test_upsert_updates_when_same_key_and_category(self, tmp_path: Path) -> None:
+        store = LongTermStore(tmp_path / "lt.db")
+        mem_id_first, _ = store.upsert(
+            key="user name", value="Alice", category="identity"
+        )
+        mem_id_second, created = store.upsert(
+            key="user name", value="Vincent", category="identity"
+        )
+        assert created is False
+        assert mem_id_second == mem_id_first  # same row updated
+        results = store.search(query="name")
+        assert len(results) == 1
+        assert results[0].value == "Vincent"
+
+    def test_upsert_no_stale_duplicate_after_correction(
+        self, tmp_path: Path
+    ) -> None:
+        store = LongTermStore(tmp_path / "lt.db")
+        store.upsert(key="user name", value="je m'appelle Vincent", category="identity")
+        store.upsert(key="user name", value="Vincent", category="identity")
+        all_records = store.list_all(category="identity")
+        assert len(all_records) == 1
+        assert all_records[0].value == "Vincent"
+        assert "appelle" not in all_records[0].value
+
+    def test_remember_tool_upsert_on_correction(self, tmp_path: Path) -> None:
+        """remember_long_term_memory called twice with same key+category → one record."""
+        _store, registry = _make_registry(tmp_path)
+        _dispatch(
+            registry,
+            REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
+            key="user name",
+            value="Alice",
+            category="identity",
+        )
+        result = _dispatch(
+            registry,
+            REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
+            key="user name",
+            value="Vincent",
+            category="identity",
+        )
+        assert result.success  # type: ignore[union-attr]
+        assert "Memory updated" in result.output_text  # type: ignore[union-attr]
+        assert "Vincent" in result.output_text  # type: ignore[union-attr]
+
+    def test_search_after_correction_returns_only_latest(
+        self, tmp_path: Path
+    ) -> None:
+        """After correction, search returns corrected value; stale value is absent."""
+        _store, registry = _make_registry(tmp_path)
+        _dispatch(
+            registry,
+            REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
+            key="user name",
+            value="Alice",
+            category="identity",
+        )
+        _dispatch(
+            registry,
+            REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
+            key="user name",
+            value="Vincent",
+            category="identity",
+        )
+        result = _dispatch(
+            registry,
+            SEARCH_LONG_TERM_MEMORY_DEFINITION.name,
+            query="name",
+        )
+        assert result.success  # type: ignore[union-attr]
+        assert "Vincent" in result.output_text  # type: ignore[union-attr]
+        assert "Alice" not in result.output_text  # type: ignore[union-attr]
+
+    def test_upsert_key_only_no_category(self, tmp_path: Path) -> None:
+        """upsert with no category matches on key alone."""
+        store = LongTermStore(tmp_path / "lt.db")
+        mem_id, created = store.upsert(key="main GPU", value="RTX 4080")
+        assert created is True
+        mem_id2, created2 = store.upsert(key="main GPU", value="RTX 4090")
+        assert created2 is False
+        assert mem_id2 == mem_id
+        results = store.search(query="GPU")
+        assert len(results) == 1
+        assert results[0].value == "RTX 4090"
+
+    def test_hardware_correction_cross_session(self, tmp_path: Path) -> None:
+        """Correction in session A is visible in session B via new store instance."""
+        db = tmp_path / "memory" / "long_term.db"
+        store_a = LongTermStore(db)
+        store_a.upsert(key="main GPU", value="RTX 4080", category="hardware")
+        store_a.upsert(key="main GPU", value="RTX 4090", category="hardware")
+
+        store_b = LongTermStore(db)
+        results = store_b.search(query="GPU")
+        assert len(results) == 1
+        assert results[0].value == "RTX 4090"
+
+
+# ---------------------------------------------------------------------------
+# V2.C: Hardware stored-vs-current-system tool-choice guidance
+# ---------------------------------------------------------------------------
+
+class TestV2HardwareToolChoice:
+    """Tool and context descriptions must guide model toward LTM for recalled hardware."""
+
+    def test_search_description_mentions_remembered_vs_current_distinction(
+        self,
+    ) -> None:
+        desc = SEARCH_LONG_TERM_MEMORY_DEFINITION.description
+        # Must tell model to prefer LTM for remembered hardware, system_info for current
+        assert "system_info" in desc
+        assert "remember" in desc.lower() or "stored" in desc.lower()
+
+    def test_search_description_includes_french_hardware_example(self) -> None:
+        desc = SEARCH_LONG_TERM_MEMORY_DEFINITION.description
+        assert "matériel" in desc or "setup" in desc.lower()
+
+    def test_remember_description_mentions_correction_examples(self) -> None:
+        desc = REMEMBER_LONG_TERM_MEMORY_DEFINITION.description
+        assert "correction" in desc.lower() or "actually" in desc.lower()
+
+    def test_remember_description_explains_upsert_behavior(self) -> None:
+        desc = REMEMBER_LONG_TERM_MEMORY_DEFINITION.description
+        assert "updated" in desc.lower() or "update" in desc.lower()
+
+    def test_capability_context_includes_stored_vs_current_distinction(
+        self, make_temp_project
+    ) -> None:
+        from unclaw.core.capabilities import (
+            build_runtime_capability_context,
+            build_runtime_capability_summary,
+        )
+        from unclaw.core.executor import create_default_tool_registry
+        from unclaw.settings import load_settings
+
+        project_root = make_temp_project()
+        settings = load_settings(project_root=project_root)
+        registry = create_default_tool_registry(settings)
+        summary = build_runtime_capability_summary(
+            tool_registry=registry,
+            memory_summary_available=False,
+            model_can_call_tools=True,
+        )
+        ctx = build_runtime_capability_context(summary)
+        # Must distinguish stored recall from current machine state
+        assert "system_info" in ctx
+        assert "current" in ctx.lower()
+        assert "remember" in ctx.lower() or "stored" in ctx.lower()
+
+    def test_capability_context_includes_correction_guidance(
+        self, make_temp_project
+    ) -> None:
+        from unclaw.core.capabilities import (
+            build_runtime_capability_context,
+            build_runtime_capability_summary,
+        )
+        from unclaw.core.executor import create_default_tool_registry
+        from unclaw.settings import load_settings
+
+        project_root = make_temp_project()
+        settings = load_settings(project_root=project_root)
+        registry = create_default_tool_registry(settings)
+        summary = build_runtime_capability_summary(
+            tool_registry=registry,
+            memory_summary_available=False,
+            model_can_call_tools=True,
+        )
+        ctx = build_runtime_capability_context(summary)
+        # Must mention corrections
+        assert "correction" in ctx.lower() or "corrects" in ctx.lower()
+
+
+# ---------------------------------------------------------------------------
+# V2.D: Negative cases — no deterministic shortcut added by V2
+# ---------------------------------------------------------------------------
+
+class TestV2NoDeterministicShortcut:
+    """V2 changes must not introduce deterministic routing or keyword tables."""
+
+    def test_no_keyword_table_in_long_term_store_v2(self) -> None:
+        """long_term_store.py must not contain hardcoded language keyword lists."""
+        import unclaw.memory.long_term_store as ltm_module
+
+        src = Path(ltm_module.__file__).read_text(encoding="utf-8")
+        # _fold_for_search is allowed (normalization helper, not a keyword table)
+        assert "_fold_for_search" in src
+        # No hardcoded multilingual dispatch trigger lists (routing keywords)
+        assert "souviens" not in src
+        assert "remember" not in src
+        assert "enregistre" not in src
+        # No hardcoded per-language synonym dict (e.g. {"prénom": "name"})
+        # Note: 'prénom' may appear in docstring examples — that is acceptable.
+        # What is NOT allowed is a DICT or LIST mapping French → English keywords.
+        assert '{"prénom"' not in src
+        assert '["prénom"' not in src
+        assert '"prénom": "name"' not in src
+
+    def test_no_deterministic_recall_shortcut_in_runtime_v2(self) -> None:
+        """runtime.py must not expose any deterministic memory recall shortcut."""
+        import unclaw.core.runtime as runtime_module
+
+        assert not hasattr(runtime_module, "_try_exact_recall_shortcut")
+        assert not hasattr(runtime_module, "_try_memory_recall_shortcut")
+        assert not hasattr(runtime_module, "_force_long_term_recall")
+
+    def test_no_keyword_table_in_long_term_memory_tools(self) -> None:
+        """long_term_memory_tools.py must not route on French/English keywords."""
+        import unclaw.tools.long_term_memory_tools as tools_module
+
+        src = Path(tools_module.__file__).read_text(encoding="utf-8")
+        # Handler functions must not contain per-language dispatch logic.
+        # 'souviens' is forbidden in handler bodies (routing table).
+        # Note: 'souviens' in a tool *description string* is acceptable guidance,
+        # but must not appear as a condition in handler code.
+        # The test confirms no hardcoded language routing dict exists.
+        assert '{"souviens"' not in src
+        assert '"souviens": ' not in src
+        assert '["souviens"' not in src
+        # No hardcoded synonym map dict
+        assert '"prénom": "name"' not in src
+        assert '{"prénom"' not in src
+
+    def test_category_fallback_does_not_fire_without_category(
+        self, tmp_path: Path
+    ) -> None:
+        """Fallback is strictly gated on category being provided — not a free wildcard."""
+        store = LongTermStore(tmp_path / "lt.db")
+        for i in range(5):
+            store.upsert(
+                key=f"identity fact {i}",
+                value=f"value {i}",
+                category="identity",
+            )
+        # Query misses everything, no category provided → no fallback → empty
+        results = store.search(query="zzznomatch")
+        assert results == []
+
+    def test_store_method_still_inserts_duplicates(self, tmp_path: Path) -> None:
+        """store() (not upsert) still inserts new records — backward compatibility."""
+        store = LongTermStore(tmp_path / "lt.db")
+        id1 = store.store(key="user name", value="Alice", category="identity")
+        id2 = store.store(key="user name", value="Vincent", category="identity")
+        assert id1 != id2
+        all_records = store.list_all(category="identity")
+        assert len(all_records) == 2

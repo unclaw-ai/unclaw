@@ -46,21 +46,28 @@ _DEFAULT_SEARCH_LIMIT = 20
 REMEMBER_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
     name="remember_long_term_memory",
     description=(
-        "Store a persistent fact or preference that must survive across sessions. "
-        "Call this tool when the user explicitly requests storage of a stable personal "
-        "fact, hardware detail, identity information, or preference — regardless of "
-        "the language used. "
+        "Store or update a persistent fact or preference that must survive across "
+        "sessions. Call this tool when the user explicitly requests storage of a "
+        "stable personal fact, hardware detail, identity information, or preference "
+        "— regardless of the language used. "
         "Positive examples (any phrasing that means 'store this for later'): "
         "'remember that my GPU is an RTX 4080', "
         "'souviens-toi que je m'appelle Vincent', "
         "'enregistre que ma langue préférée est le français', "
         "'remember my name is Alice', "
         "'keep in mind that I prefer dark mode'. "
+        "Also call this tool for corrections: "
+        "'my name is actually Vincent' (not just Alice), "
+        "'correction: my first name is only Vincent', "
+        "'my main GPU is actually an RTX 4090 now'. "
+        "For corrections, use the same key and category as the original fact — "
+        "the existing record will be updated in-place, not duplicated. "
         "Negative examples (do NOT store): general chat, questions, fetched URLs, "
         "web search results, or facts not explicitly flagged for long-term retention. "
         "key is a short semantic title (e.g. 'user name', 'main GPU', "
         "'preferred language'); value is the full content to remember. "
-        "category (e.g. 'identity', 'hardware', 'preference') and tags are optional."
+        "category (e.g. 'identity', 'hardware', 'preference') and tags are optional "
+        "but strongly recommended — they improve later retrieval."
     ),
     permission_level=ToolPermissionLevel.LOCAL_WRITE,
     arguments={
@@ -100,12 +107,20 @@ SEARCH_LONG_TERM_MEMORY_DEFINITION = ToolDefinition(
         "'do you know my name?', "
         "'que sais-tu de mon setup?', "
         "'je m'appelle comment?', "
+        "'mon prénom ?', "
         "'what GPU do I have?', "
-        "'what personal info do you have about me?'. "
-        "Pass a concise semantic query term, not verbatim user phrasing. Examples: "
+        "'what personal info do you have about me?', "
+        "'sur mon matériel informatique, tu as quoi ?'. "
+        "Pass a concise semantic English query term, not verbatim user phrasing. "
+        "Examples: "
         "for 'je m'appelle comment?' pass query='name'; "
-        "for 'what do you remember about my hardware?' pass query='GPU' or "
-        "query='hardware'; for 'do you know my name?' pass query='name'. "
+        "for 'mon prénom ?' pass query='name' with category='identity'; "
+        "for 'what do you remember about my hardware?' pass query='hardware' with "
+        "category='hardware'; for 'do you know my name?' pass query='name'. "
+        "IMPORTANT: use this tool (not system_info) when the user asks what you "
+        "*remember* or *know* about their hardware, setup, or identity. "
+        "Use system_info only when the user asks about the *current* machine state "
+        "(OS version, CPU usage, running processes). "
         "Searches across key, value, tags, and category fields. "
         "Do NOT use this tool for questions about the current session's message "
         "history or message order — use inspect_session_history for that."
@@ -221,17 +236,20 @@ def _make_remember_handler(store: LongTermStore) -> ToolHandler:
         category = str(call.arguments.get("category", "")).strip()
         tags = str(call.arguments.get("tags", "")).strip()
         source_session_id = str(call.arguments.get("source_session_id", "")).strip()
-        mem_id = store.store(
+        # upsert: if same (category, key) exists, update it — prevents stale
+        # duplicate records after user corrections ('my name is actually X').
+        mem_id, created = store.upsert(
             key=key,
             value=value,
             category=category,
             tags=tags,
             source_session_id=source_session_id,
         )
+        action = "Memory stored" if created else "Memory updated"
         return ToolResult.ok(
             tool_name=REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
             output_text=(
-                f"Memory stored.\n"
+                f"{action}.\n"
                 f"id: {mem_id}\n"
                 f"key: {key}\n"
                 f"value: {value}"

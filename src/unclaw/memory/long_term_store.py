@@ -35,6 +35,7 @@ import json
 import re
 import sqlite3
 import threading
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,6 +48,19 @@ def _utc_now() -> str:
 
 _TOKEN_SPLIT_RE = re.compile(r"[\s\W]+")
 _MIN_TOKEN_LEN = 3
+
+
+def _fold_for_search(text: str) -> str:
+    """Casefold and strip Unicode combining characters (accent folding).
+
+    Language-agnostic: uses NFD decomposition to detach diacritics, then
+    drops all Unicode category Mn (Non-spacing Mark) code points.
+    Examples: 'prénom' → 'prenom', 'Ñoño' → 'nono'.
+    Purpose: allow normalized token matching across accent variants without
+    any language-specific synonym table.
+    """
+    nfd = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in nfd if unicodedata.category(ch) != "Mn").casefold()
 
 
 def _extract_search_tokens(query: str) -> list[str]:
@@ -160,6 +174,97 @@ class LongTermStore:
                 conn.close()
         return mem_id
 
+    def upsert(
+        self,
+        *,
+        key: str,
+        value: str,
+        category: str = "",
+        tags: str = "",
+        source_session_id: str = "",
+        source_seq: int = 0,
+        confidence: float = 1.0,
+    ) -> tuple[str, bool]:
+        """Insert or update a memory record matched by (category, key).
+
+        If a record with the same (category, key) already exists, its value,
+        tags, updated_at, source_session_id, and source_seq are updated and
+        no duplicate is created. If multiple matches exist the most-recently-
+        updated one is updated; stale duplicates are left unchanged.
+
+        If no match exists a new record is inserted (same as store()).
+
+        Returns (id, created) where created=True means a new row was inserted,
+        False means an existing row was updated.
+
+        Use this method (not store()) for stable facts that may be corrected:
+        name, GPU, preferences. This prevents stale duplicates from surviving
+        after a user correction.
+        """
+        with self._write_lock:
+            conn = self._open()
+            try:
+                if category:
+                    row = conn.execute(
+                        """
+                        SELECT id FROM long_term_memories
+                        WHERE category = ? AND key = ?
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (category, key),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT id FROM long_term_memories
+                        WHERE key = ?
+                        ORDER BY updated_at DESC
+                        LIMIT 1
+                        """,
+                        (key,),
+                    ).fetchone()
+                now = _utc_now()
+                if row:
+                    mem_id = str(row["id"])
+                    conn.execute(
+                        """
+                        UPDATE long_term_memories
+                        SET value = ?, tags = ?, updated_at = ?,
+                            source_session_id = ?, source_seq = ?
+                        WHERE id = ?
+                        """,
+                        (value, tags, now, source_session_id, source_seq, mem_id),
+                    )
+                    conn.commit()
+                    return mem_id, False
+                else:
+                    mem_id = str(uuid4())
+                    conn.execute(
+                        """
+                        INSERT INTO long_term_memories
+                            (id, key, value, category, tags, source_session_id,
+                             source_seq, confidence, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            mem_id,
+                            key,
+                            value,
+                            category,
+                            tags,
+                            source_session_id,
+                            source_seq,
+                            confidence,
+                            now,
+                            now,
+                        ),
+                    )
+                    conn.commit()
+                    return mem_id, True
+            finally:
+                conn.close()
+
     def forget(self, mem_id: str) -> bool:
         """Delete a memory by id. Returns True if deleted, False if not found."""
         with self._write_lock:
@@ -187,11 +292,18 @@ class LongTermStore:
     ) -> list[LongTermMemoryRecord]:
         """Return memories matching query across key, value, tags, and category.
 
-        Two-pass strategy:
+        Four-pass strategy (each pass only runs if under the limit):
         1. Full-phrase LIKE match on key, value, tags, and category fields.
         2. Per-token LIKE match using individual words extracted from the query
            (words >= 3 chars, language-agnostic, no stop-word list).
-        Results from both passes are merged and de-duplicated, newest-first.
+        3. Normalized (accent-folded, casefolded) token match in Python.
+           Handles accent variants: stored 'prénom' found by query 'prenom'.
+        4. Category fallback: if category is specified and results are still
+           empty after passes 1-3, return the most-recent records in that
+           category. Ensures any identity/hardware/etc. category always
+           returns *something* when the user's query word doesn't lexically
+           match the stored key/value/tags.
+        Results across passes are de-duplicated, newest-first.
         Optionally restrict to an exact category value.
         """
         tokens = _extract_search_tokens(query)
@@ -218,6 +330,43 @@ class LongTermStore:
                         if record.id not in seen_ids:
                             seen_ids.add(record.id)
                             results.append(record)
+
+            # Pass 3: normalized (accent-folded) Python-level token match.
+            # Handles cases like stored tag 'prénom' matched by query 'prenom'.
+            if len(results) < limit:
+                norm_tokens = [
+                    t
+                    for t in _TOKEN_SPLIT_RE.split(_fold_for_search(query))
+                    if len(t) >= _MIN_TOKEN_LEN
+                ]
+                if norm_tokens:
+                    candidates = self._load_candidates(conn, category, limit * 5)
+                    for row in candidates:
+                        if len(results) >= limit:
+                            break
+                        record = _row_to_record(row)
+                        if record.id in seen_ids:
+                            continue
+                        norm_text = _fold_for_search(
+                            f"{record.key} {record.value} {record.tags} {record.category}"
+                        )
+                        if any(nt in norm_text for nt in norm_tokens):
+                            seen_ids.add(record.id)
+                            results.append(record)
+
+            # Pass 4: category fallback — when a category is specified but the
+            # query returned nothing at all after passes 1-3, return the most-
+            # recent records in that category. This is the safety net for
+            # complete lexical mismatches (e.g. French 'prénom' against
+            # English-keyed identity records with no accent tag).
+            if category and not results:
+                for row in self._query_rows(conn, "%", category, limit):
+                    record = _row_to_record(row)
+                    if record.id not in seen_ids:
+                        seen_ids.add(record.id)
+                        results.append(record)
+                        if len(results) >= limit:
+                            break
 
         finally:
             conn.close()
@@ -254,6 +403,41 @@ class LongTermStore:
             LIMIT ?
             """,
             (pattern, pattern, pattern, pattern, limit),
+        ).fetchall()
+
+    def _load_candidates(
+        self,
+        conn: sqlite3.Connection,
+        category: str,
+        limit: int,
+    ) -> list[sqlite3.Row]:
+        """Load up to limit recent records for Python-level matching (Pass 3).
+
+        Scoped to category when given; otherwise loads globally.
+        Used only for normalized (accent-folded) search — limit * 5 cap in caller
+        keeps this bounded for a personal memory store.
+        """
+        if category:
+            return conn.execute(
+                """
+                SELECT id, key, value, category, tags, source_session_id,
+                       source_seq, confidence, created_at, updated_at
+                FROM long_term_memories
+                WHERE category = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (category, limit),
+            ).fetchall()
+        return conn.execute(
+            """
+            SELECT id, key, value, category, tags, source_session_id,
+                   source_seq, confidence, created_at, updated_at
+            FROM long_term_memories
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
         ).fetchall()
 
     def list_all(
@@ -367,4 +551,9 @@ def _row_to_record(row: sqlite3.Row) -> LongTermMemoryRecord:
     )
 
 
-__all__ = ["LongTermMemoryRecord", "LongTermStore", "_extract_search_tokens"]
+__all__ = [
+    "LongTermMemoryRecord",
+    "LongTermStore",
+    "_extract_search_tokens",
+    "_fold_for_search",
+]
