@@ -5373,3 +5373,311 @@ def test_agent_loop_write_text_file_overwrite_refusal_short_circuits(
         )
     finally:
         session_manager.close()
+
+
+# ---------------------------------------------------------------------------
+# Stale / cross-turn source contamination fix
+# ---------------------------------------------------------------------------
+
+_CHARLEMAGNE_TOOL_HISTORY = (
+    "Tool: search_web\n"
+    "Outcome: success\n"
+    "\n"
+    "Search request: Charlemagne biography\n"
+    "Grounding date: 2026-03-18\n"
+    "\n"
+    "Grounding rules:\n"
+    "- Treat Supported facts as the evidence-backed facts for this search.\n"
+    "- If a detail appears only under Uncertain details, it is not confirmed.\n"
+    "- Do not invent relative dates. Give age only if it can be computed "
+    "from a retrieved birth date and the grounding date above.\n"
+    "\n"
+    "Supported facts:\n"
+    "- [supported; 2 sources] Charlemagne was King of the Franks.\n"
+    "\n"
+    "Sources:\n"
+    "- Charlemagne Encyclopaedia: https://charlemagne.example.com/bio\n"
+    "- Medieval History Archive: https://medieval.example.com/franks"
+)
+
+
+def _build_charlemagne_search_tool_result() -> ToolResult:
+    return ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: Charlemagne biography\n",
+        payload={
+            "query": "Charlemagne biography",
+            "summary_points": ["Charlemagne was King of the Franks."],
+            "display_sources": [
+                {
+                    "title": "Charlemagne Encyclopaedia",
+                    "url": "https://charlemagne.example.com/bio",
+                },
+                {
+                    "title": "Medieval History Archive",
+                    "url": "https://medieval.example.com/franks",
+                },
+            ],
+        },
+    )
+
+
+def _build_france_search_tool_result() -> ToolResult:
+    return ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: France key numeric facts\n",
+        payload={
+            "query": "France key numeric facts",
+            "summary_points": [
+                "France has a population of approximately 68 million.",
+                "France GDP is around 2.7 trillion USD.",
+            ],
+            "display_sources": [
+                {
+                    "title": "France Statistics",
+                    "url": "https://stats.france.example.com/overview",
+                },
+                {
+                    "title": "World Bank France",
+                    "url": "https://worldbank.example.com/france",
+                },
+            ],
+        },
+    )
+
+
+def test_second_grounded_turn_does_not_inherit_sources_from_first_json_plan(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """A second WEB_SEARCH turn must display only its own sources.
+
+    Reproduction of the stale-source contamination bug:
+    - Turn 1 (pre-populated): Charlemagne search → charlemagne.example.com sources
+    - Turn 2: France key facts search → france sources expected
+
+    After the fix, Turn 2 reply must NOT contain charlemagne.example.com and
+    MUST contain the France sources from the Turn 2 search.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    # json_plan is the default; keep it explicit so the test intent is clear.
+    assert settings.models["main"].tool_mode != "native" or True  # both paths valid
+    # Force json_plan to test the explicit pre-execution path.
+    settings.models["main"] = settings.models["main"].__class__(
+        name=settings.models["main"].name,
+        provider=settings.models["main"].provider,
+        model_name=settings.models["main"].model_name,
+        temperature=settings.models["main"].temperature,
+        thinking_supported=settings.models["main"].thinking_supported,
+        tool_mode="json_plan",
+        num_ctx=settings.models["main"].num_ctx,
+        keep_alive=settings.models["main"].keep_alive,
+    )
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    # Pre-populate session to simulate Turn 1 having already run.
+    france_tool_result = _build_france_search_tool_result()
+    tool_registry = ToolRegistry()
+    tool_registry.register(SEARCH_WEB_DEFINITION, lambda _call: france_tool_result)
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None,  # type: ignore[no-untyped-def]
+                 thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, tools
+            first_message = messages[0]
+            if (
+                first_message.role is LLMRole.SYSTEM
+                and "Return JSON only with keys route and search_query"
+                in first_message.content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content='{"route":"web_search","search_query":"France key numeric facts"}',
+                    created_at="2026-03-18T10:00:00Z",
+                    finish_reason="stop",
+                )
+            if content_callback is not None:
+                content_callback("France has a population of approximately 68 million.")
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="France has a population of approximately 68 million.",
+                created_at="2026-03-18T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        # Simulate Turn 1 result already in session history.
+        session_manager.add_message(
+            MessageRole.USER,
+            "Tell me about Charlemagne.",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.TOOL,
+            _CHARLEMAGNE_TOOL_HISTORY,
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            "Charlemagne was King of the Franks.\n\nSources:\n"
+            "- Charlemagne Encyclopaedia: https://charlemagne.example.com/bio",
+            session_id=session.id,
+        )
+
+        # Turn 2: new France query.
+        france_input = "What are the current key numeric facts about France?"
+        session_manager.add_message(
+            MessageRole.USER,
+            france_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=france_input,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        # The Turn 2 reply must carry Turn 2 sources only.
+        assert "stats.france.example.com" in reply
+        assert "worldbank.example.com" in reply
+        # Stale Turn 1 sources must NOT appear.
+        assert "charlemagne.example.com" not in reply
+        assert "medieval.example.com" not in reply
+    finally:
+        session_manager.close()
+
+
+def test_second_grounded_turn_no_new_search_produces_no_stale_sources_native(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Native-mode WEB_SEARCH turn where model does not call search_web must not
+    inherit sources from an older search turn.
+
+    Scenario:
+    - Turn 1 (pre-populated): Charlemagne search → charlemagne.example.com sources
+    - Turn 2: router says WEB_SEARCH but model replies directly (no search_web call)
+    - Expected: reply is the raw model text with NO sources appended at all.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None,  # type: ignore[no-untyped-def]
+                 thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, tools
+            first_message = messages[0]
+            if (
+                first_message.role is LLMRole.SYSTEM
+                and "Return JSON only with keys route and search_query"
+                in first_message.content
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content='{"route":"web_search","search_query":"France key numeric facts"}',
+                    created_at="2026-03-18T10:00:00Z",
+                    finish_reason="stop",
+                )
+            # Model answers directly — does NOT call search_web.
+            if content_callback is not None:
+                content_callback("France has about 68 million people.")
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="France has about 68 million people.",
+                created_at="2026-03-18T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        # Simulate Turn 1 result already in session history.
+        session_manager.add_message(
+            MessageRole.USER,
+            "Tell me about Charlemagne.",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.TOOL,
+            _CHARLEMAGNE_TOOL_HISTORY,
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            "Charlemagne was King of the Franks.\n\nSources:\n"
+            "- Charlemagne Encyclopaedia: https://charlemagne.example.com/bio",
+            session_id=session.id,
+        )
+
+        # Turn 2: new France query, model does NOT call search.
+        france_input = "What are the current key numeric facts about France?"
+        session_manager.add_message(
+            MessageRole.USER,
+            france_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=france_input,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        # Model's raw answer must come through unchanged.
+        assert "France has about 68 million people." in reply
+        # Stale Turn 1 sources must NOT appear.
+        assert "charlemagne.example.com" not in reply
+        assert "medieval.example.com" not in reply
+        # No Sources: block from stale grounding.
+        assert "charlemagne" not in reply.lower()
+    finally:
+        session_manager.close()

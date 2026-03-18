@@ -454,12 +454,22 @@ def _prepare_web_search_route(
         ),
     )
 
+    # Capture the session message count before any search tool executes for
+    # this turn.  The grounding transform uses this floor so it only scans
+    # messages added during the current turn, preventing stale display_sources
+    # from an earlier turn from contaminating a new grounded reply.
+    _list_messages = getattr(session_manager, "list_messages", None)
+    _turn_start_count = (
+        len(_list_messages(session_id)) if callable(_list_messages) else 0
+    )
+
     def _grounding_transform(reply: str) -> str:
         return apply_search_grounding_from_history(
             reply,
             query=search_query,
             session_manager=session_manager,
             session_id=session_id,
+            turn_start_message_count=_turn_start_count,
         )
 
     explicit_search_call: ToolCall | None = None

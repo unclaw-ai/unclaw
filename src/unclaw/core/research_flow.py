@@ -114,6 +114,13 @@ def run_search_command(
         session_id=session.id,
     )
 
+    # Capture the session message count after adding the current turn's USER
+    # message but before any search tool executes.  The grounding transform
+    # uses this floor so it only inspects messages added in this turn,
+    # preventing stale sources from an earlier turn leaking into the reply.
+    _turn_messages = session_manager.list_messages(session.id)
+    _turn_start_count = len(_turn_messages)
+
     # The grounding transform runs after the agent loop completes (tool
     # results are already persisted) but before the assistant reply is
     # stored, so it can safely inspect session history.
@@ -123,6 +130,7 @@ def run_search_command(
             query=query,
             session_manager=session_manager,
             session_id=session.id,
+            turn_start_message_count=_turn_start_count,
         )
 
     assistant_reply = run_user_turn(
@@ -279,13 +287,21 @@ def apply_search_grounding_from_history(
     query: str,
     session_manager: Any,
     session_id: str,
+    turn_start_message_count: int = 0,
 ) -> str:
     """Apply grounding rewrite and sources using tool results from session history.
 
     Called as an ``assistant_reply_transform`` after the agent loop has
     completed and tool results are already persisted.
+
+    ``turn_start_message_count`` restricts the scan to messages added during
+    the current turn only (index >= turn_start_message_count).  When zero
+    (default), all history is scanned — preserving backward-compatible
+    behaviour for callers that do not supply a turn boundary.
     """
-    grounding = _find_latest_search_grounding(session_manager, session_id)
+    grounding = _find_latest_search_grounding(
+        session_manager, session_id, after_count=turn_start_message_count
+    )
     if grounding is None:
         return reply
 
@@ -296,14 +312,20 @@ def apply_search_grounding_from_history(
 def _find_latest_search_grounding(
     session_manager: Any,
     session_id: str,
+    after_count: int = 0,
 ) -> Any:
-    """Find the most recent search grounding context from session history."""
+    """Find the most recent search grounding context from session history.
+
+    ``after_count`` limits the scan to messages at index >= after_count so
+    that stale grounding from earlier turns cannot contaminate a newer reply.
+    """
     list_messages = getattr(session_manager, "list_messages", None)
     if not callable(list_messages):
         return None
 
     messages: Sequence[ChatMessage] = list_messages(session_id)
-    for message in reversed(messages):
+    candidates = messages[after_count:] if after_count > 0 else messages
+    for message in reversed(candidates):
         if message.role is not MessageRole.TOOL:
             continue
         grounding = parse_search_tool_history(message.content)
