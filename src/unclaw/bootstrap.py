@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,7 +29,28 @@ def prepare_runtime(settings: Settings) -> None:
             "Could not prepare the Unclaw runtime directories."
         ) from exc
 
+    _migrate_session_db(settings.paths.data_dir, settings.paths.database_path)
     _apply_trace_retention(settings)
+
+
+def _migrate_session_db(data_dir: Path, db_path: Path) -> None:
+    """Adopt legacy data/app.db into the canonical location if needed.
+
+    Migration strategy (in priority order):
+    1. If the canonical db already exists → nothing to do.
+    2. If data/app.db exists → copy it to the canonical location.
+       The original is left untouched for auditability/reversal.
+    3. Otherwise → nothing; a fresh db will be created on first open.
+    """
+    if db_path.exists():
+        return
+    legacy_path = data_dir / "app.db"
+    if not legacy_path.exists():
+        return
+    try:
+        shutil.copy2(legacy_path, db_path)
+    except OSError:
+        pass  # Non-fatal: fresh db will be created on first open
 
 
 def _apply_trace_retention(settings: Settings) -> None:

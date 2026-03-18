@@ -8,7 +8,7 @@ paths:
   sessions_dir: sessions
   cache_dir: cache
   files_dir: files
-  database_file: app.db
+  database_file: memory/app.db
 logging:
   level: INFO
   mode: simple
