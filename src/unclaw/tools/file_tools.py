@@ -19,9 +19,18 @@ _DEFAULT_MAX_FILE_CHARS = 8_000
 _DEFAULT_DIRECTORY_LIMIT = 200
 _MAX_WRITE_FILE_CHARS = 1_000_000  # 1 MB upper bound on text content
 
+# V1 document read scope — only plain text-based formats are supported.
+# Binary formats (pdf, docx, xlsx, etc.) are not supported in V1.
+READABLE_EXTENSIONS: frozenset[str] = frozenset({".txt", ".md", ".json", ".csv"})
+_READABLE_EXTENSIONS_DISPLAY = ", ".join(sorted(READABLE_EXTENSIONS))
+
 READ_TEXT_FILE_DEFINITION = ToolDefinition(
     name="read_text_file",
-    description="Read a local UTF-8 text file.",
+    description=(
+        "Read a local UTF-8 text file. "
+        f"Supported formats (V1): {_READABLE_EXTENSIONS_DISPLAY}. "
+        "Other file types (pdf, docx, xlsx, etc.) are not supported in V1."
+    ),
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={
         "path": ToolArgumentSpec(description="Path to a local UTF-8 text file."),
@@ -129,6 +138,18 @@ def read_text_file(
     )
     if access_error is not None:
         return access_error
+
+    extension = path.suffix.lower()
+    if extension not in READABLE_EXTENSIONS:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"File format '{extension or '(no extension)'}' is not supported "
+                f"for reading in V1. "
+                f"Supported formats: {_READABLE_EXTENSIONS_DISPLAY}."
+            ),
+        )
+
     if not path.exists():
         return ToolResult.failure(
             tool_name=tool_name,
@@ -475,6 +496,7 @@ def _read_positive_int_argument(
 
 __all__ = [
     "LIST_DIRECTORY_DEFINITION",
+    "READABLE_EXTENSIONS",
     "READ_TEXT_FILE_DEFINITION",
     "WRITE_TEXT_FILE_DEFINITION",
     "_MAX_WRITE_FILE_CHARS",

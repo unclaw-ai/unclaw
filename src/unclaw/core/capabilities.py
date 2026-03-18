@@ -169,7 +169,11 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
 def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines: list[str] = []
     if summary.local_file_read_available:
-        lines.append("/read <path>: read local UTF-8 files inside allowed roots.")
+        lines.append(
+            "/read <path>: read local .txt, .md, .json, or .csv files inside "
+            "allowed roots. Other formats (pdf, docx, xlsx, etc.) are not "
+            "supported in V1."
+        )
     if summary.local_directory_listing_available:
         lines.append("/ls [path]: list local directories inside allowed roots.")
     if summary.url_fetch_available:
