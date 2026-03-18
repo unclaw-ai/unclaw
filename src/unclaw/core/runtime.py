@@ -258,6 +258,22 @@ def run_user_turn(
     assistant_reply: str | None = None
 
     try:
+        # -------------------------------------------------------------------
+        # Exact session-recall shortcut — deterministic pre-model path.
+        # Only triggers for clearly scoped exact history requests; returns
+        # None for everything else so normal routing is fully unchanged.
+        # See core/exact_recall.py for the complete specification.
+        # Explicitly required by the session-recall mission spec.
+        # Compliant with mandatory_rules.md rule 5 allowed exception:
+        #   scoped, documented, not the main architecture, easy to remove.
+        # -------------------------------------------------------------------
+        if assistant_reply is None:
+            assistant_reply = _try_exact_recall_shortcut(
+                session_manager=session_manager,
+                session_id=session.id,
+                user_input=user_input,
+            )
+
         memory_context_note = _build_session_memory_context_note(
             command_handler=command_handler,
             session_id=session.id,
@@ -853,6 +869,36 @@ def _finalize_runtime_tool_call(
         result=tool_result,
         tool_call=tool_call,
     )
+
+
+def _try_exact_recall_shortcut(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+) -> str | None:
+    """Return a deterministic reply for exact session-recall requests, or None.
+
+    Only triggers when user_input is a clearly scoped exact recall request
+    (first/nth prompt, count, ordered list). All other inputs return None so
+    the caller falls through to normal routing unchanged.
+
+    Reads from ChatMemoryStore (JSONL) only. Never calls the model.
+    See core/exact_recall.py for the complete list of supported intents.
+    """
+    from unclaw.core.exact_recall import build_exact_recall_reply, match_exact_recall_intent
+    from unclaw.memory.chat_store import ChatMemoryStore
+
+    chat_store = session_manager.chat_store
+    if not isinstance(chat_store, ChatMemoryStore):
+        return None
+
+    intent = match_exact_recall_intent(user_input)
+    if intent is None:
+        return None
+
+    records = chat_store.read_messages(session_id)
+    return build_exact_recall_reply(records, intent)
 
 
 def _build_model_failure_reply(error: ModelCallFailedError) -> str:
