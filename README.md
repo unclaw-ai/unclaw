@@ -123,6 +123,14 @@ Unclaw targets **Python 3.12+** and uses **Ollama** for local models.
  unclaw start
 ```
 
+Launch Unclaw from a dedicated workspace or project directory. By default,
+`security.tools.files.allowed_roots: ["."]` is resolved from the
+project/workspace root Unclaw discovers from your current working directory at
+startup. If you run Unclaw from `~/` or keep the project rooted there, `/read`,
+`/ls`, and `write_text_file` can inherit a much larger local file scope than
+intended. The safest setup is to replace `"."` with explicit allowed root paths
+in `config/app.yaml`.
+
 ---
 
 ## Main commands
