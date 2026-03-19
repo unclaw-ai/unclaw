@@ -9,6 +9,7 @@ from unclaw.tools.file_tools import (
     LIST_DIRECTORY_DEFINITION,
     MOVE_FILE_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
+    RENAME_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
 )
 from unclaw.tools.long_term_memory_tools import (
@@ -277,6 +278,13 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Default is overwrite=false — fails if the destination already exists. "
             "Only moves files, not directories."
         )
+    if RENAME_FILE_DEFINITION.name in summary.available_builtin_tool_names:
+        lines.append(
+            "rename_file <source_path> <destination_path>: rename one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only renames files, not directories."
+        )
     if COPY_FILE_DEFINITION.name in summary.available_builtin_tool_names:
         lines.append(
             "copy_file <source_path> <destination_path>: copy one local file. "
@@ -337,9 +345,11 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
 
 
 def _format_unavailable_local_file_actions(summary: RuntimeCapabilitySummary) -> str:
-    actions = ["delete", "rename"]
+    actions = ["delete"]
     if MOVE_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
         actions.insert(1, "move")
+    if RENAME_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
+        actions.append("rename")
     if COPY_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
         actions.append("copy")
 

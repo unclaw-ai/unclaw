@@ -131,6 +131,30 @@ COPY_FILE_DEFINITION = ToolDefinition(
     },
 )
 
+RENAME_FILE_DEFINITION = ToolDefinition(
+    name="rename_file",
+    description=(
+        "Rename one local file to another local path. "
+        "Relative paths are resolved inside the data/files/ directory by default. "
+        "Fails if the destination already exists unless overwrite is set to true. "
+        "Only renames files inside the configured allowed roots."
+    ),
+    permission_level=ToolPermissionLevel.LOCAL_WRITE,
+    arguments={
+        "source_path": ToolArgumentSpec(description="Path to the source file to rename."),
+        "destination_path": ToolArgumentSpec(
+            description="New local path for the renamed file."
+        ),
+        "overwrite": ToolArgumentSpec(
+            description=(
+                "Set to true to allow replacing an existing destination file. "
+                "Default: false — rename fails if the destination already exists."
+            ),
+            value_type="boolean",
+        ),
+    },
+)
+
 
 def register_file_tools(
     registry: ToolRegistry,
@@ -175,11 +199,20 @@ def register_file_tools(
             default_write_dir=default_write_dir,
         )
 
+    def rename_handler(call: ToolCall) -> ToolResult:
+        return rename_file(
+            call,
+            allowed_roots=allowed_roots,
+            default_read_dir=default_read_dir,
+            default_write_dir=default_write_dir,
+        )
+
     registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
     registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
     registry.register(WRITE_TEXT_FILE_DEFINITION, write_handler)
     registry.register(MOVE_FILE_DEFINITION, move_handler)
     registry.register(COPY_FILE_DEFINITION, copy_handler)
+    registry.register(RENAME_FILE_DEFINITION, rename_handler)
 
 
 def read_text_file(
@@ -440,104 +473,15 @@ def move_file(
     default_write_dir: Path | None = None,
 ) -> ToolResult:
     """Move one local file to another local path, bounded and permissioned."""
-    tool_name = MOVE_FILE_DEFINITION.name
-
-    try:
-        source_path_value = _read_string_argument(call.arguments, "source_path")
-        destination_path_value = _read_string_argument(call.arguments, "destination_path")
-    except ValueError as exc:
-        return ToolResult.failure(tool_name=tool_name, error=str(exc))
-
-    overwrite = call.arguments.get("overwrite", False)
-    if not isinstance(overwrite, bool):
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error="Argument 'overwrite' must be a boolean.",
-        )
-
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
-    source_path = _resolve_file_tool_path(
-        source_path_value,
-        default_dir=default_read_dir,
-        allowed_roots=normalized_allowed_roots,
-    )
-    destination_path = _resolve_file_tool_path(
-        destination_path_value,
-        default_dir=default_write_dir,
-        allowed_roots=normalized_allowed_roots,
-    )
-    source_access_error = _restrict_to_allowed_roots(
-        tool_name=tool_name,
-        path=source_path,
-        allowed_roots=normalized_allowed_roots,
-    )
-    if source_access_error is not None:
-        return source_access_error
-
-    destination_access_error = _restrict_to_allowed_roots(
-        tool_name=tool_name,
-        path=destination_path,
-        allowed_roots=normalized_allowed_roots,
-    )
-    if destination_access_error is not None:
-        return destination_access_error
-
-    if not source_path.exists():
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Source file does not exist: {source_path}",
-        )
-
-    if not source_path.is_file():
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Source path is not a file: {source_path}",
-        )
-
-    if destination_path.exists() and not overwrite:
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=(
-                f"Destination file already exists: {destination_path}. "
-                "Pass overwrite=true to replace it."
-            ),
-        )
-
-    if destination_path.exists() and not destination_path.is_file():
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Destination path exists but is not a file: {destination_path}",
-        )
-
-    try:
-        source_path.replace(destination_path)
-    except OSError as exc:
-        if exc.errno != errno.EXDEV:
-            return ToolResult.failure(
-                tool_name=tool_name,
-                error=f"Could not move file '{source_path}' to '{destination_path}': {exc}",
-            )
-        try:
-            if destination_path.exists():
-                destination_path.unlink()
-            shutil.move(str(source_path), str(destination_path))
-        except OSError as move_exc:
-            return ToolResult.failure(
-                tool_name=tool_name,
-                error=(
-                    f"Could not move file '{source_path}' to '{destination_path}': "
-                    f"{move_exc}"
-                ),
-            )
-
-    return ToolResult.ok(
-        tool_name=tool_name,
-        output_text=f"File moved: {source_path} -> {destination_path}",
-        payload={
-            "source_path": str(source_path),
-            "destination_path": str(destination_path),
-            "overwrite": overwrite,
-        },
+    return _relocate_file(
+        call,
+        tool_name=MOVE_FILE_DEFINITION.name,
+        past_tense="moved",
+        present_tense="move",
+        allowed_roots=allowed_roots,
+        default_read_dir=default_read_dir,
+        default_write_dir=default_write_dir,
+        allow_cross_device_fallback=True,
     )
 
 
@@ -629,6 +573,142 @@ def copy_file(
     return ToolResult.ok(
         tool_name=tool_name,
         output_text=f"File copied: {source_path} -> {destination_path}",
+        payload={
+            "source_path": str(source_path),
+            "destination_path": str(destination_path),
+            "overwrite": overwrite,
+        },
+    )
+
+
+def rename_file(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+    default_read_dir: Path | None = None,
+    default_write_dir: Path | None = None,
+) -> ToolResult:
+    """Rename one local file to another local path, bounded and permissioned."""
+    return _relocate_file(
+        call,
+        tool_name=RENAME_FILE_DEFINITION.name,
+        past_tense="renamed",
+        present_tense="rename",
+        allowed_roots=allowed_roots,
+        default_read_dir=default_read_dir,
+        default_write_dir=default_write_dir,
+        allow_cross_device_fallback=False,
+    )
+
+
+def _relocate_file(
+    call: ToolCall,
+    *,
+    tool_name: str,
+    past_tense: str,
+    present_tense: str,
+    allowed_roots: tuple[Path, ...] | None,
+    default_read_dir: Path | None,
+    default_write_dir: Path | None,
+    allow_cross_device_fallback: bool,
+) -> ToolResult:
+    try:
+        source_path_value = _read_string_argument(call.arguments, "source_path")
+        destination_path_value = _read_string_argument(call.arguments, "destination_path")
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+
+    overwrite = call.arguments.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'overwrite' must be a boolean.",
+        )
+
+    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    source_path = _resolve_file_tool_path(
+        source_path_value,
+        default_dir=default_read_dir,
+        allowed_roots=normalized_allowed_roots,
+    )
+    destination_path = _resolve_file_tool_path(
+        destination_path_value,
+        default_dir=default_write_dir,
+        allowed_roots=normalized_allowed_roots,
+    )
+    source_access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=source_path,
+        allowed_roots=normalized_allowed_roots,
+    )
+    if source_access_error is not None:
+        return source_access_error
+
+    destination_access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=destination_path,
+        allowed_roots=normalized_allowed_roots,
+    )
+    if destination_access_error is not None:
+        return destination_access_error
+
+    if not source_path.exists():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Source file does not exist: {source_path}",
+        )
+
+    if not source_path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Source path is not a file: {source_path}",
+        )
+
+    if destination_path.exists() and not overwrite:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"Destination file already exists: {destination_path}. "
+                "Pass overwrite=true to replace it."
+            ),
+        )
+
+    if destination_path.exists() and not destination_path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Destination path exists but is not a file: {destination_path}",
+        )
+
+    try:
+        if overwrite:
+            source_path.replace(destination_path)
+        else:
+            source_path.rename(destination_path)
+    except OSError as exc:
+        if not allow_cross_device_fallback or exc.errno != errno.EXDEV:
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error=(
+                    f"Could not {present_tense} file '{source_path}' "
+                    f"to '{destination_path}': {exc}"
+                ),
+            )
+        try:
+            if destination_path.exists():
+                destination_path.unlink()
+            shutil.move(str(source_path), str(destination_path))
+        except OSError as move_exc:
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error=(
+                    f"Could not {present_tense} file '{source_path}' "
+                    f"to '{destination_path}': {move_exc}"
+                ),
+            )
+
+    return ToolResult.ok(
+        tool_name=tool_name,
+        output_text=f"File {past_tense}: {source_path} -> {destination_path}",
         payload={
             "source_path": str(source_path),
             "destination_path": str(destination_path),
@@ -828,12 +908,14 @@ __all__ = [
     "MOVE_FILE_DEFINITION",
     "READABLE_EXTENSIONS",
     "READ_TEXT_FILE_DEFINITION",
+    "RENAME_FILE_DEFINITION",
     "WRITE_TEXT_FILE_DEFINITION",
     "_MAX_WRITE_FILE_CHARS",
     "copy_file",
     "list_directory",
     "move_file",
     "read_text_file",
+    "rename_file",
     "register_file_tools",
     "write_text_file",
 ]
