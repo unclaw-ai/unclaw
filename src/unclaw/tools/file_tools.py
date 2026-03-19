@@ -155,6 +155,27 @@ RENAME_FILE_DEFINITION = ToolDefinition(
     },
 )
 
+DELETE_FILE_DEFINITION = ToolDefinition(
+    name="delete_file",
+    description=(
+        "Delete one local file. "
+        "Relative paths are resolved inside the data/files/ directory by default. "
+        "Requires confirm=true. "
+        "Only deletes files inside the configured allowed roots; directories are rejected."
+    ),
+    permission_level=ToolPermissionLevel.LOCAL_WRITE,
+    arguments={
+        "path": ToolArgumentSpec(description="Path to the file to delete."),
+        "confirm": ToolArgumentSpec(
+            description=(
+                "Set to true to confirm permanent deletion. "
+                "Default: false — deletion is not performed unless explicitly confirmed."
+            ),
+            value_type="boolean",
+        ),
+    },
+)
+
 
 def register_file_tools(
     registry: ToolRegistry,
@@ -169,6 +190,7 @@ def register_file_tools(
         project_root=project_root,
         configured_roots=configured_roots,
     )
+    delete_default_dir = default_write_dir if default_write_dir is not None else default_read_dir
 
     def read_handler(call: ToolCall) -> ToolResult:
         return read_text_file(call, allowed_roots=allowed_roots, default_read_dir=default_read_dir)
@@ -207,12 +229,20 @@ def register_file_tools(
             default_write_dir=default_write_dir,
         )
 
+    def delete_handler(call: ToolCall) -> ToolResult:
+        return delete_file(
+            call,
+            allowed_roots=allowed_roots,
+            default_write_dir=delete_default_dir,
+        )
+
     registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
     registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
     registry.register(WRITE_TEXT_FILE_DEFINITION, write_handler)
     registry.register(MOVE_FILE_DEFINITION, move_handler)
     registry.register(COPY_FILE_DEFINITION, copy_handler)
     registry.register(RENAME_FILE_DEFINITION, rename_handler)
+    registry.register(DELETE_FILE_DEFINITION, delete_handler)
 
 
 def read_text_file(
@@ -601,6 +631,77 @@ def rename_file(
     )
 
 
+def delete_file(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+    default_write_dir: Path | None = None,
+) -> ToolResult:
+    """Delete one local file, bounded and confirmation-guarded."""
+    tool_name = DELETE_FILE_DEFINITION.name
+
+    try:
+        path_value = _read_string_argument(call.arguments, "path")
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+
+    confirm = call.arguments.get("confirm", False)
+    if not isinstance(confirm, bool):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'confirm' must be a boolean.",
+        )
+
+    if not confirm:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Deletion was not performed. Pass confirm=true to delete the file.",
+        )
+
+    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    path = _resolve_file_tool_path(
+        path_value,
+        default_dir=default_write_dir,
+        allowed_roots=normalized_allowed_roots,
+    )
+    access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=path,
+        allowed_roots=normalized_allowed_roots,
+    )
+    if access_error is not None:
+        return access_error
+
+    if not path.exists():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"File does not exist: {path}",
+        )
+
+    if not path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Path is not a file: {path}",
+        )
+
+    try:
+        path.unlink()
+    except OSError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Could not delete file '{path}': {exc}",
+        )
+
+    return ToolResult.ok(
+        tool_name=tool_name,
+        output_text=f"File deleted: {path}",
+        payload={
+            "path": str(path),
+            "confirmed": confirm,
+        },
+    )
+
+
 def _relocate_file(
     call: ToolCall,
     *,
@@ -904,6 +1005,7 @@ def _read_positive_int_argument(
 
 __all__ = [
     "COPY_FILE_DEFINITION",
+    "DELETE_FILE_DEFINITION",
     "LIST_DIRECTORY_DEFINITION",
     "MOVE_FILE_DEFINITION",
     "READABLE_EXTENSIONS",
@@ -912,6 +1014,7 @@ __all__ = [
     "WRITE_TEXT_FILE_DEFINITION",
     "_MAX_WRITE_FILE_CHARS",
     "copy_file",
+    "delete_file",
     "list_directory",
     "move_file",
     "read_text_file",

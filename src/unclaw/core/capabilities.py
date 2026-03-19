@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from unclaw.tools.file_tools import (
     COPY_FILE_DEFINITION,
+    DELETE_FILE_DEFINITION,
     LIST_DIRECTORY_DEFINITION,
     MOVE_FILE_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
@@ -228,13 +229,14 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "- If a capability is unavailable, say so clearly instead of "
                 "implying it exists."
             ),
-            (
-                f"- If the user asks to {unavailable_local_file_actions} a file or "
-                "directory, say clearly this capability does not exist. Do not "
-                "suggest it might work after confirmation."
-            ),
         )
     )
+    if unavailable_local_file_actions is not None:
+        lines.append(
+            f"- If the user asks to {unavailable_local_file_actions} a file or "
+            "directory, say clearly this capability does not exist. Do not "
+            "suggest it might work after confirmation."
+        )
     return "\n".join(lines)
 
 
@@ -270,6 +272,12 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Relative paths are created inside data/files/ by default. "
             "Default is overwrite=false — fails if the file already exists. "
             "Only use overwrite=true when the user explicitly intends to replace an existing file."
+        )
+    if DELETE_FILE_DEFINITION.name in summary.available_builtin_tool_names:
+        lines.append(
+            "delete_file <path>: delete one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Requires confirm=true and only deletes files, not directories."
         )
     if MOVE_FILE_DEFINITION.name in summary.available_builtin_tool_names:
         lines.append(
@@ -317,12 +325,17 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
 def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines = [
         "Shell command execution.",
-        (
-            f"{_format_unavailable_local_file_actions(summary).capitalize()} local files "
-            "or directories (no such tool is registered)."
-        ),
         "Any capability that is not listed as available above.",
     ]
+    unavailable_local_file_actions = _format_unavailable_local_file_actions(summary)
+    if unavailable_local_file_actions is not None:
+        lines.insert(
+            1,
+            (
+                f"{unavailable_local_file_actions.capitalize()} local files "
+                "or directories (no such tool is registered)."
+            ),
+        )
 
     if not summary.local_file_read_available:
         lines.insert(0, "Local file read via /read <path>.")
@@ -344,15 +357,21 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
     return tuple(lines)
 
 
-def _format_unavailable_local_file_actions(summary: RuntimeCapabilitySummary) -> str:
-    actions = ["delete"]
+def _format_unavailable_local_file_actions(
+    summary: RuntimeCapabilitySummary,
+) -> str | None:
+    actions: list[str] = []
+    if DELETE_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
+        actions.append("delete")
     if MOVE_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
-        actions.insert(1, "move")
+        actions.append("move")
     if RENAME_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
         actions.append("rename")
     if COPY_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
         actions.append("copy")
 
+    if not actions:
+        return None
     if len(actions) == 1:
         return actions[0]
     if len(actions) == 2:

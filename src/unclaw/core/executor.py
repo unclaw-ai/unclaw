@@ -13,6 +13,7 @@ from unclaw.settings import Settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
+    DELETE_FILE_DEFINITION,
     LIST_DIRECTORY_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
@@ -148,6 +149,7 @@ def execute_tool_call(
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
     "CREATE_NOTE_DEFINITION",
+    "DELETE_FILE_DEFINITION",
     "FORGET_LONG_TERM_MEMORY_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_LONG_TERM_MEMORY_DEFINITION",
