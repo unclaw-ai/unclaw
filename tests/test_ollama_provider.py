@@ -582,6 +582,99 @@ def test_chat_streaming_preserves_tool_calls_in_response(monkeypatch) -> None:
     assert isinstance(response.raw_payload["message"]["tool_calls"], list)
 
 
+def test_chat_streaming_suppresses_inline_json_tool_payload_from_callback(
+    monkeypatch,
+) -> None:
+    """Inline JSON tool payloads must stay internal during streaming.
+
+    The runtime may still recover the payload from response.content, but the
+    user-facing callback must not receive raw JSON chunks like
+    {"name": "system_info", "arguments": {}}.
+    """
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _FakeStreamResponse(
+            (
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:00Z",
+                    "message": {"content": '{"name": "system_info", '},
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:01Z",
+                    "message": {"content": '"arguments": {}}'},
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:02Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    streamed_chunks: list[str] = []
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="quelle heure est-il ?")],
+        content_callback=streamed_chunks.append,
+    )
+
+    assert response.content == '{"name": "system_info", "arguments": {}}'
+    assert streamed_chunks == []
+    assert response.tool_calls is None
+
+
+def test_chat_streaming_suppresses_fenced_json_tool_payload_from_callback(
+    monkeypatch,
+) -> None:
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _FakeStreamResponse(
+            (
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:00Z",
+                    "message": {"content": "```json\n"},
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:01Z",
+                    "message": {"content": '{"name": "list_directory", "arguments": {"path": "data"}}\n'},
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:02Z",
+                    "message": {"content": "```"},
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "created_at": "2026-03-19T10:00:03Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr(ollama_provider, "urlopen", fake_urlopen)
+
+    streamed_chunks: list[str] = []
+    provider = ollama_provider.OllamaProvider()
+    response = provider.chat(
+        profile=_build_profile(thinking_supported=False),
+        messages=[LLMMessage(role=LLMRole.USER, content="liste data")],
+        content_callback=streamed_chunks.append,
+    )
+
+    assert (
+        response.content
+        == '```json\n{"name": "list_directory", "arguments": {"path": "data"}}\n```'
+    )
+    assert streamed_chunks == []
+    assert response.tool_calls is None
+
+
 def test_chat_streaming_mixed_content_and_tool_calls(monkeypatch) -> None:
     """Streaming with both text content and tool_calls preserves both."""
 

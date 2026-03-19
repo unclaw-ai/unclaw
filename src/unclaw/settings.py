@@ -129,6 +129,12 @@ class ModelProfile:
     num_ctx: int | None = None
     keep_alive: str | None = None
     planner_profile: str | None = None
+    # Optional explicit allowlist of tool names for this profile.
+    # When set, only tools whose names appear in this list are made available
+    # to the model (both for direct calling and for the planner).
+    # When None, all registered tools are available (default behaviour).
+    # Explicitly required by CODEX-HARDENING-1.
+    tool_allowlist: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,6 +410,7 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
             num_ctx=_get_optional_positive_int(raw_profile, "num_ctx"),
             keep_alive=_get_optional_str(raw_profile, "keep_alive"),
             planner_profile=_get_optional_str(raw_profile, "planner_profile"),
+            tool_allowlist=_get_optional_str_list(raw_profile, "tool_allowlist"),
         )
 
     if not profiles:
@@ -567,6 +574,26 @@ def _get_choice(
             f"Configuration key '{key}' must be one of: {allowed}."
         )
     return normalized_value
+
+
+def _get_optional_str_list(
+    source: Mapping[str, Any],
+    key: str,
+) -> tuple[str, ...] | None:
+    """Return a tuple of non-empty strings from key, or None when key is absent."""
+    value = source.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ConfigurationError(f"Configuration key '{key}' must be a list.")
+    values: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigurationError(
+                f"Configuration key '{key}' must contain non-empty strings."
+            )
+        values.append(item.strip())
+    return tuple(values)
 
 
 def _get_str_list(

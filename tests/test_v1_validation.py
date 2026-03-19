@@ -33,6 +33,9 @@ from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.router import RouteDecision, RouteKind, route_request
 from unclaw.core.runtime import (
+    _build_planner_tool_catalog_note,
+    _filter_tool_definitions_by_allowlist,
+    _PLANNER_SYSTEM_PROMPT,
     _prepare_web_search_route,
     _resolve_tool_definitions,
     run_user_turn,
@@ -858,6 +861,34 @@ def test_v1_shipped_agentic_profiles_use_fast_as_their_planner() -> None:
     assert settings.models["codex"].planner_profile == "fast"
 
 
+def test_planner_system_prompt_routes_current_system_details_to_tool_call() -> None:
+    assert "Current local machine or runtime details" in _PLANNER_SYSTEM_PROMPT
+    assert "system_info" in _PLANNER_SYSTEM_PROMPT
+    assert "time queries" not in _PLANNER_SYSTEM_PROMPT
+
+
+def test_build_planner_tool_catalog_note_includes_tool_descriptions() -> None:
+    note = _build_planner_tool_catalog_note(
+        (
+            ToolDefinition(
+                name="system_info",
+                description="Return local system details.",
+                permission_level=ToolPermissionLevel.LOCAL_READ,
+                arguments={},
+            ),
+            ToolDefinition(
+                name="list_directory",
+                description="List one local directory.",
+                permission_level=ToolPermissionLevel.LOCAL_READ,
+                arguments={"path": "Path to a local directory."},
+            ),
+        )
+    )
+
+    assert "- system_info: Return local system details." in note
+    assert "- list_directory(path): List one local directory." in note
+
+
 def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
     monkeypatch,
     make_temp_project,
@@ -1414,3 +1445,138 @@ def test_v1_long_session_grounded_follow_up_persists_correctly(
         assert all(m.content == "Grounded and stable." for m in assistant_messages)
     finally:
         session_manager.close()
+
+
+# ---------------------------------------------------------------------------
+# CODEX-HARDENING-1: tool allowlist tests
+# ---------------------------------------------------------------------------
+
+def test_filter_tool_definitions_by_allowlist_returns_all_when_no_allowlist() -> None:
+    """_filter_tool_definitions_by_allowlist is a no-op when profile.tool_allowlist is None."""
+    tool_a = ToolDefinition(
+        name="tool_a", description="A", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+    )
+    tool_b = ToolDefinition(
+        name="tool_b", description="B", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+    )
+    profile = SimpleNamespace(tool_allowlist=None)
+    result = _filter_tool_definitions_by_allowlist([tool_a, tool_b], profile)
+    assert result == [tool_a, tool_b]
+
+
+def test_filter_tool_definitions_by_allowlist_filters_by_name() -> None:
+    """_filter_tool_definitions_by_allowlist keeps only allowlisted tools by name."""
+    tool_a = ToolDefinition(
+        name="read_text_file", description="Read", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+    )
+    tool_b = ToolDefinition(
+        name="remember_long_term_memory", description="LTM write", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_WRITE,
+    )
+    tool_c = ToolDefinition(
+        name="system_info", description="Sys", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+    )
+    profile = SimpleNamespace(tool_allowlist=("read_text_file", "system_info"))
+    result = _filter_tool_definitions_by_allowlist([tool_a, tool_b, tool_c], profile)
+    assert len(result) == 2
+    result_names = {t.name for t in result}
+    assert "read_text_file" in result_names
+    assert "system_info" in result_names
+    assert "remember_long_term_memory" not in result_names
+
+
+def test_filter_tool_definitions_by_allowlist_returns_empty_when_no_match() -> None:
+    """_filter_tool_definitions_by_allowlist returns [] when no tool matches."""
+    tool_a = ToolDefinition(
+        name="tool_a", description="A", arguments={},
+        permission_level=ToolPermissionLevel.LOCAL_READ,
+    )
+    profile = SimpleNamespace(tool_allowlist=("nonexistent_tool",))
+    result = _filter_tool_definitions_by_allowlist([tool_a], profile)
+    assert result == []
+
+
+def test_codex_shipped_profile_has_tool_allowlist() -> None:
+    """CODEX-HARDENING-1: the shipped codex profile must define a tool_allowlist.
+
+    Without an allowlist, codex receives all 19+ tools including
+    remember_long_term_memory, which it calls on trivial prompts.
+    """
+    settings = _load_repo_settings()
+    codex_profile = settings.models["codex"]
+    assert codex_profile.tool_allowlist is not None, (
+        "The 'codex' profile must have a tool_allowlist. "
+        "Without it, all 19 tools are visible to the model, causing "
+        "remember_long_term_memory to be called on trivial prompts."
+    )
+    assert len(codex_profile.tool_allowlist) > 0, (
+        "The 'codex' tool_allowlist must not be empty."
+    )
+
+
+def test_codex_tool_allowlist_excludes_long_term_memory_tools() -> None:
+    """CODEX-HARDENING-1: LTM tools must be absent from the codex allowlist.
+
+    remember_long_term_memory was the primary problem tool: codex called it on
+    trivial math and time prompts.  It must be excluded from the codex surface.
+    """
+    settings = _load_repo_settings()
+    codex_profile = settings.models["codex"]
+    assert codex_profile.tool_allowlist is not None
+    excluded = {
+        "remember_long_term_memory",
+        "search_long_term_memory",
+        "list_long_term_memory",
+        "forget_long_term_memory",
+    }
+    for ltm_tool in excluded:
+        assert ltm_tool not in codex_profile.tool_allowlist, (
+            f"'{ltm_tool}' must not be in the codex tool_allowlist. "
+            "LTM tools are irrelevant to a code-first assistant and caused "
+            "the model to call them on trivial prompts (CODEX-HARDENING-1)."
+        )
+
+
+def test_resolve_tool_definitions_applies_codex_allowlist() -> None:
+    """CODEX-HARDENING-1: _resolve_tool_definitions filters by tool_allowlist.
+
+    Proves that the allowlist actually restricts the tool definitions returned
+    to the responder model and the planner, not just declared in config.
+    """
+    settings = _load_repo_settings()
+    codex_profile = settings.models["codex"]
+    assert codex_profile.tool_allowlist is not None  # pre-condition
+
+    registry = create_default_tool_registry(settings)
+    # Verify the full registry has more tools than the allowlist.
+    all_tool_names = {t.name for t in registry.list_tools()}
+    assert len(all_tool_names) > len(codex_profile.tool_allowlist), (
+        "The full registry must contain more tools than the codex allowlist."
+    )
+
+    # Resolve tool definitions through the actual filter path.
+    filtered = _resolve_tool_definitions(
+        tool_registry=registry,
+        model_profile=codex_profile,
+    )
+    assert filtered is not None, (
+        "_resolve_tool_definitions must return a non-None list for a native profile."
+    )
+    filtered_names = {t.name for t in filtered}
+
+    # All filtered tools must be in the allowlist.
+    for name in filtered_names:
+        assert name in codex_profile.tool_allowlist, (
+            f"Tool '{name}' is in filtered definitions but not in codex tool_allowlist."
+        )
+
+    # LTM tools must be absent.
+    for ltm_tool in ("remember_long_term_memory", "search_long_term_memory",
+                     "list_long_term_memory", "forget_long_term_memory"):
+        assert ltm_tool not in filtered_names, (
+            f"'{ltm_tool}' must not be in codex tool definitions after allowlist filtering."
+        )

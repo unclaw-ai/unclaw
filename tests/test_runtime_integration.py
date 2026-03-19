@@ -21,7 +21,9 @@ from unclaw.core.research_flow import build_tool_history_content, run_search_com
 from unclaw.core.router import RouteKind
 from unclaw.core.runtime import (
     RuntimeTurnCancellation,
+    _content_is_raw_json_tool_payload,
     _prepare_web_search_route,
+    _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY,
     run_user_turn,
 )
 from unclaw.core.session_manager import SessionManager
@@ -164,14 +166,17 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert provider_messages[0].content == settings.system_prompt
         assert provider_messages[1].role is LLMRole.SYSTEM
         assert "Enabled built-in tools: 19" in provider_messages[1].content
+        assert "read_text_file (/read <path>)" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
+        assert "fetch_url_text (/fetch <url>)" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
         assert "delete_file <path>" in provider_messages[1].content
         assert "move_file <source_path> <destination_path>" in provider_messages[1].content
         assert "rename_file <source_path> <destination_path>" in provider_messages[1].content
         assert "copy_file <source_path> <destination_path>" in provider_messages[1].content
         assert (
-            "/search <query>: search the public web, read a few relevant pages, "
+            "search_web (/search <query>): search the public web, read a few "
+            "relevant pages, "
             "and answer naturally from grounded web context with compact sources."
             in provider_messages[1].content
         )
@@ -541,13 +546,138 @@ def test_runtime_capability_summary_reports_available_and_missing_capabilities()
     assert summary.memory_summary_available is False
     assert summary.model_can_call_tools is False
     assert "Available built-in tools:" in context
-    assert "/fetch <url>: fetch one public URL and extract text." in context
-    assert "Web search via /search <query>." in context
+    assert "fetch_url_text (/fetch <url>): fetch one public URL and extract text." in context
+    assert "Web search via search_web (/search <query>)." in context
     assert "Session memory and summary access." in context
     assert "Do not claim you have no tool access" in context
+    assert "If the user asks which built-in tools or capabilities are available" in context
     assert "user-initiated slash commands only" in context
     assert "Do not say you cannot access it" in context
     assert "Do not claim you already searched" in context
+
+
+def test_runtime_capability_summary_accepts_explicit_tool_name_list() -> None:
+    summary = build_runtime_capability_summary(
+        available_builtin_tool_names=("list_directory", "system_info"),
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+
+    assert summary.enabled_builtin_tool_count == 2
+    assert summary.local_directory_listing_available is True
+    assert summary.system_info_available is True
+    assert summary.url_fetch_available is False
+    assert summary.long_term_memory_available is False
+
+
+def test_capability_context_native_turn_guides_system_and_directory_tool_use() -> None:
+    summary = build_runtime_capability_summary(
+        available_builtin_tool_names=("read_text_file", "list_directory", "system_info"),
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "If the user explicitly names an available built-in tool" in context
+    assert "Use system_info for current local machine or runtime details" in context
+    assert "call system_info before answering" in context
+    assert '"quelle heure est-il ?"' in context
+    assert "Use list_directory for local directory or file listings" in context
+    assert "call list_directory before answering" in context
+    assert "mon dossier data" in context
+    assert "Use read_text_file when the user asks for the contents" in context
+
+
+def test_codex_streaming_turn_uses_allowlisted_capability_context(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "codex"
+    captured: dict[str, object] = {}
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled
+            captured["profile_name"] = profile.name
+            captured["tool_names"] = tuple(tool.name for tool in tools or ())
+            captured["capability_context"] = next(
+                message.content
+                for message in messages
+                if message.role is LLMRole.SYSTEM
+                and "Runtime capability status:" in message.content
+            )
+            if content_callback is not None:
+                content_callback("Codex reply")
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Codex reply",
+                created_at="2026-03-19T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "liste les tools auxquels tu as acces",
+            session_id=session.id,
+        )
+        streamed_chunks: list[str] = []
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="liste les tools auxquels tu as acces",
+            stream_output_func=streamed_chunks.append,
+        )
+
+        codex_allowlist = settings.models["codex"].tool_allowlist
+        assert codex_allowlist is not None
+        assert reply == "Codex reply"
+        assert streamed_chunks == ["Codex reply"]
+        assert captured["profile_name"] == "codex"
+        assert set(captured["tool_names"]) == set(codex_allowlist)
+        assert len(captured["tool_names"]) == len(codex_allowlist)
+
+        capability_context = str(captured["capability_context"])
+        assert "Enabled built-in tools: 6" in capability_context
+        assert "read_text_file (/read <path>)" in capability_context
+        assert "list_directory (/ls [path])" in capability_context
+        assert "write_text_file" in capability_context
+        assert "search_web (/search <query>)" in capability_context
+        assert "fetch_url_text (/fetch <url>)" in capability_context
+        assert "system_info" in capability_context
+        assert "remember_long_term_memory" not in capability_context
+        assert "inspect_session_history" not in capability_context
+        assert "Local notes (create_note, read_note, list_notes, update_note)." in capability_context
+    finally:
+        session_manager.close()
 
 
 def test_capability_context_non_native_turn_forbids_model_tool_claims() -> None:
@@ -6355,5 +6485,328 @@ def test_second_grounded_turn_no_new_search_produces_no_stale_sources_native(
         assert "medieval.example.com" not in reply
         # No Sources: block from stale grounding.
         assert "charlemagne" not in reply.lower()
+    finally:
+        session_manager.close()
+
+
+# ---------------------------------------------------------------------------
+# BIG-FIX-ROUTER-1R4: codex raw JSON leakage regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestContentIsRawJsonToolPayload:
+    """Unit tests for the _content_is_raw_json_tool_payload guard.
+
+    Explicitly required by BIG-FIX-ROUTER-1R4 regression coverage.
+    """
+
+    def test_detects_single_tool_call_format(self) -> None:
+        assert _content_is_raw_json_tool_payload(
+            '{"name": "search_web", "arguments": {"query": "test"}}'
+        )
+
+    def test_detects_list_tool_call_format(self) -> None:
+        assert _content_is_raw_json_tool_payload(
+            '[{"name": "search_web", "arguments": {"query": "test"}}]'
+        )
+
+    def test_detects_fenced_json_tool_call_format(self) -> None:
+        assert _content_is_raw_json_tool_payload(
+            '```json\n{"name": "system_info", "arguments": {}}\n```'
+        )
+
+    def test_detects_no_arguments_key_as_false(self) -> None:
+        # "name" present but no "arguments" — not a tool call format.
+        assert not _content_is_raw_json_tool_payload(
+            '{"name": "search_web"}'
+        )
+
+    def test_detects_extra_keys_as_false(self) -> None:
+        # Extra key "description" → likely a legitimate response object.
+        assert not _content_is_raw_json_tool_payload(
+            '{"name": "foo", "arguments": {}, "description": "bar"}'
+        )
+
+    def test_plain_text_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload("combien font 5 x 3 ?")
+
+    def test_empty_string_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload("")
+
+    def test_generic_json_object_is_false(self) -> None:
+        # A legitimate JSON response that is not a tool call.
+        assert not _content_is_raw_json_tool_payload('{"result": 15}')
+
+    def test_empty_name_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload(
+            '{"name": "", "arguments": {}}'
+        )
+
+    def test_arguments_not_dict_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload(
+            '{"name": "search_web", "arguments": "query=test"}'
+        )
+
+    def test_empty_list_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload("[]")
+
+    def test_invalid_json_is_false(self) -> None:
+        assert not _content_is_raw_json_tool_payload(
+            '{"name": "search_web", "arguments": {BROKEN'
+        )
+
+    def test_list_with_mixed_valid_invalid_is_false(self) -> None:
+        # List where one item is not a valid tool call — should return False.
+        assert not _content_is_raw_json_tool_payload(
+            '[{"name": "search_web", "arguments": {}}, {"result": 42}]'
+        )
+
+
+def test_codex_inline_json_suppressed_when_no_tool_definitions(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """BIG-FIX-ROUTER-1R4: raw JSON tool payload is suppressed when the responder
+    has no tool definitions (planner→direct_chat path).
+
+    When the planner decides direct_chat and the responder (e.g. codex) still
+    emits inline JSON that matches the tool call format, the runtime must not
+    expose the raw JSON to the user.  Instead it returns the suppressed reply.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=None,
+    )
+
+    inline_json = '{"name": "remember_long_term_memory", "arguments": {"key": "math", "value": "15"}}'
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            # Simulate codex emitting inline JSON as content even when
+            # called without tools (tools=None).
+            if content_callback is not None:
+                content_callback(inline_json)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=inline_json,
+                created_at="2026-03-19T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    # Disable router (planner will be unavailable → planner_active=False,
+    # responder called directly with no tools via ToolRegistry()).
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
+
+    try:
+        session = session_manager.ensure_current_session()
+        # Use an empty ToolRegistry so responder_tool_definitions resolves to None.
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="combien font 5 x 3 ?",
+            tool_registry=ToolRegistry(),
+        )
+
+        # The raw JSON must never reach the user.
+        assert reply == _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY
+        assert '"name"' not in reply
+        assert '"arguments"' not in reply
+
+        # The persisted assistant message must also be clean.
+        messages = session_manager.list_messages(session.id)
+        assert messages[-1].role is MessageRole.ASSISTANT
+        assert messages[-1].content == _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY
+    finally:
+        session_manager.close()
+
+
+def test_streaming_fenced_json_tool_payload_is_recovered_without_leaking(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "codex"
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="list_directory",
+            description="List a local directory.",
+            permission_level=ToolPermissionLevel.LOCAL_READ,
+            arguments={
+                "path": "Path to a local directory.",
+                "max_depth": "Maximum depth.",
+                "limit": "Maximum entries.",
+            },
+        ),
+        lambda call: ToolResult.ok(
+            tool_name="list_directory",
+            output_text="Directory: data\nA.txt\nchangement_reussi.txt",
+        ),
+    )
+
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                payload = (
+                    "```json\n"
+                    '{"name": "list_directory", "arguments": {"path": "data", '
+                    '"max_depth": 1, "limit": 100}}\n'
+                    "```"
+                )
+                if content_callback is not None:
+                    content_callback(payload)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=payload,
+                    created_at="2026-03-19T10:00:00Z",
+                    finish_reason="stop",
+                )
+
+            assert any(message.role is LLMRole.TOOL for message in messages)
+            final_reply = "A.txt\nchangement_reussi.txt"
+            if content_callback is not None:
+                content_callback(final_reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=final_reply,
+                created_at="2026-03-19T10:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "liste moi les fichiers .txt que j'ai dans mon dossier data",
+            session_id=session.id,
+        )
+        streamed_chunks: list[str] = []
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="liste moi les fichiers .txt que j'ai dans mon dossier data",
+            stream_output_func=streamed_chunks.append,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "A.txt\nchangement_reussi.txt"
+        assert "```json" not in reply
+        assert '"name": "list_directory"' not in reply
+    finally:
+        session_manager.close()
+
+
+def test_final_safety_net_suppresses_json_tool_payload_reply(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """BIG-FIX-ROUTER-1R4: final safety net catches JSON leakage at reply level.
+
+    When any execution path produces a raw JSON tool call as the assistant_reply,
+    the final safety net must suppress it before persisting or returning it.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=None,
+    )
+
+    raw_payload = '{"name": "system_info", "arguments": {}}'
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=raw_payload,
+                created_at="2026-03-19T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
+
+    try:
+        session = session_manager.ensure_current_session()
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="quelle heure est-il ?",
+            tool_registry=ToolRegistry(),
+        )
+
+        assert reply == _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY
+        assert '"name"' not in reply
+        assert '"arguments"' not in reply
     finally:
         session_manager.close()

@@ -34,3 +34,14 @@ profiles:
     num_ctx: 4096
     keep_alive: 10m
     planner_profile: fast
+    # Restrict codex to code/system-relevant tools only.
+    # Long-term memory, notes, and session-history tools are excluded because
+    # they are irrelevant to a code-first assistant and caused the model to
+    # call remember_long_term_memory on trivial prompts (CODEX-HARDENING-1).
+    tool_allowlist:
+      - read_text_file
+      - list_directory
+      - write_text_file
+      - search_web
+      - fetch_url_text
+      - system_info

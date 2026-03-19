@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from unclaw.tools.file_tools import (
@@ -63,14 +64,27 @@ class RuntimeCapabilitySummary:
 
 def build_runtime_capability_summary(
     *,
-    tool_registry: ToolRegistry,
+    tool_registry: ToolRegistry | None = None,
+    available_builtin_tool_names: Sequence[str] | None = None,
     memory_summary_available: bool,
     model_can_call_tools: bool = False,
 ) -> RuntimeCapabilitySummary:
     """Summarize the currently enabled built-in tools and related runtime features."""
-    available_tool_names = tuple(
-        tool_definition.name for tool_definition in tool_registry.list_tools()
-    )
+    if available_builtin_tool_names is not None:
+        available_tool_names = tuple(
+            tool_name
+            for tool_name in available_builtin_tool_names
+            if isinstance(tool_name, str) and tool_name
+        )
+    elif tool_registry is not None:
+        available_tool_names = tuple(
+            tool_definition.name for tool_definition in tool_registry.list_tools()
+        )
+    else:
+        raise ValueError(
+            "build_runtime_capability_summary requires tool_registry or "
+            "available_builtin_tool_names."
+        )
     available_tool_name_set = frozenset(available_tool_names)
 
     return RuntimeCapabilitySummary(
@@ -137,6 +151,12 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "- You may say you can use Unclaw built-in tools that are listed "
                 "as available."
             ),
+            (
+                "- If the user asks which built-in tools or capabilities are "
+                "available, answer from the available and unavailable lists "
+                "above. Do not refuse that question and do not redirect it to "
+                "web search."
+            ),
         )
     )
 
@@ -145,6 +165,46 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
             (
                 "- Use only the listed built-in tools and base the final answer "
                 "on their results.",
+                (
+                    "- If the user explicitly names an available built-in tool "
+                    "and asks you to use it, call that tool unless another "
+                    "listed tool is clearly required first."
+                ),
+                (
+                    "- Use system_info for current local machine or runtime "
+                    "details such as the time, OS, hostname, Python/runtime, "
+                    "CPU cores, RAM, or locale."
+                ),
+                (
+                    "- If system_info is listed as available and the user asks "
+                    "for the current time, OS, or system details, call "
+                    "system_info before answering. Do not say you lack access "
+                    "to those details."
+                ),
+                (
+                    '- Example: "quelle heure est-il ?" or "quel est mon OS ?" '
+                    "-> call system_info, then answer from the tool result."
+                ),
+                (
+                    "- Use list_directory for local directory or file listings, "
+                    "including checking which files exist in a folder or "
+                    "finding filenames by extension."
+                ),
+                (
+                    "- If list_directory is listed as available and the user "
+                    "asks what files or folders exist in a local path, call "
+                    "list_directory before answering. Do not say you lack "
+                    "access to that listing."
+                ),
+                (
+                    '- Example: "liste moi les fichiers .txt que j\'ai dans '
+                    'mon dossier data" -> call list_directory on "data" '
+                    "before answering."
+                ),
+                (
+                    "- Use read_text_file when the user asks for the contents "
+                    "of one supported local text file."
+                ),
                 (
                     "- Only claim a file was written, created, or modified if "
                     "write_text_file or a notes write tool (create_note, update_note) "
@@ -244,22 +304,33 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
     lines: list[str] = []
     if summary.local_file_read_available:
         lines.append(
-            "/read <path>: read local .txt, .md, .json, or .csv files inside "
-            "allowed roots. Other formats (pdf, docx, xlsx, etc.) are not "
-            "supported in V1."
+            "read_text_file (/read <path>): read one local UTF-8 .txt, .md, "
+            ".json, or .csv file inside allowed roots. Supported formats in V1 "
+            "are .txt, .md, .json, and .csv; pdf, docx, xlsx, and other formats "
+            "are not supported in V1. Use this for the contents of a supported "
+            "local text file."
         )
     if summary.local_directory_listing_available:
-        lines.append("/ls [path]: list local directories inside allowed roots.")
+        lines.append(
+            "list_directory (/ls [path]): list one local directory inside "
+            "allowed roots. Use this for local file or folder listings, "
+            "including finding filenames by extension in one folder."
+        )
     if summary.url_fetch_available:
-        lines.append("/fetch <url>: fetch one public URL and extract text.")
+        lines.append(
+            "fetch_url_text (/fetch <url>): fetch one public URL and extract text."
+        )
     if summary.web_search_available:
         lines.append(
-            "/search <query>: search the public web, read a few relevant pages, "
-            "and answer naturally from grounded web context with compact sources."
+            "search_web (/search <query>): search the public web, read a few "
+            "relevant pages, and answer naturally from grounded web context "
+            "with compact sources."
         )
     if summary.system_info_available:
         lines.append(
-            "system_info: return a read-only summary of the local machine and runtime."
+            "system_info: return a read-only summary of the local machine and "
+            "runtime. Call this tool for the current local time, OS, hostname, "
+            "Python/runtime, CPU cores, RAM, or locale."
         )
     if summary.notes_available:
         lines.append(
@@ -338,13 +409,15 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
         )
 
     if not summary.local_file_read_available:
-        lines.insert(0, "Local file read via /read <path>.")
+        lines.insert(0, "Local file read via read_text_file (/read <path>).")
     if not summary.local_directory_listing_available:
-        lines.insert(0, "Local directory listing via /ls [path].")
+        lines.insert(
+            0, "Local directory listing via list_directory (/ls [path])."
+        )
     if not summary.url_fetch_available:
-        lines.insert(0, "Direct URL fetch via /fetch <url>.")
+        lines.insert(0, "Direct URL fetch via fetch_url_text (/fetch <url>).")
     if not summary.web_search_available:
-        lines.insert(0, "Web search via /search <query>.")
+        lines.insert(0, "Web search via search_web (/search <query>).")
     if not summary.system_info_available:
         lines.insert(0, "Local machine and runtime information via system_info.")
     if not summary.notes_available:

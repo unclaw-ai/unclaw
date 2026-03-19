@@ -126,6 +126,7 @@ def set_profile_tool_mode():
             num_ctx=profile.num_ctx,
             keep_alive=profile.keep_alive,
             planner_profile=profile.planner_profile,
+            tool_allowlist=profile.tool_allowlist,
         )
 
     return _set_profile_tool_mode

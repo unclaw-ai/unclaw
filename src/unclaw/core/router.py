@@ -24,6 +24,9 @@ _ROUTER_SYSTEM_PROMPT = (
     "a responsible answer needs current or externally verifiable public facts. "
     "Use chat for conversation, stable general knowledge, local reasoning, "
     "and local actions such as system information, notes, or file operations. "
+    "Questions about your own available built-in tools, capabilities, or "
+    "access must use chat, not web_search. Example: "
+    '"liste les tools auxquels tu as acces" -> chat. '
     "Arithmetic, mathematical calculations, simple unit conversions, and "
     "definitional facts that do not depend on real-time data must use chat. "
     "Keep search_query empty unless route is web_search. "

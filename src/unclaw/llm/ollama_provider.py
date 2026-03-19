@@ -184,7 +184,8 @@ class OllamaProvider(BaseLLMProvider):
         reasoning_parts: list[str] = []
         streamed_chunks: list[dict[str, Any]] = []
         raw_tool_calls: list[dict[str, Any]] = []
-        sanitizer = _ThinkTagLeakSanitizer()
+        think_sanitizer = _ThinkTagLeakSanitizer()
+        visible_content_sanitizer = _RawToolPayloadLeakSanitizer()
 
         for chunk_payload in self._request_stream_json(
             method="POST",
@@ -216,10 +217,12 @@ class OllamaProvider(BaseLLMProvider):
 
             content_delta = _extract_message_text(message, key="content")
             if content_delta is not None:
-                sanitized_delta = sanitizer.feed(content_delta)
+                sanitized_delta = think_sanitizer.feed(content_delta)
                 if sanitized_delta:
                     content_parts.append(sanitized_delta)
-                    content_callback(sanitized_delta)
+                    visible_delta = visible_content_sanitizer.feed(sanitized_delta)
+                    if visible_delta:
+                        content_callback(visible_delta)
 
             reasoning_delta = _extract_message_reasoning(message)
             if reasoning_delta is not None:
@@ -232,10 +235,16 @@ class OllamaProvider(BaseLLMProvider):
         if not streamed_chunks:
             raise LLMResponseError("Ollama streaming chat returned no chunks.")
 
-        final_delta = sanitizer.finish()
+        final_delta = think_sanitizer.finish()
         if final_delta:
             content_parts.append(final_delta)
-            content_callback(final_delta)
+            visible_delta = visible_content_sanitizer.feed(final_delta)
+            if visible_delta:
+                content_callback(visible_delta)
+
+        visible_tail = visible_content_sanitizer.finish()
+        if visible_tail:
+            content_callback(visible_tail)
 
         reasoning = "".join(reasoning_parts)
         content = "".join(content_parts)
@@ -531,6 +540,50 @@ class _ThinkTagLeakSanitizer:
         return "".join(output_parts)
 
 
+class _RawToolPayloadLeakSanitizer:
+    """Buffer JSON-like streamed replies so raw tool payloads never leak live."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._buffering_json_candidate = False
+        self._decided = False
+
+    def feed(self, text: str) -> str:
+        if not text:
+            return ""
+
+        if self._decided and not self._buffering_json_candidate:
+            return text
+
+        self._buffer += text
+        if not self._decided:
+            stripped = self._buffer.lstrip()
+            if not stripped:
+                return ""
+            self._buffering_json_candidate = (
+                stripped[0] in "{[" or stripped.startswith("```")
+            )
+            self._decided = True
+            if not self._buffering_json_candidate:
+                emitted = self._buffer
+                self._buffer = ""
+                return emitted
+
+        return ""
+
+    def finish(self) -> str:
+        if not self._buffer:
+            return ""
+
+        buffered = self._buffer
+        self._buffer = ""
+
+        if self._buffering_json_candidate and _is_raw_json_tool_payload(buffered):
+            return ""
+
+        return buffered
+
+
 def _consume_visible_text(text: str, *, final: bool) -> tuple[str, str]:
     """Strip stray closing tags from visible text, keeping partial suffixes."""
 
@@ -642,6 +695,51 @@ def _extract_tool_calls(payload: dict[str, Any]) -> tuple[ToolCall, ...] | None:
     if not parsed:
         return None
     return tuple(parsed)
+
+
+def _is_raw_json_tool_payload(content: str) -> bool:
+    """Return True when content is purely an inline JSON tool payload."""
+    stripped = _unwrap_inline_tool_payload_text(content)
+    if not stripped or stripped[0] not in ("{", "["):
+        return False
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+
+    def _is_tool_call_object(obj: Any) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        if not (isinstance(obj.get("name"), str) and obj.get("name")):
+            return False
+        if not isinstance(obj.get("arguments"), dict):
+            return False
+        return set(obj.keys()) <= {"name", "arguments"}
+
+    if isinstance(payload, dict):
+        return _is_tool_call_object(payload)
+    if isinstance(payload, list):
+        return bool(payload) and all(_is_tool_call_object(item) for item in payload)
+    return False
+
+
+def _unwrap_inline_tool_payload_text(content: str) -> str:
+    """Strip one surrounding fenced code block from inline tool payload text."""
+    stripped = content.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) < 3:
+        return stripped
+
+    opening_line = lines[0].strip().lower()
+    closing_line = lines[-1].strip()
+    if not opening_line.startswith("```") or closing_line != "```":
+        return stripped
+
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _read_error_body(error: HTTPError) -> str:

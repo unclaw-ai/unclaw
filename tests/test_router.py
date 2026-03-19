@@ -8,6 +8,7 @@ from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.router import (
     RouteKind,
+    _ROUTER_SYSTEM_PROMPT,
     _extract_anchor_spans,
     _guard_exact_spans,
     route_request,
@@ -178,6 +179,12 @@ def test_route_request_keeps_plain_local_request_on_chat_route(
 
     assert route.kind is RouteKind.CHAT
     assert route.search_query is None
+
+
+def test_router_system_prompt_keeps_tool_access_questions_on_chat() -> None:
+    assert "available built-in tools" in _ROUTER_SYSTEM_PROMPT
+    assert "must use chat, not web_search" in _ROUTER_SYSTEM_PROMPT
+    assert "liste les tools auxquels tu as acces" in _ROUTER_SYSTEM_PROMPT
 
 
 def test_route_request_falls_back_to_normal_chat_when_classifier_output_is_invalid(

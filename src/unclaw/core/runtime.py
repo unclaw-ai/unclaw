@@ -52,16 +52,36 @@ _TOOL_BUDGET_FALLBACK_REPLY = (
     "I stopped after reaching the tool-call limit for this request."
 )
 _TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
+# Returned when the model emits raw inline JSON instead of a natural reply
+# and the runtime cannot recover it safely.  Explicitly required by
+# BIG-FIX-ROUTER-1R4.  Complies with mandatory_rules rule 5 allowed exception:
+# defensive, scoped to the native legacy path, easy to audit and remove.
+_SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY = (
+    "I wasn't able to produce a direct response for this request. "
+    "Please try rephrasing."
+)
 _PLANNER_SYSTEM_PROMPT = (
     "Decide the next runtime action. Return JSON only with keys action, "
     "tool_name, arguments, and search_query. action must be one of: "
     "direct_chat, route_web_search, tool_call, no_tool. Use direct_chat when "
     "the responder should answer now from general knowledge or local reasoning "
-    "without more tool work. Use no_tool when existing tool results already "
-    "suffice and the responder should answer from current context. Use "
-    "route_web_search when grounded public-web evidence is needed. Use "
-    "tool_call only for exactly one available built-in tool with explicit "
-    "arguments. Never write the final user-facing answer."
+    "without more tool work. Arithmetic, calculations, and questions "
+    "answerable from stable general knowledge must always use direct_chat — "
+    "never tool_call. Current local machine or runtime details such as the "
+    "time, OS, hostname, Python/runtime, CPU, RAM, or locale require "
+    "tool_call with system_info when that tool is available. Local file or "
+    "directory inspection requests should use the matching available file "
+    "tool. Do not claim lack of access for those requests when the matching "
+    "tool is available — choose tool_call instead. Example: "
+    '"quelle heure est-il ?" -> {"action":"tool_call","tool_name":"system_info","arguments":{},"search_query":""}. '
+    'Example: "liste moi les fichiers .txt que j\'ai dans mon dossier data" '
+    '-> {"action":"tool_call","tool_name":"list_directory","arguments":{"path":"data"},"search_query":""}. '
+    "If the user explicitly tells you to use an available built-in "
+    "tool, prefer tool_call for that tool. Use no_tool when existing tool "
+    "results already suffice and the responder should answer from current "
+    "context. Use route_web_search when grounded public-web evidence is "
+    "needed. Use tool_call only for exactly one available built-in tool with "
+    "explicit arguments. Never write the final user-facing answer."
 )
 
 _PLANNER_DIRECT_CHAT = "direct_chat"
@@ -257,8 +277,15 @@ def run_user_turn(
         session_manager=session_manager,
     )
     chat_only_profile = _is_chat_only_profile(selected_model)
-    capability_tool_registry = (
-        ToolRegistry() if chat_only_profile else active_tool_registry
+    capability_tool_names = (
+        ()
+        if chat_only_profile
+        else tuple(
+            tool.name
+            for tool in _filter_tool_definitions_by_allowlist(
+                active_tool_registry.list_tools(), selected_model
+            )
+        )
     )
     tool_guard_state = _RuntimeToolGuardState(
         tool_timeout_seconds=(
@@ -278,22 +305,26 @@ def run_user_turn(
     )
     planner_profile_name = _read_planner_profile_name(selected_model)
     planner_tool_definitions = (
-        active_tool_registry.list_tools() if planner_profile_name is not None else ()
+        _filter_tool_definitions_by_allowlist(
+            active_tool_registry.list_tools(), selected_model
+        )
+        if planner_profile_name is not None
+        else ()
     )
     planner_can_call_tools = bool(planner_profile_name) and bool(planner_tool_definitions)
     legacy_can_call_tools = legacy_tool_definitions is not None
     routing_capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
+        available_builtin_tool_names=capability_tool_names,
         memory_summary_available=command_handler.memory_manager is not None,
         model_can_call_tools=planner_can_call_tools or legacy_can_call_tools,
     )
     legacy_responder_capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
+        available_builtin_tool_names=capability_tool_names,
         memory_summary_available=command_handler.memory_manager is not None,
         model_can_call_tools=legacy_can_call_tools,
     )
     planner_responder_capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
+        available_builtin_tool_names=capability_tool_names,
         memory_summary_available=command_handler.memory_manager is not None,
         model_can_call_tools=False,
     )
@@ -458,37 +489,41 @@ def run_user_turn(
                     reasoning=response.response.reasoning,
                 )
 
-                # --- Inline tool-call recovery (codex regression fix) ---
-                # Some native-capable models (e.g. qwen2.5-coder:7b) emit tool
-                # call requests as JSON text in `content` instead of the
-                # structured `tool_calls` field that the Ollama API expects.
-                # When that happens `response.response.tool_calls` is None and
-                # the raw JSON reaches the user verbatim.  We recover here by
-                # trying to parse the content as a tool call.
-                # Explicitly required by BIG-FIX-ROUTER-1R3.  Complies with
-                # mandatory_rules rule 5 allowed exception: defensive, scoped to
-                # the native legacy path only, easy to audit and remove.
-                if (
-                    not response.response.tool_calls
-                    and responder_tool_definitions
-                    and max_agent_steps > 0
-                ):
-                    recovered_calls = _try_recover_inline_tool_calls(
-                        response.response.content, responder_tool_definitions
-                    )
-                    if recovered_calls:
-                        from dataclasses import replace as _dc_replace
-
-                        response = _dc_replace(
-                            response,
-                            response=_dc_replace(
-                                response.response, tool_calls=recovered_calls
-                            ),
+                # --- Inline tool-call recovery and raw-JSON suppression ---
+                # BIG-FIX-ROUTER-1R3/1R4.  Two sub-cases handled below.
+                # Case A (responder_tool_definitions is truthy): the model was
+                # given tools but emitted inline JSON instead of the structured
+                # tool_calls field.  Try to recover and execute the call.
+                # Case B (responder_tool_definitions is None): the planner
+                # decided direct_chat so the responder was called without tools,
+                # but it still emitted inline JSON resembling a tool call.
+                # Suppress it — the user must never see raw tool payload JSON.
+                # Complies with mandatory_rules rule 5 allowed exception:
+                # defensive, scoped to the native legacy path, easy to remove.
+                if not response.response.tool_calls and max_agent_steps > 0:
+                    if responder_tool_definitions:
+                        recovered_calls = _try_recover_inline_tool_calls(
+                            response.response.content, responder_tool_definitions
                         )
+                        if recovered_calls:
+                            from dataclasses import replace as _dc_replace
+
+                            response = _dc_replace(
+                                response,
+                                response=_dc_replace(
+                                    response.response, tool_calls=recovered_calls
+                                ),
+                            )
+                    elif _content_is_raw_json_tool_payload(response.response.content):
+                        # Responder emitted inline JSON despite having no tools.
+                        # Suppress the raw payload — set reply directly so the
+                        # agent-loop block below is skipped for this turn.
+                        assistant_reply = _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY
 
                 # --- Legacy native tool loop fallback ---
                 if (
-                    response.response.tool_calls
+                    assistant_reply is None
+                    and response.response.tool_calls
                     and responder_tool_definitions
                     and max_agent_steps > 0
                 ):
@@ -508,7 +543,7 @@ def run_user_turn(
                         tool_call_callback=tool_call_callback,
                         user_input=user_input,
                     )
-                else:
+                elif assistant_reply is None:
                     assistant_reply = (
                         response.response.content.strip() or EMPTY_RESPONSE_REPLY
                     )
@@ -542,6 +577,15 @@ def run_user_turn(
         raise UnclawError(
             "Runtime turn completed without producing an assistant reply."
         )
+
+    # --- Final safety net: never expose raw JSON tool payload as reply ---
+    # Catches any remaining leakage path (e.g. streaming mode where inline
+    # JSON content may have been sent to the user before inline recovery could
+    # intervene).  The persisted reply is always clean natural language.
+    # Explicitly required by BIG-FIX-ROUTER-1R4.  Complies with
+    # mandatory_rules rule 5 allowed exception and rule 10.
+    if _content_is_raw_json_tool_payload(assistant_reply):
+        assistant_reply = _SUPPRESSED_JSON_TOOL_PAYLOAD_REPLY
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
@@ -834,7 +878,7 @@ def _build_planner_tool_catalog_note(
     for tool in tool_definitions:
         argument_names = ", ".join(tool.arguments)
         signature = f"{tool.name}({argument_names})" if argument_names else tool.name
-        lines.append(f"- {signature}")
+        lines.append(f"- {signature}: {tool.description}")
     return "\n".join(lines)
 
 
@@ -1278,6 +1322,28 @@ def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
     )
 
 
+def _filter_tool_definitions_by_allowlist(
+    tools: list[ToolDefinition],
+    model_profile: Any,
+) -> list[ToolDefinition]:
+    """Return only tools whose names are in the profile's tool_allowlist, if any.
+
+    When the profile has no tool_allowlist (or it is empty), all tools are
+    returned unchanged.  When a non-empty allowlist is present, only the listed
+    tools are returned; others are silently excluded.
+
+    This is the sole enforcement point for per-profile tool surface restriction.
+    Explicitly required by CODEX-HARDENING-1.  Complies with mandatory_rules.md
+    rule 5 allowed exception: explicitly required by mission, scoped to profiles
+    that configure the allowlist, not a product-wide redesign, easy to remove.
+    """
+    allowlist = getattr(model_profile, "tool_allowlist", None)
+    if not allowlist:
+        return tools
+    allowed: frozenset[str] = frozenset(allowlist)
+    return [tool for tool in tools if tool.name in allowed]
+
+
 def _resolve_tool_definitions(
     *,
     tool_registry: ToolRegistry,
@@ -1286,7 +1352,7 @@ def _resolve_tool_definitions(
     """Return tool definitions only for models with native tool-calling support."""
     if not _supports_native_tool_calling(model_profile):
         return None
-    tools = tool_registry.list_tools()
+    tools = _filter_tool_definitions_by_allowlist(tool_registry.list_tools(), model_profile)
     return tools if tools else None
 
 
@@ -1302,6 +1368,55 @@ def _supports_native_tool_calling(model_profile: Any) -> bool:
         return False
 
     return tool_mode.strip().lower() == "native"
+
+
+def _content_is_raw_json_tool_payload(content: str) -> bool:
+    """Return True when content is purely a raw inline JSON tool-call payload.
+
+    Matches only the two tool-call-specific formats emitted by native-capable
+    models that output inline JSON instead of using the structured tool_calls
+    field:
+    - {"name": "<tool>", "arguments": {...}}
+    - [{"name": "<tool>", "arguments": {...}}, ...]
+
+    The check is intentionally strict:
+    - top-level object must have ONLY the keys "name" and "arguments"
+    - "name" must be a non-empty string
+    - "arguments" must be a dict
+
+    Extra top-level keys mean the object is likely a legitimate response, not
+    an internal tool call, so the function returns False in that case.
+
+    Used by the inline suppression guard (planner→direct_chat path) and the
+    final reply safety net.  Explicitly required by BIG-FIX-ROUTER-1R4.
+    Complies with mandatory_rules rule 5 allowed exception and rule 10:
+    explicitly justified, visibly scoped, easy to audit, easy to remove.
+    """
+    stripped = _unwrap_inline_tool_payload_text(content)
+    if not stripped or stripped[0] not in ("{", "["):
+        return False
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+
+    def _is_tool_call_obj(obj: Any) -> bool:
+        if not isinstance(obj, dict):
+            return False
+        if not (isinstance(obj.get("name"), str) and obj.get("name")):
+            return False
+        if not isinstance(obj.get("arguments"), dict):
+            return False
+        # Only suppress when the ONLY keys are name + arguments.
+        # Any extra key suggests a legitimate complex response object.
+        return set(obj.keys()) <= {"name", "arguments"}
+
+    if isinstance(payload, dict):
+        return _is_tool_call_obj(payload)
+    if isinstance(payload, list):
+        return bool(payload) and all(_is_tool_call_obj(item) for item in payload)
+    return False
 
 
 def _try_recover_inline_tool_calls(
@@ -1325,7 +1440,7 @@ def _try_recover_inline_tool_calls(
     explicitly justified, visibly scoped to the native legacy path, easy to
     audit and remove.
     """
-    stripped = content.strip()
+    stripped = _unwrap_inline_tool_payload_text(content)
     if not stripped or stripped[0] not in ("{", "["):
         return None
 
@@ -1357,6 +1472,24 @@ def _try_recover_inline_tool_calls(
         return valid if valid else None
 
     return None
+
+
+def _unwrap_inline_tool_payload_text(content: str) -> str:
+    """Strip one surrounding fenced code block from inline tool payload text."""
+    stripped = content.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    lines = stripped.splitlines()
+    if len(lines) < 3:
+        return stripped
+
+    opening_line = lines[0].strip().lower()
+    closing_line = lines[-1].strip()
+    if not opening_line.startswith("```") or closing_line != "```":
+        return stripped
+
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...] | None:
