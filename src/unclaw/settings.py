@@ -128,6 +128,7 @@ class ModelProfile:
     tool_mode: str
     num_ctx: int | None = None
     keep_alive: str | None = None
+    planner_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -402,6 +403,7 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
             tool_mode=_get_str(raw_profile, "tool_mode"),
             num_ctx=_get_optional_positive_int(raw_profile, "num_ctx"),
             keep_alive=_get_optional_str(raw_profile, "keep_alive"),
+            planner_profile=_get_optional_str(raw_profile, "planner_profile"),
         )
 
     if not profiles:

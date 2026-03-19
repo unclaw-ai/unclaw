@@ -172,16 +172,27 @@ class Tracer:
         session_id: str,
         route_kind: str,
         model_profile_name: str,
+        planner_profile_name: str | None = None,
+        planner_available: bool | None = None,
+        planner_fallback_reason: str | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "route_kind": route_kind,
+            "model_profile_name": model_profile_name,
+        }
+        if planner_profile_name is not None:
+            payload["planner_profile_name"] = planner_profile_name
+        if planner_available is not None:
+            payload["planner_available"] = planner_available
+        if planner_fallback_reason is not None:
+            payload["planner_fallback_reason"] = planner_fallback_reason
+
         self._emit(
             session_id=session_id,
             event_type="route.selected",
             level=EventLevel.INFO,
             message="Runtime route selected.",
-            payload={
-                "route_kind": route_kind,
-                "model_profile_name": model_profile_name,
-            },
+            payload=payload,
         )
 
     def trace_model_called(

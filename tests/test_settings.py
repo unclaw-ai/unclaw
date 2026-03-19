@@ -222,6 +222,18 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
     assert profile.keep_alive == "10m"
 
 
+def test_load_settings_reads_shipped_planner_split_defaults(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    assert settings.models["fast"].tool_mode == "none"
+    assert settings.models["main"].planner_profile == "fast"
+    assert settings.models["deep"].planner_profile == "fast"
+    assert settings.models["codex"].planner_profile == "fast"
+
+
 def test_load_settings_allows_profile_keep_alive_to_be_absent(
     make_temp_project,
 ) -> None:

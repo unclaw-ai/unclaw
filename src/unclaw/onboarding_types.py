@@ -30,6 +30,7 @@ class ModelProfileDraft:
     tool_mode: str
     num_ctx: int | None = None
     keep_alive: str | None = None
+    planner_profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

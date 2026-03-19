@@ -210,6 +210,7 @@ def prompt_model_profiles(
             tool_mode=template.tool_mode,
             num_ctx=template.num_ctx,
             keep_alive=template.keep_alive,
+            planner_profile=template.planner_profile,
         )
 
     return profiles
@@ -502,6 +503,7 @@ def _draft_from_profile(profile: ModelProfile) -> ModelProfileDraft:
         tool_mode=profile.tool_mode,
         num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
+        planner_profile=profile.planner_profile,
     )
 
 

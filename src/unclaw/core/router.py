@@ -24,6 +24,8 @@ _ROUTER_SYSTEM_PROMPT = (
     "a responsible answer needs current or externally verifiable public facts. "
     "Use chat for conversation, stable general knowledge, local reasoning, "
     "and local actions such as system information, notes, or file operations. "
+    "Arithmetic, mathematical calculations, simple unit conversions, and "
+    "definitional facts that do not depend on real-time data must use chat. "
     "Keep search_query empty unless route is web_search. "
     "When route is web_search, copy all proper nouns, person names, usernames, "
     "repo names, quoted strings, and technical identifiers verbatim from the "
@@ -78,6 +80,9 @@ class RouteDecision:
     kind: RouteKind
     model_profile_name: str
     search_query: str | None = None
+    planner_profile_name: str | None = None
+    planner_available: bool = False
+    planner_fallback_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +95,7 @@ def route_request(
     *,
     settings: Settings,
     model_profile_name: str,
+    planner_profile_name: str | None = None,
     user_input: str | None = None,
     thinking_enabled: bool,
     capability_summary: RuntimeCapabilitySummary | None = None,
@@ -112,12 +118,14 @@ def route_request(
         return RouteDecision(
             kind=RouteKind.COMMAND,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
         )
 
     if not allow_web_search_routing:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
         )
 
     normalized_user_input = (user_input or "").strip()
@@ -125,28 +133,39 @@ def route_request(
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
         )
 
     if capability_summary is None or not capability_summary.web_search_available:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
         )
 
-    classifier_decision = _classify_route_with_model(
-        settings=settings,
-        model_profile_name=model_profile_name,
-        user_input=normalized_user_input,
+    classifier_decision, planner_available, planner_fallback_reason = (
+        _classify_route_with_optional_planner(
+            settings=settings,
+            model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
+            user_input=normalized_user_input,
+        )
     )
     if classifier_decision is None:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
+            planner_available=planner_available,
+            planner_fallback_reason=planner_fallback_reason,
         )
     if classifier_decision.route != RouteKind.WEB_SEARCH.value:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
+            planner_profile_name=planner_profile_name,
+            planner_available=planner_available,
+            planner_fallback_reason=planner_fallback_reason,
         )
 
     return RouteDecision(
@@ -158,7 +177,49 @@ def route_request(
         search_query=_guard_exact_spans(
             normalized_user_input, classifier_decision.search_query
         ),
+        planner_profile_name=planner_profile_name,
+        planner_available=planner_available,
+        planner_fallback_reason=planner_fallback_reason,
     )
+
+
+def _classify_route_with_optional_planner(
+    *,
+    settings: Settings,
+    model_profile_name: str,
+    planner_profile_name: str | None,
+    user_input: str,
+) -> tuple[_RouterClassifierDecision | None, bool, str | None]:
+    if not planner_profile_name:
+        return (
+            _classify_route_with_model(
+                settings=settings,
+                model_profile_name=model_profile_name,
+                user_input=user_input,
+            ),
+            False,
+            None,
+        )
+
+    planner_decision = _classify_route_with_model(
+        settings=settings,
+        model_profile_name=planner_profile_name,
+        user_input=user_input,
+    )
+    if planner_decision is not None:
+        return planner_decision, True, None
+
+    fallback_reason = (
+        "Planner profile "
+        f"'{planner_profile_name}' was unavailable for route selection; "
+        "falling back to the responder profile."
+    )
+    legacy_decision = _classify_route_with_model(
+        settings=settings,
+        model_profile_name=model_profile_name,
+        user_input=user_input,
+    )
+    return legacy_decision, False, fallback_reason
 
 
 def _extract_anchor_spans(text: str) -> list[str]:

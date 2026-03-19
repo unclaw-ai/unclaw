@@ -37,11 +37,18 @@ async def run_blocking(
     callers an awaitable boundary when they already run inside an event loop.
     """
 
-    loop = asyncio.get_running_loop()
-    succeeded, value = await loop.run_in_executor(
-        _BLOCKING_EXECUTOR,
-        partial(_run_catching, func, *args, **kwargs),
+    concurrent_future = _BLOCKING_EXECUTOR.submit(
+        partial(_run_catching, func, *args, **kwargs)
     )
+
+    try:
+        while not concurrent_future.done():
+            await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        concurrent_future.cancel()
+        raise
+
+    succeeded, value = concurrent_future.result()
     if succeeded:
         return cast(_T, value)
     raise cast(BaseException, value)

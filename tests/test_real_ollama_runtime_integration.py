@@ -28,6 +28,7 @@ def _override_main_profile(settings, *, model_name: str, tool_mode: str) -> None
         tool_mode=tool_mode,
         num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
+        planner_profile=profile.planner_profile,
     )
 
 

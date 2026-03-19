@@ -70,16 +70,21 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     }
     assert models_payload["profiles"]["fast"]["model_name"] == "llama3.2:3b"
     assert models_payload["profiles"]["fast"]["thinking_supported"] is False
+    assert models_payload["profiles"]["fast"]["tool_mode"] == "none"
     assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
     assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
     assert models_payload["profiles"]["main"]["tool_mode"] == "native"
+    assert models_payload["profiles"]["main"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["main"]["num_ctx"] == 8192
     assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
     assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
+    assert models_payload["profiles"]["deep"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["deep"]["num_ctx"] == 8192
     assert models_payload["profiles"]["deep"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["codex"]["model_name"] == "qwen2.5-coder:7b"
+    assert models_payload["profiles"]["codex"]["tool_mode"] == "native"
+    assert models_payload["profiles"]["codex"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["codex"]["num_ctx"] == 4096
     assert models_payload["profiles"]["codex"]["keep_alive"] == "10m"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
@@ -151,16 +156,21 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
     }
     assert models_payload["profiles"]["fast"]["model_name"] == "phi4-mini:3.8b"
     assert models_payload["profiles"]["fast"]["thinking_supported"] is False
+    assert models_payload["profiles"]["fast"]["tool_mode"] == "none"
     assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
     assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
     assert models_payload["profiles"]["main"]["tool_mode"] == "native"
+    assert models_payload["profiles"]["main"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["main"]["num_ctx"] == 8192
     assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
     assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
+    assert models_payload["profiles"]["deep"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["deep"]["num_ctx"] == 8192
     assert models_payload["profiles"]["deep"]["keep_alive"] == "10m"
     assert models_payload["profiles"]["codex"]["model_name"] == "devstral:latest"
+    assert models_payload["profiles"]["codex"]["tool_mode"] == "native"
+    assert models_payload["profiles"]["codex"]["planner_profile"] == "fast"
     assert models_payload["profiles"]["codex"]["num_ctx"] == 4096
     assert models_payload["profiles"]["codex"]["keep_alive"] == "10m"
 
@@ -417,7 +427,7 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             model_name="llama3.2:3b",
             temperature=0.2,
             thinking_supported=False,
-            tool_mode="json_plan",
+            tool_mode="none",
             num_ctx=4096,
             keep_alive="10m",
         ),
@@ -429,6 +439,7 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             tool_mode="native",
             num_ctx=8192,
             keep_alive="30m",
+            planner_profile="fast",
         ),
         "deep": ModelProfileDraft(
             provider="ollama",
@@ -438,15 +449,17 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             tool_mode="native",
             num_ctx=8192,
             keep_alive="10m",
+            planner_profile="fast",
         ),
         "codex": ModelProfileDraft(
             provider="ollama",
             model_name="qwen2.5-coder:7b",
             temperature=0.1,
             thinking_supported=True,
-            tool_mode="json_plan",
+            tool_mode="native",
             num_ctx=4096,
             keep_alive="10m",
+            planner_profile="fast",
         ),
     }
 

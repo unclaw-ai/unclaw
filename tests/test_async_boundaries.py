@@ -60,6 +60,11 @@ def test_run_blocking_propagates_exceptions(monkeypatch) -> None:
         asyncio.run(run_blocking(fail))
 
 
+def test_run_blocking_stays_usable_across_separate_asyncio_runs() -> None:
+    assert asyncio.run(run_blocking(str.upper, "first")) == "FIRST"
+    assert asyncio.run(run_blocking(str.upper, "second")) == "SECOND"
+
+
 def test_base_provider_chat_async_runs_sync_chat_in_worker_thread() -> None:
     caller_thread = threading.get_ident()
     observed: dict[str, int] = {}

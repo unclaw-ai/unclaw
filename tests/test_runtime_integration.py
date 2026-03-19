@@ -45,6 +45,29 @@ from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINIT
 pytestmark = pytest.mark.integration
 
 
+def _make_offline_router_provider():
+    """Return a fake OllamaProvider class that raises LLMProviderError on every chat call.
+
+    Used to make the router unable to contact Ollama during tests that verify
+    non-routing behaviour (subscriber resilience, adversarial tool wrapping).
+    Raising LLMProviderError causes _classify_route_with_model to return None,
+    which sets planner_available=False and keeps planner_active=False — giving
+    the expected 5-event legacy sequence without depending on whether a real
+    Ollama process is running on the test machine.
+    """
+
+    class _OfflineRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            pass
+
+        def chat(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            raise LLMProviderError("router offline in test")
+
+    return _OfflineRouterProvider
+
+
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
     monkeypatch,
     make_temp_project,
@@ -241,6 +264,13 @@ def test_run_user_turn_continues_when_event_bus_subscriber_raises(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    # Make the router unable to contact Ollama so planner_available stays False
+    # and planner_active stays False — the test exercises subscriber resilience,
+    # not planner behaviour. Without this patch, a running local Ollama causes
+    # the router to set planner_available=True, which triggers the planner loop
+    # (extra model.called + model.succeeded) before the responder call, producing
+    # 7 events instead of the expected 5.
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
         session = session_manager.ensure_current_session()
@@ -756,6 +786,11 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    # Make the router unable to contact Ollama so planner_active stays False.
+    # Without this, a running local Ollama activates the planner loop, which
+    # calls the model twice, causing the TOOL message to appear in captured_messages
+    # twice (once for the planner call, once for the responder call).
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
         session = session_manager.ensure_current_session()
@@ -3190,6 +3225,574 @@ def test_agent_loop_text_only_fallback_when_no_tool_calls(
         event_types = [e.event_type for e in published_events]
         assert "tool.started" not in event_types
         assert "tool.finished" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "fast"
+    captured_tools: list[object | None] = []
+
+    class RouterShouldNotRun:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+            raise AssertionError("fast should not instantiate the router model")
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            captured_tools.append(tools)
+            return LLMResponse(
+                provider="ollama",
+                model_name="llama3.2:3b",
+                content="Fast plain chat reply.",
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Say hello in one sentence.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Say hello in one sentence.",
+            tracer=tracer,
+        )
+
+        assert settings.models["fast"].tool_mode == "none"
+        assert reply == "Fast plain chat reply."
+        assert captured_tools == [None]
+        event_types = [event.event_type for event in published_events]
+        assert "tool.started" not in event_types
+        assert "tool.finished" not in event_types
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize("profile_name", ["main", "deep", "codex"])
+def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_for_final_reply(
+    monkeypatch,
+    make_temp_project,
+    profile_name: str,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = profile_name
+
+    route_profiles: list[str] = []
+    planner_profiles: list[str] = []
+    responder_profiles: list[str] = []
+    responder_tools: list[object | None] = []
+    planner_turn = 0
+    tool_registry = ToolRegistry()
+
+    def _search_tool(call: ToolCall) -> ToolResult:
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text=f"Searched: {call.arguments['query']}",
+        )
+
+    def _fetch_tool(call: ToolCall) -> ToolResult:
+        return ToolResult.ok(
+            tool_name="fetch_url_text",
+            output_text=f"Fetched: {call.arguments['url']}",
+        )
+
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
+    tool_registry.register(FETCH_URL_TEXT_DEFINITION, _fetch_tool)
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            route_profiles.append(profile.name)
+            return LLMResponse(
+                provider="ollama",
+                model_name="llama3.2:3b",
+                content='{"route":"chat","search_query":""}',
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal planner_turn
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "Decide the next runtime action." in messages[0].content
+            ):
+                planner_profiles.append(profile.name)
+                planner_turn += 1
+                if planner_turn == 1:
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name="llama3.2:3b",
+                        content=(
+                            '{"action":"tool_call","tool_name":"fetch_url_text",'
+                            '"arguments":{"url":"https://example.com"},'
+                            '"search_query":""}'
+                        ),
+                        created_at="2026-03-19T12:00:00Z",
+                        finish_reason="stop",
+                    )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="llama3.2:3b",
+                    content='{"action":"no_tool","tool_name":"","arguments":{},"search_query":""}',
+                    created_at="2026-03-19T12:00:00Z",
+                    finish_reason="stop",
+                )
+
+            responder_profiles.append(profile.name)
+            responder_tools.append(tools)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=f"{profile.name} final reply",
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Read the fetched page and summarize it.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Read the fetched page and summarize it.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert settings.models[profile_name].planner_profile == "fast"
+        assert reply == f"{profile_name} final reply"
+        assert route_profiles == ["fast"]
+        assert planner_profiles == ["fast", "fast"]
+        assert responder_profiles == [profile_name]
+        assert responder_tools == [None]
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert "Fetched: https://example.com" in stored_messages[1].content
+    finally:
+        session_manager.close()
+
+
+def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    route_profiles: list[str] = []
+    planner_profiles: list[str] = []
+    responder_tools: list[object | None] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name="search_web",
+            output_text=f"Searched: {call.arguments['query']}",
+        ),
+    )
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            route_profiles.append(profile.name)
+            return LLMResponse(
+                provider="ollama",
+                model_name="llama3.2:3b",
+                content='{"route":"chat","search_query":""}',
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            if (
+                messages
+                and messages[0].role is LLMRole.SYSTEM
+                and "Decide the next runtime action." in messages[0].content
+            ):
+                planner_profiles.append(profile.name)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="llama3.2:3b",
+                    content='{"action":"direct_chat","tool_name":"","arguments":{},"search_query":""}',
+                    created_at="2026-03-19T12:00:00Z",
+                    finish_reason="stop",
+                )
+
+            responder_tools.append(tools)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Direct-chat responder reply.",
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Explain recursion simply.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Explain recursion simply.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Direct-chat responder reply."
+        assert route_profiles == ["fast"]
+        assert planner_profiles == ["fast"]
+        assert responder_tools == [None]
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+        ]
+    finally:
+        session_manager.close()
+
+
+def test_planner_route_fallback_uses_legacy_native_responder_loop(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    route_profiles: list[str] = []
+    responder_tools: list[object | None] = []
+    responder_calls = 0
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name="search_web",
+            output_text=f"Searched: {call.arguments['query']}",
+        ),
+    )
+    tool_registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name="fetch_url_text",
+            output_text=f"Fetched: {call.arguments['url']}",
+        ),
+    )
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            route_profiles.append(profile.name)
+            if profile.name == "fast":
+                raise LLMProviderError("planner unavailable")
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content='{"route":"chat","search_query":""}',
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback
+            nonlocal responder_calls
+            responder_calls += 1
+            responder_tools.append(tools)
+            if responder_calls == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-19T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {
+                                            "url": "https://example.com"
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Legacy native fallback reply.",
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Fetch https://example.com and summarize it.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Fetch https://example.com and summarize it.",
+            tracer=tracer,
+            event_bus=event_bus,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Legacy native fallback reply."
+        assert route_profiles == ["fast", "main"]
+        assert responder_tools[0] is not None
+        assert any(tool.name == "fetch_url_text" for tool in responder_tools[0])
+        route_event = next(
+            event for event in published_events if event.event_type == "route.selected"
+        )
+        assert route_event.payload["planner_profile_name"] == "fast"
+        assert route_event.payload["planner_available"] is False
+        assert "planner_fallback_reason" in route_event.payload
     finally:
         session_manager.close()
 

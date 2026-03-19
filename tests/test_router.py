@@ -12,7 +12,7 @@ from unclaw.core.router import (
     _guard_exact_spans,
     route_request,
 )
-from unclaw.llm.base import LLMResponse
+from unclaw.llm.base import LLMProviderError, LLMResponse
 from unclaw.settings import load_settings
 
 
@@ -228,6 +228,122 @@ def test_route_request_falls_back_to_normal_chat_when_classifier_output_is_inval
 
     assert route.kind is RouteKind.CHAT_WITH_THINKING
     assert route.search_query is None
+
+
+def test_route_request_uses_configured_planner_profile_when_available(
+    monkeypatch,
+) -> None:
+    settings = _load_repo_settings()
+    capability_summary = _build_capability_summary(settings)
+    seen_profiles: list[str] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            seen_profiles.append(profile.name)
+            return LLMResponse(
+                provider="ollama",
+                model_name="llama3.2:3b",
+                content='{"route":"chat","search_query":""}',
+                created_at="2026-03-19T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+
+    route = route_request(
+        settings=settings,
+        model_profile_name="main",
+        planner_profile_name=settings.models["main"].planner_profile,
+        user_input="Explain the difference between RAM and storage.",
+        thinking_enabled=False,
+        capability_summary=capability_summary,
+    )
+
+    assert route.kind is RouteKind.CHAT
+    assert route.planner_profile_name == "fast"
+    assert route.planner_available is True
+    assert route.planner_fallback_reason is None
+    assert seen_profiles == ["fast"]
+
+
+def test_route_request_falls_back_to_responder_when_planner_profile_fails(
+    monkeypatch,
+) -> None:
+    settings = _load_repo_settings()
+    capability_summary = _build_capability_summary(settings)
+    seen_profiles: list[str] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            seen_profiles.append(profile.name)
+            if profile.name == "fast":
+                raise LLMProviderError("planner offline")
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content='{"route":"web_search","search_query":"latest AI news"}',
+                created_at="2026-03-19T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+
+    route = route_request(
+        settings=settings,
+        model_profile_name="main",
+        planner_profile_name=settings.models["main"].planner_profile,
+        user_input="What is the latest AI news today?",
+        thinking_enabled=False,
+        capability_summary=capability_summary,
+    )
+
+    assert route.kind is RouteKind.WEB_SEARCH
+    assert route.search_query == "latest AI news"
+    assert route.planner_profile_name == "fast"
+    assert route.planner_available is False
+    assert route.planner_fallback_reason is not None
+    assert "falling back" in route.planner_fallback_reason.lower()
+    assert seen_profiles == ["fast", "main"]
 
 
 def _load_repo_settings():

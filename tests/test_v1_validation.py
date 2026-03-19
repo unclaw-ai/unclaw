@@ -705,10 +705,11 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOrchestratorProvider)
 
-    # Force "fast" (json_plan) to keep this test focused on the non-native path.
-    # P5-2: the explicit ToolCall path is now active for both native and non-native
-    # profiles — the runtime always pre-executes search_web with the routed query.
-    command_handler.current_model_profile_name = "fast"
+    # Use the shipped default responder profile. P5-2 guarantees the explicit
+    # search_web execution path on routed WEB_SEARCH turns for both native and
+    # non-native responders, so this test should not rely on fast pretending to
+    # be a searchable non-native profile now that fast is chat-only by design.
+    command_handler.current_model_profile_name = "main"
 
     try:
         session = session_manager.ensure_current_session()
@@ -821,34 +822,40 @@ def test_v1_shipped_main_profile_is_native() -> None:
     )
 
 
-def test_v1_shipped_fast_profile_is_native() -> None:
-    """The shipped 'fast' profile must have tool_mode=native (P5-X mission change).
+def test_v1_shipped_fast_profile_is_chat_only() -> None:
+    """The shipped 'fast' profile must stay chat-only for responsiveness.
 
-    Regression guard: 'fast' was changed from json_plan to native in P5-X so all
-    shipped profiles use the agent loop. Reverting to json_plan would disable the
-    agent loop for this profile.
+    Regression guard for BIG-FIX-ROUTER-1: 'fast' is now intentionally
+    non-agentic, so it must not re-enter native or json_plan tool mode.
     """
     settings = _load_repo_settings()
     fast_profile = settings.models["fast"]
-    assert fast_profile.tool_mode == "native", (
-        "The 'fast' profile must be tool_mode=native. "
-        "Reverting to json_plan would disable the agent loop for this profile."
+    assert fast_profile.tool_mode == "none", (
+        "The 'fast' profile must stay tool_mode=none so normal fast turns remain "
+        "plain chat without planner-driven or native tool work."
     )
 
 
 def test_v1_shipped_codex_profile_is_native() -> None:
-    """The shipped 'codex' profile must have tool_mode=native (P5-X mission change).
+    """The shipped 'codex' profile must stay native for safe fallback.
 
-    Regression guard: 'codex' was changed from json_plan to native in P5-X so all
-    shipped profiles use the agent loop. Reverting to json_plan would disable the
-    agent loop for this profile.
+    BIG-FIX-ROUTER-1 adds planner routing for codex, but the responder profile
+    still needs native capability metadata for the explicit fallback path.
     """
     settings = _load_repo_settings()
     codex_profile = settings.models["codex"]
     assert codex_profile.tool_mode == "native", (
         "The 'codex' profile must be tool_mode=native. "
-        "Reverting to json_plan would disable the agent loop for this profile."
+        "The planner/responder split keeps codex as the responder and preserves "
+        "native fallback behavior when the planner is unavailable."
     )
+
+
+def test_v1_shipped_agentic_profiles_use_fast_as_their_planner() -> None:
+    settings = _load_repo_settings()
+    assert settings.models["main"].planner_profile == "fast"
+    assert settings.models["deep"].planner_profile == "fast"
+    assert settings.models["codex"].planner_profile == "fast"
 
 
 def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
@@ -863,8 +870,8 @@ def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(
     """
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
-    # Override "fast" to json_plan for this test: the shipped profile is now native,
-    # but this test specifically proves the non-native path behavior.
+    # Override "fast" to json_plan for this test so the legacy non-native path
+    # stays covered independently of the shipped chat-only default.
     set_profile_tool_mode(settings, "fast", tool_mode="json_plan")
     session_manager = SessionManager.from_settings(settings)
     command_handler = CommandHandler(
@@ -1054,14 +1061,15 @@ def test_v1_native_profile_agent_loop_activates_and_executes_tool(
         session_manager.close()
 
 
-def test_v1_native_and_json_plan_profile_tool_mode_values_are_disjoint() -> None:
-    """Shipped profiles must be clearly split between native and json_plan tool modes.
+def test_v1_shipped_profile_tool_mode_values_are_explicit() -> None:
+    """Shipped profiles must use only the explicit supported tool_mode values.
 
     No profile should have an ambiguous or unknown tool_mode. This is the
-    capability split that determines whether the agent loop activates.
+    capability split that determines whether a profile is planner-driven,
+    native-fallback capable, or plain chat only.
     """
     settings = _load_repo_settings()
-    valid_tool_modes = {"native", "json_plan"}
+    valid_tool_modes = {"native", "json_plan", "none"}
     for name, profile in settings.models.items():
         assert profile.tool_mode in valid_tool_modes, (
             f"Profile {name!r} has tool_mode={profile.tool_mode!r}. "
