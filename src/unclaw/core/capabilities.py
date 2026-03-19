@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from unclaw.tools.file_tools import (
+    COPY_FILE_DEFINITION,
     LIST_DIRECTORY_DEFINITION,
     MOVE_FILE_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
@@ -276,6 +277,13 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Default is overwrite=false — fails if the destination already exists. "
             "Only moves files, not directories."
         )
+    if COPY_FILE_DEFINITION.name in summary.available_builtin_tool_names:
+        lines.append(
+            "copy_file <source_path> <destination_path>: copy one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only copies files, not directories."
+        )
     if summary.session_history_recall_available:
         lines.append(
             "inspect_session_history: return an exact, deterministic list of "
@@ -329,9 +337,11 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
 
 
 def _format_unavailable_local_file_actions(summary: RuntimeCapabilitySummary) -> str:
-    actions = ["delete", "rename", "copy"]
+    actions = ["delete", "rename"]
     if MOVE_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
         actions.insert(1, "move")
+    if COPY_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
+        actions.append("copy")
 
     if len(actions) == 1:
         return actions[0]

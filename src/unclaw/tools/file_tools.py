@@ -107,6 +107,30 @@ MOVE_FILE_DEFINITION = ToolDefinition(
     },
 )
 
+COPY_FILE_DEFINITION = ToolDefinition(
+    name="copy_file",
+    description=(
+        "Copy one local file to another local path. "
+        "Relative paths are resolved inside the data/files/ directory by default. "
+        "Fails if the destination already exists unless overwrite is set to true. "
+        "Only copies files inside the configured allowed roots."
+    ),
+    permission_level=ToolPermissionLevel.LOCAL_WRITE,
+    arguments={
+        "source_path": ToolArgumentSpec(description="Path to the source file to copy."),
+        "destination_path": ToolArgumentSpec(
+            description="Path where the copied file should be written."
+        ),
+        "overwrite": ToolArgumentSpec(
+            description=(
+                "Set to true to allow replacing an existing destination file. "
+                "Default: false — copy fails if the destination already exists."
+            ),
+            value_type="boolean",
+        ),
+    },
+)
+
 
 def register_file_tools(
     registry: ToolRegistry,
@@ -143,10 +167,19 @@ def register_file_tools(
             default_write_dir=default_write_dir,
         )
 
+    def copy_handler(call: ToolCall) -> ToolResult:
+        return copy_file(
+            call,
+            allowed_roots=allowed_roots,
+            default_read_dir=default_read_dir,
+            default_write_dir=default_write_dir,
+        )
+
     registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
     registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
     registry.register(WRITE_TEXT_FILE_DEFINITION, write_handler)
     registry.register(MOVE_FILE_DEFINITION, move_handler)
+    registry.register(COPY_FILE_DEFINITION, copy_handler)
 
 
 def read_text_file(
@@ -508,6 +541,102 @@ def move_file(
     )
 
 
+def copy_file(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+    default_read_dir: Path | None = None,
+    default_write_dir: Path | None = None,
+) -> ToolResult:
+    """Copy one local file to another local path, bounded and permissioned."""
+    tool_name = COPY_FILE_DEFINITION.name
+
+    try:
+        source_path_value = _read_string_argument(call.arguments, "source_path")
+        destination_path_value = _read_string_argument(call.arguments, "destination_path")
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+
+    overwrite = call.arguments.get("overwrite", False)
+    if not isinstance(overwrite, bool):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error="Argument 'overwrite' must be a boolean.",
+        )
+
+    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    source_path = _resolve_file_tool_path(
+        source_path_value,
+        default_dir=default_read_dir,
+        allowed_roots=normalized_allowed_roots,
+    )
+    destination_path = _resolve_file_tool_path(
+        destination_path_value,
+        default_dir=default_write_dir,
+        allowed_roots=normalized_allowed_roots,
+    )
+    source_access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=source_path,
+        allowed_roots=normalized_allowed_roots,
+    )
+    if source_access_error is not None:
+        return source_access_error
+
+    destination_access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=destination_path,
+        allowed_roots=normalized_allowed_roots,
+    )
+    if destination_access_error is not None:
+        return destination_access_error
+
+    if not source_path.exists():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Source file does not exist: {source_path}",
+        )
+
+    if not source_path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Source path is not a file: {source_path}",
+        )
+
+    if destination_path.exists() and not overwrite:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"Destination file already exists: {destination_path}. "
+                "Pass overwrite=true to replace it."
+            ),
+        )
+
+    if destination_path.exists() and not destination_path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Destination path exists but is not a file: {destination_path}",
+        )
+
+    try:
+        shutil.copy2(source_path, destination_path)
+    except OSError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Could not copy file '{source_path}' to '{destination_path}': {exc}",
+        )
+
+    return ToolResult.ok(
+        tool_name=tool_name,
+        output_text=f"File copied: {source_path} -> {destination_path}",
+        payload={
+            "source_path": str(source_path),
+            "destination_path": str(destination_path),
+            "overwrite": overwrite,
+        },
+    )
+
+
 def _append_directory_lines(
     *,
     path: Path,
@@ -694,12 +823,14 @@ def _read_positive_int_argument(
 
 
 __all__ = [
+    "COPY_FILE_DEFINITION",
     "LIST_DIRECTORY_DEFINITION",
     "MOVE_FILE_DEFINITION",
     "READABLE_EXTENSIONS",
     "READ_TEXT_FILE_DEFINITION",
     "WRITE_TEXT_FILE_DEFINITION",
     "_MAX_WRITE_FILE_CHARS",
+    "copy_file",
     "list_directory",
     "move_file",
     "read_text_file",
