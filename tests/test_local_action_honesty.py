@@ -3,7 +3,8 @@
 Proves:
 1. The capability context prohibits claiming file write success without tool output
    (both in slash-command/json_plan mode and in model-callable/native mode).
-2. The capability context explicitly lists delete/move/rename/copy as unavailable.
+2. The capability context lists move_file when registered and keeps the remaining
+   unsupported local file actions explicit.
 3. The capability context forbids suggesting delete/move/copy might work after confirmation.
 4. The existing overwrite refusal short-circuit path still works (regression guard).
 """
@@ -30,7 +31,7 @@ pytestmark = pytest.mark.unit
 
 
 def _capability_context(*, model_can_call_tools: bool) -> str:
-    """Build the full capability context string using all 10 registered tools."""
+    """Build the full capability context string using all 11 registered tools."""
     registry = create_default_tool_registry()
     summary = build_runtime_capability_summary(
         tool_registry=registry,
@@ -114,30 +115,37 @@ def test_capability_context_requires_tool_output_before_claiming_write_in_native
 
 
 # ---------------------------------------------------------------------------
-# 3. Delete / move / rename / copy explicitly listed as unavailable
+# 3. move_file availability and remaining unsupported actions stay explicit
 # ---------------------------------------------------------------------------
 
 
-def test_capability_context_explicitly_lists_delete_move_copy_as_unavailable() -> None:
-    """Delete, move, rename, copy must be explicitly in the unavailable section.
+def test_capability_context_lists_move_file_when_registered() -> None:
+    """The default capability context must expose move_file once it is registered."""
+    context_full = _capability_context(model_can_call_tools=False)
+    assert "move_file <source_path> <destination_path>" in context_full
 
-    The generic 'Any capability not listed above' catch-all is too weak for
-    small models. The capability must be named explicitly.
-    Required by the local-action honesty corrective patch.
+
+def test_capability_context_explicitly_lists_remaining_unavailable_actions() -> None:
+    """Unsupported local file actions must still be explicit.
+
+    Once move_file is registered, the capability context must stop claiming
+    move is unavailable, while still naming the remaining unsupported actions.
     """
     # Check with all tools registered.
     context_full = _capability_context(model_can_call_tools=False)
-    assert "Delete, move, rename, or copy local files or directories" in context_full
+    assert "Delete, rename, or copy local files or directories" in context_full
+    assert "Delete, move, rename, or copy local files or directories" not in context_full
 
     # Check with no tools registered (empty registry).
     context_empty = _empty_capability_context()
     assert "Delete, move, rename, or copy local files or directories" in context_empty
 
 
-def test_capability_context_delete_explicit_in_native_mode_too() -> None:
-    """Delete/move/copy must be explicitly unavailable regardless of tool mode."""
+def test_capability_context_remaining_unavailable_actions_explicit_in_native_mode_too() -> None:
+    """Native mode must keep only the truly unavailable actions in the warning."""
     context = _capability_context(model_can_call_tools=True)
-    assert "Delete, move, rename, or copy local files or directories" in context
+    assert "Delete, rename, or copy local files or directories" in context
+    assert "Delete, move, rename, or copy local files or directories" not in context
 
 
 # ---------------------------------------------------------------------------

@@ -278,6 +278,21 @@ def test_nested_relative_path_writes_under_default_write_dir(tmp_path: Path) -> 
     assert (write_dir / "drafts" / "hello.txt").read_text(encoding="utf-8") == "draft"
 
 
+def test_project_relative_path_is_not_prefixed_twice(tmp_path: Path) -> None:
+    write_dir = tmp_path / "data" / "files"
+    target = tmp_path / "data" / "hello.txt"
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": "data/hello.txt", "content": "explicit"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,), default_write_dir=write_dir)
+    assert result.success is True
+    assert target.read_text(encoding="utf-8") == "explicit"
+    assert result.payload is not None
+    assert result.payload["path"] == str(target)
+    assert not (write_dir / "data" / "hello.txt").exists()
+
+
 def test_absolute_path_bypasses_default_write_dir(tmp_path: Path) -> None:
     """Absolute allowed path must bypass the default_write_dir redirect."""
     write_dir = tmp_path / "files"

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from unclaw.tools.file_tools import (
     LIST_DIRECTORY_DEFINITION,
+    MOVE_FILE_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
 )
@@ -95,6 +96,7 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
     """Build the system-context note that keeps the model honest about tools."""
     available_tool_lines = _build_available_tool_lines(summary)
     unavailable_lines = _build_unavailable_lines(summary)
+    unavailable_local_file_actions = _format_unavailable_local_file_actions(summary)
 
     lines = [
         "Runtime capability status:",
@@ -225,7 +227,7 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "implying it exists."
             ),
             (
-                "- If the user asks to delete, move, rename, or copy a file or "
+                f"- If the user asks to {unavailable_local_file_actions} a file or "
                 "directory, say clearly this capability does not exist. Do not "
                 "suggest it might work after confirmation."
             ),
@@ -267,6 +269,13 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "Default is overwrite=false — fails if the file already exists. "
             "Only use overwrite=true when the user explicitly intends to replace an existing file."
         )
+    if MOVE_FILE_DEFINITION.name in summary.available_builtin_tool_names:
+        lines.append(
+            "move_file <source_path> <destination_path>: move one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only moves files, not directories."
+        )
     if summary.session_history_recall_available:
         lines.append(
             "inspect_session_history: return an exact, deterministic list of "
@@ -292,7 +301,10 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
 def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines = [
         "Shell command execution.",
-        "Delete, move, rename, or copy local files or directories (no such tool is registered).",
+        (
+            f"{_format_unavailable_local_file_actions(summary).capitalize()} local files "
+            "or directories (no such tool is registered)."
+        ),
         "Any capability that is not listed as available above.",
     ]
 
@@ -314,6 +326,18 @@ def _build_unavailable_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ..
         lines.insert(0, "Session memory and summary access.")
 
     return tuple(lines)
+
+
+def _format_unavailable_local_file_actions(summary: RuntimeCapabilitySummary) -> str:
+    actions = ["delete", "rename", "copy"]
+    if MOVE_FILE_DEFINITION.name not in summary.available_builtin_tool_names:
+        actions.insert(1, "move")
+
+    if len(actions) == 1:
+        return actions[0]
+    if len(actions) == 2:
+        return f"{actions[0]} or {actions[1]}"
+    return f"{', '.join(actions[:-1])}, or {actions[-1]}"
 
 
 __all__ = [

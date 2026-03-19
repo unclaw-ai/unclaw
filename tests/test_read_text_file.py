@@ -244,6 +244,24 @@ def test_relative_read_resolves_into_default_read_dir(tmp_path: Path) -> None:
     assert str(files_dir / "hello.txt") in result.output_text
 
 
+def test_project_relative_read_path_is_not_prefixed_twice(tmp_path: Path) -> None:
+    files_dir = tmp_path / "data" / "files"
+    files_dir.mkdir(parents=True)
+    target = files_dir / "hello.txt"
+    target.write_text("hello world", encoding="utf-8")
+
+    result = read_text_file(
+        _make_call("data/files/hello.txt"),
+        allowed_roots=(tmp_path,),
+        default_read_dir=files_dir,
+    )
+
+    assert result.success, f"Expected success, got: {result.error}"
+    assert result.payload is not None
+    assert result.payload["path"] == str(target)
+    assert "hello world" in result.output_text
+
+
 def test_absolute_read_ignores_default_read_dir(tmp_path: Path) -> None:
     """Absolute path bypasses default_read_dir and resolves directly."""
     files_dir = tmp_path / "data" / "files"
