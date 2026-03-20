@@ -11,7 +11,7 @@ from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.startup import OllamaStatus
-from unclaw.tools.contracts import ToolResult
+from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
@@ -52,6 +52,13 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
     settings = _patch_ready_ollama(monkeypatch, project_root)
     scripted_inputs = iter(["Hello from the terminal."])
 
+    class RouterShouldNotRun:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default CLI chat turns must not instantiate the router")
+
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -74,19 +81,6 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
             tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, tools
-            if (
-                messages
-                and messages[0].role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query"
-                in messages[0].content
-            ):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=settings.default_model.model_name,
-                    content='{"route":"chat","search_query":""}',
-                    created_at="2026-03-16T10:00:00Z",
-                    finish_reason="stop",
-                )
             reply = "Hello from the local model."
             if content_callback is not None:
                 content_callback(reply)
@@ -98,7 +92,7 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("builtins.input", lambda _prompt: _next_input(scripted_inputs))
 
@@ -128,14 +122,10 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
     capsys,
 ) -> None:
     project_root = make_temp_project()
-    # Explicitly pin main to non-native (json_plan) so the runtime pre-executes
-    # the search tool and persists a TOOL message before the LLM call. This test
-    # covers the non-native grounding flow. main is now native by default
-    # (P2-5 shipped); native coverage is in test_cli_search_returns_a_natural_reply_*.
-    _force_main_json_plan(project_root)
     settings = _patch_ready_ollama(monkeypatch, project_root)
+    search_query = "Marine Leleu biography"
     search_registry = _build_search_registry(
-        query="fais une recherche en ligne sur Marine Leleu et fais moi sa biographie",
+        query=search_query,
         summary_point="Marine Leleu is a French endurance athlete and content creator.",
         sources=(
             ("Marine Leleu", "https://example.com/marine-leleu"),
@@ -149,6 +139,13 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
             "Summarize that more briefly.",
         ]
     )
+
+    class RouterShouldNotRun:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default non-native CLI flow should not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -172,21 +169,6 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
             tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, content_callback, tools
-            if (
-                messages
-                and messages[0].role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query"
-                in messages[0].content
-            ):
-                request_text = messages[-1].content
-                route = "web_search" if "Marine Leleu" in request_text else "chat"
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=settings.default_model.model_name,
-                    content=f'{{"route":"{route}","search_query":""}}',
-                    created_at="2026-03-16T10:00:00Z",
-                    finish_reason="stop",
-                )
             if (
                 messages
                 and messages[0].role is LLMRole.SYSTEM
@@ -240,10 +222,40 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
                     finish_reason="stop",
                 )
 
+            if not any(message.role is LLMRole.TOOL for message in messages):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=settings.default_model.model_name,
+                    content="",
+                    created_at="2026-03-16T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": search_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {"query": search_query},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
             return LLMResponse(
                 provider="ollama",
                 model_name=settings.default_model.model_name,
-                content="Marine Leleu is a French endurance athlete and content creator.",
+                content=(
+                    "Marine Leleu is a French endurance athlete and content creator."
+                ),
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
@@ -252,7 +264,7 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
         "unclaw.core.runtime.create_default_tool_registry",
         lambda _settings=None, session_manager=None: search_registry,
     )
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("builtins.input", lambda _prompt: _next_input(scripted_inputs))
 
@@ -267,7 +279,7 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
     assert "Sources:\n- Marine Leleu: https://example.com/marine-leleu" in output
     assert "- Athlete Profile: https://example.com/athletes/marine-leleu" in output
     assert "Unclaw> Shorter recap." in output
-    assert len(captured_messages) == 2
+    assert len(captured_messages) == 3
 
     session_manager = SessionManager.from_settings(settings)
     try:

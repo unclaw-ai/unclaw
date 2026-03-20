@@ -276,6 +276,19 @@ def run_user_turn(
     system_context_notes: tuple[str, ...] = ()
     runtime_explicit_tool_call = explicit_tool_call
     assistant_reply: str | None = None
+    turn_start_message_count = len(session_manager.list_messages(session.id))
+
+    if runtime_explicit_tool_call is None and legacy_tool_definitions is not None:
+        active_assistant_reply_transform = _compose_reply_transforms(
+            _build_default_search_grounding_transform(
+                session_manager=session_manager,
+                session_id=session.id,
+                query=user_input,
+                turn_start_message_count=turn_start_message_count,
+                model_profile_name=selected_model_profile_name,
+            ),
+            active_assistant_reply_transform,
+        )
 
     try:
         memory_context_note = _build_session_memory_context_note(
@@ -291,9 +304,7 @@ def run_user_turn(
             user_input=user_input,
             thinking_enabled=thinking_enabled,
             capability_summary=capability_summary,
-            allow_web_search_routing=(
-                explicit_tool_call is None and not router_exempt_profile
-            ),
+            allow_web_search_routing=False,
         )
         route_planner_profile_name = _read_route_planner_profile_name(route)
         route_planner_available = _read_route_planner_available(route)
@@ -504,7 +515,9 @@ def _read_route_planner_profile_name(
     return normalized or None
 
 
-def _read_route_planner_available(route: Any) -> bool:
+def _read_route_planner_available(route: Any) -> bool | None:
+    if _read_route_planner_profile_name(route) is None:
+        return None
     return getattr(route, "planner_available", False) is True
 
 
@@ -520,7 +533,7 @@ def _is_router_exempt_chat_profile(
     model_profile_name: str,
     model_profile: Any,
 ) -> bool:
-    """Fast stays pure chat; lite codex still participates in dedicated routing."""
+    """Fast stays pure chat even though the runtime has a default tool registry."""
     tool_mode = getattr(model_profile, "tool_mode", None)
     if not isinstance(tool_mode, str):
         return False
@@ -615,6 +628,29 @@ def _compose_reply_transforms(
         return second(first(reply))
 
     return _composed
+
+
+def _build_default_search_grounding_transform(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    query: str,
+    turn_start_message_count: int,
+    model_profile_name: str,
+) -> Callable[[str], str]:
+    from unclaw.core.research_flow import apply_search_grounding_from_history
+
+    def _grounding_transform(reply: str) -> str:
+        return apply_search_grounding_from_history(
+            reply,
+            query=query,
+            session_manager=session_manager,
+            session_id=session_id,
+            turn_start_message_count=turn_start_message_count,
+            model_profile_name=model_profile_name,
+        )
+
+    return _grounding_transform
 
 
 def _run_agent_loop(

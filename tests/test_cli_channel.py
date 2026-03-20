@@ -850,7 +850,7 @@ def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecuti
     assert captured_messages
 
 
-def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
+def test_cli_native_search_can_continue_into_native_write_tool_loop(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -920,30 +920,12 @@ def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
-            del profile, messages, kwargs
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    '{"route":"web_search",'
-                    f'"search_query":"{reformulated_query}"'
-                    "}"
-                ),
-                created_at="2026-03-20T10:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default CLI turns must not instantiate the router")
 
     class FakeOrchestratorProvider:
         provider_name = "ollama"
@@ -975,6 +957,36 @@ def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
                     model_name="qwen3.5:4b",
                     content="",
                     created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": reformulated_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {
+                                            "query": reformulated_query,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            if responder_call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="",
+                    created_at="2026-03-20T10:00:02Z",
                     finish_reason="stop",
                     tool_calls=(
                         ToolCall(
@@ -1010,11 +1022,11 @@ def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
                 provider="ollama",
                 model_name="qwen3.5:4b",
                 content=reply,
-                created_at="2026-03-20T10:00:02Z",
+                created_at="2026-03-20T10:00:03Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         FakeOrchestratorProvider,
@@ -1057,7 +1069,7 @@ def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert responder_call_count == 2
+    assert responder_call_count == 3
     assert search_calls == [
         ToolCall(tool_name="search_web", arguments={"query": reformulated_query})
     ]
@@ -1078,4 +1090,4 @@ def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
     assert "Unclaw> I saved a short briefing to marine-leleu.txt." in output
     assert "Sources:\n- Marine Leleu: https://example.com/marine-leleu" in output
     assert "- Athlete Profile: https://example.com/athletes/marine-leleu" in output
-    assert "[answer refined]" in output
+    assert "[answer refined]" not in output

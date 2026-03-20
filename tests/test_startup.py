@@ -78,7 +78,7 @@ def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> No
     )
 
 
-def test_startup_report_warns_when_dedicated_router_model_is_missing(monkeypatch) -> None:
+def test_startup_report_ignores_missing_router_model_in_default_preflight(monkeypatch) -> None:
     settings = load_settings(project_root=_repo_root())
 
     monkeypatch.setattr(
@@ -98,11 +98,8 @@ def test_startup_report_warns_when_dedicated_router_model_is_missing(monkeypatch
         required_profile_names=(settings.app.default_model_profile,),
     )
 
-    router_check = next(check for check in report.checks if check.label == "Router")
     assert report.has_errors is False
-    assert router_check.status is CheckStatus.WARN
-    assert settings.router.model_name in router_check.detail
-    assert "fall back" in router_check.detail.lower()
+    assert all(check.label != "Router" for check in report.checks)
 
 
 def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> None:

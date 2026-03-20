@@ -838,7 +838,7 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
         session_manager.close()
 
 
-def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_for_non_native_profile(
+def test_run_user_turn_non_native_profile_stays_direct_and_does_not_preexecute_search(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -898,7 +898,12 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
 
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
-    reformulated_query = "biographie de Marine Leleu"
+    class RouterShouldNotRun:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default non-native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -922,34 +927,17 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
             tools=None,
         ):
             del profile, timeout_seconds, thinking_enabled, content_callback
-            first_message = messages[0]
-            if (
-                first_message.role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query" in first_message.content
-            ):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name="qwen3.5:4b",
-                    content=(
-                        '{"route":"web_search",'
-                        f'"search_query":"{reformulated_query}"'
-                        "}"
-                    ),
-                    created_at="2026-03-16T10:00:00Z",
-                    finish_reason="stop",
-                )
-
             captured_tools.append(tools)
             captured_messages.append(list(messages))
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
-                content="Marine Leleu is a French endurance athlete and content creator.",
+                content="Direct non-native reply without runtime search.",
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -970,38 +958,24 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
             tool_registry=tool_registry,
         )
 
-        assert "Marine Leleu is a French endurance athlete and content creator." in reply
-        assert "Sources:" in reply
-        assert "https://example.com/marine-leleu" in reply
-        assert "https://example.com/athletes/marine-leleu" in reply
-        assert len(captured_search_calls) == 1
-        assert captured_search_calls[0].arguments["query"] == reformulated_query
+        assert reply == "Direct non-native reply without runtime search."
+        assert "Sources:" not in reply
+        assert captured_search_calls == []
         assert captured_tools == [None]
-        assert any(
-            message.role is LLMRole.SYSTEM
-            and f"Ground this request: {reformulated_query}" in message.content
-            for message in captured_messages[0]
-        )
-        assert any(
-            message.role is LLMRole.TOOL
-            and "Marine Leleu: https://example.com/marine-leleu" in message.content
-            for message in captured_messages[0]
+        assert not any(
+            message.role is LLMRole.TOOL for message in captured_messages[0]
         )
 
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
             MessageRole.USER,
-            MessageRole.TOOL,
             MessageRole.ASSISTANT,
         ]
-        assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
 
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
             "route.selected",
-            "tool.started",
-            "tool.finished",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
@@ -1009,21 +983,16 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         route_event = next(
             event for event in published_events if event.event_type == "route.selected"
         )
-        assert route_event.payload["route_kind"] == "web_search"
+        assert route_event.payload["route_kind"] == "chat"
     finally:
         session_manager.close()
 
 
-def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_path_for_native_profile(
+def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
 ) -> None:
-    # P5-2 updated test: native WEB_SEARCH now forces the initial search BEFORE
-    # the model is called.  The model receives search results already in context
-    # and can answer directly without calling search_web again.
-    # Previous flow: model called first → returns tool_call → agent loop → model again.
-    # New flow:      forced search first → model called with results in context → replies.
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     set_profile_tool_mode(settings, "main", tool_mode="native")
@@ -1041,7 +1010,8 @@ def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_
         memory_manager=SimpleNamespace(),
     )
 
-    user_input = "fais une recherche en ligne sur Marine Leleu et fais moi sa biographie"
+    user_input = "Find current information about Marine Leleu and summarize it."
+    native_search_query = "Marine Leleu recent profile"
     captured_search_calls: list[ToolCall] = []
     tool_registry = ToolRegistry()
 
@@ -1078,7 +1048,13 @@ def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_
     captured_turn_messages: list[list[LLMMessage]] = []
     captured_turn_tools: list[object | None] = []
     turn_call_count = 0
-    reformulated_query = "biographie de Marine Leleu"
+
+    class RouterShouldNotRun:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1101,62 +1077,61 @@ def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_
             content_callback=None,
             tools=None,
         ):
-            del profile, timeout_seconds, thinking_enabled, content_callback
-            first_message = messages[0]
-            if (
-                first_message.role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query" in first_message.content
-            ):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name="qwen3.5:4b",
-                    content=(
-                        '{"route":"web_search",'
-                        f'"search_query":"{reformulated_query}"'
-                        "}"
-                    ),
-                    created_at="2026-03-16T10:00:00Z",
-                    finish_reason="stop",
-                )
-
+            del timeout_seconds, thinking_enabled, content_callback
             nonlocal turn_call_count
             turn_call_count += 1
             captured_turn_tools.append(tools)
             captured_turn_messages.append(list(messages))
-
-            # By the time the model is called, the forced initial search has
-            # already executed and its result is in the session history. The
-            # responder should stay on the shared native tool path.
             assert tools is not None
             assert any(tool.name == "search_web" for tool in tools)
-            assert any(
-                message.role is LLMRole.SYSTEM
-                and f"Ground this request: {reformulated_query}" in message.content
-                for message in messages
-            )
-            # Verify the forced search result is in context before the model call.
+            if turn_call_count == 1:
+                assert not any(
+                    message.role is LLMRole.TOOL for message in messages
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-16T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": native_search_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {"query": native_search_query},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
             tool_messages_in_context = [
-                message for message in messages if message.role is LLMRole.TOOL
+                message.content
+                for message in messages
+                if message.role is LLMRole.TOOL
             ]
-            assert len(tool_messages_in_context) >= 1, (
-                "P5-2: forced initial search result must be in context "
-                "before the first model call."
-            )
-            assert any(
-                reformulated_query in msg.content for msg in tool_messages_in_context
-            ), (
-                "P5-2: the search result in context must contain the routed query."
-            )
-            # Simulate a smart model that sees results already in context and answers.
+            assert len(tool_messages_in_context) == 1
+            assert native_search_query in tool_messages_in_context[0]
+            assert "Marine Leleu" in tool_messages_in_context[0]
             return LLMResponse(
                 provider="ollama",
-                model_name="qwen3.5:4b",
+                model_name=profile.model_name,
                 content="Marine Leleu is a French endurance athlete and content creator.",
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -1180,38 +1155,27 @@ def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_
         assert "Sources:" in reply
         assert "https://example.com/marine-leleu" in reply
         assert "https://example.com/athletes/marine-leleu" in reply
-        # P5-2: initial forced search + 1 model call (model sees results, replies directly).
-        assert turn_call_count == 1, (
-            "P5-2: model should be called once; search is forced before the model call."
-        )
-        assert len(captured_search_calls) == 1, (
-            "P5-2: exactly one search_web call (the forced initial search)."
-        )
-        assert captured_search_calls[0].arguments["query"] == reformulated_query
-        assert len(captured_turn_tools) == 1
-        assert captured_turn_tools[0] is not None, (
-            "Routed WEB_SEARCH turns must continue through the shared native tool path."
-        )
-        assert any(
-            message.role is LLMRole.SYSTEM
-            and f"Ground this request: {reformulated_query}" in message.content
-            for message in captured_turn_messages[0]
-        )
+        assert turn_call_count == 2
+        assert len(captured_search_calls) == 1
+        assert captured_search_calls[0].arguments["query"] == native_search_query
+        assert len(captured_turn_tools) == 2
+        assert all(tools is not None for tools in captured_turn_tools)
 
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
             MessageRole.USER,
-            MessageRole.TOOL,  # forced initial search result
+            MessageRole.TOOL,
             MessageRole.ASSISTANT,
         ]
         assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
 
-        # P5-2 event sequence: forced search emits tool events BEFORE the model call.
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
             "route.selected",
-            "tool.started",    # P5-2: forced initial search (before model)
+            "model.called",
+            "model.succeeded",
+            "tool.started",
             "tool.finished",
             "model.called",
             "model.succeeded",
@@ -1221,7 +1185,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_
         session_manager.close()
 
 
-def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_tool_loop(
+def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_loop(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1247,7 +1211,7 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
         "Search the web for Marine Leleu, write a short summary to marine-leleu.txt, "
         "then tell me what you saved."
     )
-    reformulated_query = "Marine Leleu recent profile"
+    native_search_query = "Marine Leleu recent profile"
     output_path = project_root / "marine-leleu.txt"
     file_contents = "Marine Leleu is a French endurance athlete and content creator."
     captured_search_calls: list[ToolCall] = []
@@ -1301,30 +1265,12 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
-            del profile, messages, kwargs
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=(
-                    '{"route":"web_search",'
-                    f'"search_query":"{reformulated_query}"'
-                    "}"
-                ),
-                created_at="2026-03-20T10:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOrchestratorProvider:
         provider_name = "ollama"
@@ -1358,21 +1304,46 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
             assert any(tool.name == "write_text_file" for tool in tools)
 
             if responder_call_count == 1:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and f"Ground this request: {reformulated_query}" in message.content
-                    for message in messages
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": native_search_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {
+                                            "query": native_search_query,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
                 )
+
+            if responder_call_count == 2:
                 assert any(
                     message.role is LLMRole.TOOL
-                    and reformulated_query in message.content
+                    and native_search_query in message.content
                     for message in messages
                 )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
                     content="",
-                    created_at="2026-03-20T10:00:01Z",
+                    created_at="2026-03-20T10:00:02Z",
                     finish_reason="stop",
                     tool_calls=(
                         ToolCall(
@@ -1410,11 +1381,11 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
                 provider="ollama",
                 model_name=profile.model_name,
                 content="I saved a short briefing to marine-leleu.txt.",
-                created_at="2026-03-20T10:00:02Z",
+                created_at="2026-03-20T10:00:03Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         FakeOrchestratorProvider,
@@ -1437,9 +1408,9 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
             tool_registry=tool_registry,
         )
 
-        assert responder_call_count == 2
+        assert responder_call_count == 3
         assert len(captured_search_calls) == 1
-        assert captured_search_calls[0].arguments["query"] == reformulated_query
+        assert captured_search_calls[0].arguments["query"] == native_search_query
         assert captured_write_calls == [
             ToolCall(
                 tool_name="write_text_file",
@@ -1450,7 +1421,7 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
             )
         ]
         assert output_path.read_text(encoding="utf-8") == file_contents
-        assert len(captured_turn_tools) == 2
+        assert len(captured_turn_tools) == 3
         assert all(tools is not None for tools in captured_turn_tools)
         assert "I saved a short briefing to marine-leleu.txt." in reply
         assert "Sources:" in reply
@@ -1473,6 +1444,8 @@ def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_t
         assert event_types == [
             "runtime.started",
             "route.selected",
+            "model.called",
+            "model.succeeded",
             "tool.started",
             "tool.finished",
             "model.called",
@@ -2736,7 +2709,7 @@ def test_run_user_turn_marks_instruction_like_search_history_as_external_text(
         session_manager.close()
 
 
-def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search(
+def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_direct_search(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -2783,60 +2756,49 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_routed_search
     )
     tool_registry = _build_search_tool_registry(search_tool_result)
 
-    class FakeRouterProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del profile, timeout_seconds, thinking_enabled, content_callback, tools
-            user_request = messages[-1].content
-            if "Summarize that more briefly." in user_request:
-                content = '{"route":"chat","search_query":""}'
-            else:
-                content = (
-                    '{"route":"web_search",'
-                    f'"search_query":"{reformulated_query}"'
-                    "}"
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content=content,
-                created_at="2026-03-16T10:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
-
-    # P5-2: with forced initial search, the model receives search results in context
-    # on the first call and answers directly — no agent-loop re-search needed.
     class FirstTurnProvider:
         provider_name = "ollama"
 
         def __init__(self, *, base_url="", default_timeout_seconds=60.0):
             del base_url, default_timeout_seconds
 
+        call_count = 0
+
         def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
-            del profile, kwargs
+            del kwargs
+            type(self).call_count += 1
+            if type(self).call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-16T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": reformulated_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {
+                                            "query": reformulated_query,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
             return LLMResponse(
                 provider="ollama",
-                model_name="qwen3.5:4b",
+                model_name=profile.model_name,
                 content="Marine Leleu is a French endurance athlete and content creator.",
                 created_at="2026-03-16T10:00:00Z",
                 finish_reason="stop",
@@ -3938,7 +3900,7 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
 
 
 @pytest.mark.parametrize("profile_name", ["main", "deep"])
-def test_agentic_profiles_share_router_then_native_responder_runtime(
+def test_agentic_profiles_enter_direct_native_responder_runtime_without_router(
     monkeypatch,
     make_temp_project,
     profile_name: str,
@@ -3957,7 +3919,6 @@ def test_agentic_profiles_share_router_then_native_responder_runtime(
     )
     command_handler.current_model_profile_name = profile_name
 
-    route_profiles: list[str] = []
     responder_profiles: list[str] = []
     responder_tools: list[object | None] = []
     responder_calls = 0
@@ -3978,36 +3939,12 @@ def test_agentic_profiles_share_router_then_native_responder_runtime(
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(FETCH_URL_TEXT_DEFINITION, _fetch_tool)
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del messages, timeout_seconds, thinking_enabled, content_callback, tools
-            route_profiles.append(profile.name)
-            return LLMResponse(
-                provider="ollama",
-                model_name="llama3.2:3b",
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-19T12:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -4077,7 +4014,7 @@ def test_agentic_profiles_share_router_then_native_responder_runtime(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4098,7 +4035,6 @@ def test_agentic_profiles_share_router_then_native_responder_runtime(
 
         assert settings.models[profile_name].planner_profile is None
         assert reply == f"{profile_name} final reply"
-        assert route_profiles == ["router"]
         assert responder_profiles == [profile_name, profile_name]
         assert len(responder_tools) == 2
         assert all(tools is not None for tools in responder_tools)
@@ -4119,7 +4055,7 @@ def test_agentic_profiles_share_router_then_native_responder_runtime(
         session_manager.close()
 
 
-def test_chat_route_calls_native_responder_directly_without_tool_work(
+def test_chat_turn_calls_native_responder_directly_without_tool_work_or_router(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -4136,7 +4072,6 @@ def test_chat_route_calls_native_responder_directly_without_tool_work(
         memory_manager=SimpleNamespace(),
     )
 
-    route_profiles: list[str] = []
     responder_profiles: list[str] = []
     responder_tools: list[object | None] = []
     tool_registry = ToolRegistry()
@@ -4148,36 +4083,12 @@ def test_chat_route_calls_native_responder_directly_without_tool_work(
         ),
     )
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del messages, timeout_seconds, thinking_enabled, content_callback, tools
-            route_profiles.append(profile.name)
-            return LLMResponse(
-                provider="ollama",
-                model_name="llama3.2:3b",
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-19T12:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default chat turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -4211,7 +4122,7 @@ def test_chat_route_calls_native_responder_directly_without_tool_work(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4231,7 +4142,6 @@ def test_chat_route_calls_native_responder_directly_without_tool_work(
         )
 
         assert reply == "Direct-chat responder reply."
-        assert route_profiles == ["router"]
         assert responder_profiles == ["main"]
         assert len(responder_tools) == 1
         assert responder_tools[0] is not None
@@ -4245,7 +4155,7 @@ def test_chat_route_calls_native_responder_directly_without_tool_work(
         session_manager.close()
 
 
-def test_lite_codex_uses_dedicated_router_without_native_tools(
+def test_lite_codex_responds_directly_without_native_tools_or_router(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -4263,7 +4173,6 @@ def test_lite_codex_uses_dedicated_router_without_native_tools(
     )
     command_handler.current_model_profile_name = "codex"
 
-    route_profiles: list[str] = []
     responder_profiles: list[str] = []
     responder_tools: list[object | None] = []
     tool_registry = ToolRegistry()
@@ -4275,36 +4184,12 @@ def test_lite_codex_uses_dedicated_router_without_native_tools(
         ),
     )
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del messages, timeout_seconds, thinking_enabled, content_callback, tools
-            route_profiles.append(profile.name)
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-19T12:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default codex turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -4338,7 +4223,7 @@ def test_lite_codex_uses_dedicated_router_without_native_tools(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4359,14 +4244,13 @@ def test_lite_codex_uses_dedicated_router_without_native_tools(
 
         assert settings.models["codex"].tool_mode == "none"
         assert reply == "Codex lite chat reply."
-        assert route_profiles == ["router"]
         assert responder_profiles == ["codex"]
         assert responder_tools == [None]
     finally:
         session_manager.close()
 
 
-def test_router_fallback_still_uses_shared_native_responder_loop(
+def test_default_direct_native_turn_uses_shared_native_responder_loop_without_router_metadata(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -4386,7 +4270,6 @@ def test_router_fallback_still_uses_shared_native_responder_loop(
         memory_manager=SimpleNamespace(),
     )
 
-    route_profiles: list[str] = []
     responder_tools: list[object | None] = []
     responder_calls = 0
     tool_registry = ToolRegistry()
@@ -4405,38 +4288,12 @@ def test_router_fallback_still_uses_shared_native_responder_loop(
         ),
     )
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del messages, timeout_seconds, thinking_enabled, content_callback, tools
-            route_profiles.append(profile.name)
-            if profile.name == "router":
-                raise LLMProviderError("router classifier unavailable")
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-19T12:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -4500,7 +4357,7 @@ def test_router_fallback_still_uses_shared_native_responder_loop(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4521,7 +4378,6 @@ def test_router_fallback_still_uses_shared_native_responder_loop(
         )
 
         assert reply == "Legacy native fallback reply."
-        assert route_profiles == ["router", "main"]
         assert len(responder_tools) == 2
         assert all(tools is not None for tools in responder_tools)
         assert all(
@@ -4532,9 +4388,10 @@ def test_router_fallback_still_uses_shared_native_responder_loop(
         route_event = next(
             event for event in published_events if event.event_type == "route.selected"
         )
-        assert route_event.payload["planner_profile_name"] == "router"
-        assert route_event.payload["planner_available"] is False
-        assert "planner_fallback_reason" in route_event.payload
+        assert route_event.payload["route_kind"] == "chat"
+        assert "planner_profile_name" not in route_event.payload
+        assert "planner_available" not in route_event.payload
+        assert "planner_fallback_reason" not in route_event.payload
     finally:
         session_manager.close()
 
@@ -7048,15 +6905,15 @@ def _build_france_search_tool_result() -> ToolResult:
     )
 
 
-def test_second_grounded_turn_does_not_inherit_sources_from_first_json_plan(
+def test_second_explicit_search_turn_does_not_inherit_sources_from_first_json_plan(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """A second WEB_SEARCH turn must display only its own sources.
+    """A second explicit search turn must display only its own sources.
 
     Reproduction of the stale-source contamination bug:
-    - Turn 1 (pre-populated): Charlemagne search → charlemagne.example.com sources
-    - Turn 2: France key facts search → france sources expected
+    - Turn 1 (pre-populated): Charlemagne search -> charlemagne.example.com sources
+    - Turn 2: explicit France search -> france sources expected
 
     After the fix, Turn 2 reply must NOT contain charlemagne.example.com and
     MUST contain the France sources from the Turn 2 search.
@@ -7096,35 +6953,21 @@ def test_second_grounded_turn_does_not_inherit_sources_from_first_json_plan(
         provider_name = "ollama"
 
         def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
-            pass
+            del base_url, default_timeout_seconds
 
         def chat(self, profile, messages, *, timeout_seconds=None,  # type: ignore[no-untyped-def]
                  thinking_enabled=False, content_callback=None, tools=None):
-            del timeout_seconds, thinking_enabled, tools
-            first_message = messages[0]
-            if (
-                first_message.role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query"
-                in first_message.content
-            ):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content='{"route":"web_search","search_query":"France key numeric facts"}',
-                    created_at="2026-03-18T10:00:00Z",
-                    finish_reason="stop",
-                )
+            del profile, messages, timeout_seconds, thinking_enabled, tools
             if content_callback is not None:
                 content_callback("France has a population of approximately 68 million.")
             return LLMResponse(
                 provider="ollama",
-                model_name=profile.model_name,
+                model_name="qwen3.5:4b",
                 content="France has a population of approximately 68 million.",
                 created_at="2026-03-18T10:00:00Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -7148,21 +6991,16 @@ def test_second_grounded_turn_does_not_inherit_sources_from_first_json_plan(
             session_id=session.id,
         )
 
-        # Turn 2: new France query.
-        france_input = "What are the current key numeric facts about France?"
-        session_manager.add_message(
-            MessageRole.USER,
-            france_input,
-            session_id=session.id,
-        )
-
-        reply = run_user_turn(
+        reply = run_search_command(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input=france_input,
             tracer=tracer,
+            tool_call=ToolCall(
+                tool_name="search_web",
+                arguments={"query": "France key numeric facts"},
+            ),
             tool_registry=tool_registry,
-        )
+        ).assistant_reply
 
         # The Turn 2 reply must carry Turn 2 sources only.
         assert "stats.france.example.com" in reply

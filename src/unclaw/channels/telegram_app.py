@@ -55,7 +55,7 @@ def start_telegram_app(
         print(
             dependencies.build_banner(
                 title="Unclaw Telegram",
-                subtitle="Local-first bot channel backed by your local model runtime.",
+                subtitle="Local-first bot channel with direct local model execution.",
                 rows=(
                     ("mode", "telegram"),
                     (
@@ -65,7 +65,6 @@ def start_telegram_app(
                             f"{settings.default_model.model_name}"
                         ),
                     ),
-                    ("router", f"router -> {settings.router.model_name}"),
                     ("logging", settings.app.logging.mode),
                     ("polling", f"{telegram_config.polling_timeout_seconds}s"),
                     (

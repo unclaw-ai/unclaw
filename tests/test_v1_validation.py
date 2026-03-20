@@ -5,9 +5,10 @@ Covers four explicit V1 contracts:
 1. num_ctx propagation — shipped config has num_ctx, it flows through settings
    and ModelProfile → ResolvedModelProfile → OllamaProvider request payload.
 
-2. Router reformulated-query pass-through — the search_query produced by the
-   router classifier actually reaches the search execution path (ToolCall
-   argument and system context note), not just RouteDecision.search_query.
+2. Default no-router runtime path — ordinary turns stay on the selected
+   profile's direct chat/native path; native profiles can still call
+   search_web and other tools from the normal agent loop without a router
+   pre-selecting the turn.
 
 3. Native tool-calling vs non-native/json_plan path split — _resolve_tool_
    definitions returns None for json_plan profiles and non-None for native
@@ -507,16 +508,11 @@ def test_v1_p52_prepare_web_search_fallback_to_user_input_when_no_search_query()
     )
 
 
-def test_v1_p52_native_web_search_executes_initial_search_deterministically(
+def test_v1_native_default_turn_executes_model_selected_search_in_agent_loop(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """P5-2 E2E: in native mode, WEB_SEARCH route must execute search_web exactly
-    once with the routed query BEFORE the model is called — not rely on the model.
-
-    This is the regression the mission targets: previously, native profiles skipped
-    the forced initial search, so the model could refuse or use a drifted query.
-    """
+    """Native default turns must reach search_web through the normal agent loop."""
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
@@ -531,26 +527,15 @@ def test_v1_p52_native_web_search_executes_initial_search_deterministically(
     )
 
     user_input = "fais une recherche sur Marine Leleu"
-    reformulated_query = "Marine Leleu biographie"
+    native_query = "Marine Leleu biographie"
     captured_search_queries: list[str] = []
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, **kwargs):
-            del profile, kwargs
-            return LLMResponse(
-                provider="ollama",
-                model_name="test",
-                content=json.dumps(
-                    {"route": "web_search", "search_query": reformulated_query}
-                ),
-                created_at="2026-03-18T10:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     registry = ToolRegistry()
 
@@ -576,23 +561,49 @@ def test_v1_p52_native_web_search_executes_initial_search_deterministically(
         def __init__(self, *, base_url="", default_timeout_seconds=60.0):
             del base_url, default_timeout_seconds
 
+        call_count = 0
+
         def chat(self, profile, messages, **kwargs):
-            del profile, kwargs
-            # Return a plain text reply — no tool calls — to verify the initial
-            # search was already done before this model call.
+            del kwargs
+            type(self).call_count += 1
+            if type(self).call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-18T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": native_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {"query": native_query},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
             return LLMResponse(
                 provider="ollama",
-                model_name="test",
+                model_name=profile.model_name,
                 content="Marine Leleu est une artiste française.",
                 created_at="2026-03-18T10:00:00Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOrchestratorProvider)
 
-    # Use the native profile ("deep") to exercise the P5-2 fix.
-    # Previously this path skipped the forced search; now it must execute it.
     command_handler.current_model_profile_name = "deep"
 
     try:
@@ -609,29 +620,16 @@ def test_v1_p52_native_web_search_executes_initial_search_deterministically(
         )
 
         assert reply, "Runtime must return a non-empty reply."
-        assert len(captured_search_queries) >= 1, (
-            "P5-2: native WEB_SEARCH route must execute at least one search_web call "
-            "deterministically, not rely on the model choosing to call it."
-        )
-        assert captured_search_queries[0] == reformulated_query, (
-            f"P5-2: first search_web call used {captured_search_queries[0]!r} "
-            f"instead of routed query {reformulated_query!r}. "
-            "Entity drift in native path — P5-2 fix not applied correctly."
-        )
+        assert captured_search_queries == [native_query]
     finally:
         session_manager.close()
 
 
-def test_v1_router_pass_through_end_to_end_with_fake_classifier(
+def test_v1_default_main_turn_responds_directly_without_router_or_forced_search(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """End-to-end proof: when the router classifier returns a reformulated query,
-    the search_web ToolCall in the runtime uses that query, not the raw user input.
-
-    Uses a fake OllamaProvider in the router AND a fake one in the orchestrator.
-    The tool call argument must match the reformulated query exactly.
-    """
+    """Simple main turns should go straight to the responder without router work."""
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
@@ -645,27 +643,15 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
         memory_manager=SimpleNamespace(),
     )
 
-    user_input = "Can you tell me what's going on with the weather in Paris this week?"
-    reformulated_query = "Paris weather forecast this week"
+    user_input = "Explain recursion in one sentence."
     captured_tool_calls: list[ToolCall] = []
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, **kwargs):
-            del profile, kwargs
-            return LLMResponse(
-                provider="ollama",
-                model_name="test",
-                content=json.dumps(
-                    {"route": "web_search", "search_query": reformulated_query}
-                ),
-                created_at="2026-03-18T10:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default main turns must not instantiate the router")
 
     # Fake tool registry: registers search_web so capability summary enables routing,
     # and captures the query when search_web is dispatched.
@@ -699,18 +685,14 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
             return LLMResponse(
                 provider="ollama",
                 model_name="test",
-                content="The weather in Paris is cloudy this week.",
+                content="Recursion is when a definition or process refers to itself.",
                 created_at="2026-03-18T10:00:00Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOrchestratorProvider)
 
-    # Use the shipped default responder profile. P5-2 guarantees the explicit
-    # search_web execution path on routed WEB_SEARCH turns for both native and
-    # non-native responders, so this test should not rely on fast pretending to
-    # be a searchable non-native profile now that fast is chat-only by design.
     command_handler.current_model_profile_name = "main"
 
     try:
@@ -726,28 +708,17 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
             tool_registry=registry,
         )
 
-        assert reply, "Runtime must return a non-empty reply."
-        assert len(captured_tool_calls) == 1, (
-            "search_web must have been called exactly once via the explicit tool path."
-        )
-        used_query = captured_tool_calls[0].arguments["query"]
-        assert used_query == reformulated_query, (
-            f"search_web was called with {used_query!r} instead of the "
-            f"reformulated query {reformulated_query!r}. "
-            "The router's search_query is not reaching the execution path."
-        )
-        assert used_query != user_input, (
-            "Raw user input must not be used when a reformulated query is available."
-        )
+        assert reply == "Recursion is when a definition or process refers to itself."
+        assert captured_tool_calls == []
     finally:
         session_manager.close()
 
 
-def test_v1_routed_native_web_search_keeps_shared_native_responder_tools(
+def test_v1_native_search_turn_keeps_shared_native_responder_tools(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """Native routed WEB_SEARCH turns must keep the shared responder tool surface."""
+    """Native search turns must keep the shared responder tool surface."""
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     session_manager = SessionManager.from_settings(settings)
@@ -762,27 +733,16 @@ def test_v1_routed_native_web_search_keeps_shared_native_responder_tools(
     )
 
     user_input = "Search the web for Marine Leleu and then save a short note locally."
-    reformulated_query = "Marine Leleu recent profile"
+    native_query = "Marine Leleu recent profile"
     captured_search_queries: list[str] = []
     captured_responder_tools: list[tuple[str, ...] | None] = []
 
-    class FakeRouterProvider:
+    class RouterShouldNotRun:
         provider_name = "ollama"
 
-        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, **kwargs):
-            del profile, messages, kwargs
-            return LLMResponse(
-                provider="ollama",
-                model_name="test",
-                content=json.dumps(
-                    {"route": "web_search", "search_query": reformulated_query}
-                ),
-                created_at="2026-03-20T10:00:00Z",
-                finish_reason="stop",
-            )
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            del kwargs
+            raise AssertionError("default native turns must not instantiate the router")
 
     registry = ToolRegistry()
 
@@ -816,21 +776,79 @@ def test_v1_routed_native_web_search_keeps_shared_native_responder_tools(
             del base_url, default_timeout_seconds
 
         def chat(self, profile, messages, **kwargs):
-            del profile, messages
+            del messages
             tools = kwargs.get("tools")
             if tools is None:
                 captured_responder_tools.append(None)
             else:
                 captured_responder_tools.append(tuple(tool.name for tool in tools))
+            call_number = len(captured_responder_tools)
+            if call_number == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_web",
+                            arguments={"query": native_query},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_web",
+                                        "arguments": {"query": native_query},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+            if call_number == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="write_text_file",
+                            arguments={"path": "notes/marine.txt", "content": "Marine Leleu is a French endurance athlete."},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "write_text_file",
+                                        "arguments": {
+                                            "path": "notes/marine.txt",
+                                            "content": "Marine Leleu is a French endurance athlete.",
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
             return LLMResponse(
                 provider="ollama",
-                model_name="test",
+                model_name=profile.model_name,
                 content="Marine Leleu is a French endurance athlete.",
-                created_at="2026-03-20T10:00:00Z",
+                created_at="2026-03-20T10:00:02Z",
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         FakeOrchestratorProvider,
@@ -852,8 +870,10 @@ def test_v1_routed_native_web_search_keeps_shared_native_responder_tools(
         )
 
         assert reply == "Marine Leleu is a French endurance athlete."
-        assert captured_search_queries == [reformulated_query]
+        assert captured_search_queries == [native_query]
         assert captured_responder_tools == [
+            ("search_web", "write_text_file"),
+            ("search_web", "write_text_file"),
             ("search_web", "write_text_file"),
         ]
     finally:
