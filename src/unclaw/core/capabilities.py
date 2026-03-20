@@ -146,6 +146,16 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                 "- Use only the listed built-in tools and base the final answer "
                 "on their results.",
                 (
+                    "- If the answer is complete and safe from the conversation "
+                    "alone, reply directly without tools."
+                ),
+                "- For compound requests, decompose into the minimum useful sub-tasks.",
+                "- Use tools only where they add needed runtime or external information.",
+                "- Preserve the user's requested order when practical.",
+                "- Do not call tools for parts already answerable from the conversation.",
+                "- Combine tool results into one coherent final answer.",
+                *_build_native_tool_choice_lines(summary),
+                (
                     "- Only claim a file was written, created, or modified if "
                     "write_text_file or a notes write tool (create_note, update_note) "
                     "output is present in this conversation. If no such tool ran, "
@@ -167,44 +177,28 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
         if summary.system_info_available:
             lines.extend(
                 (
-                    "- For questions about the current local time, date, day, OS, "
-                    "RAM, CPU, hostname, or locale on this machine, call "
-                    "system_info instead of guessing.",
+                    "- Use system_info for current local machine facts and runtime facts "
+                    "such as local date/time, day, OS, CPU, RAM, hostname, and locale.",
                 )
             )
         if summary.long_term_memory_available:
             lines.extend(
                 (
-                    "- Long-term memory tools are for stable personal facts, hardware "
-                    "details, identity, and preferences that must persist across sessions. "
-                    "remember_long_term_memory: call when the user explicitly asks to "
-                    "store a fact for later, in any language "
-                    "('remember that...', 'souviens-toi que...', 'enregistre que...'). "
-                    "Also call remember_long_term_memory for corrections "
-                    "('my name is actually Vincent', 'correction: my GPU is an RTX 4090') "
-                    "— use the same key and category as the original to update in-place. "
-                    "search_long_term_memory: call when the user asks about previously "
-                    "stored facts, in any language "
-                    "('what do you remember about my hardware?', "
-                    "'je m'appelle comment?', 'mon prénom ?', 'do you know my name?', "
-                    "'que sais-tu de mon setup?', "
-                    "'sur mon matériel informatique, tu as quoi ?'). "
-                    "Pass a concise semantic English query term when calling search — e.g. "
-                    "for 'what is my name?', 'what's my name?', "
-                    "'je m'appelle comment?', or 'mon prénom ?' pass query='name' "
-                    "with category='identity'; "
-                    "for 'what GPU do I have?' pass query='GPU' with category='hardware'. "
-                    "TOOL CHOICE: when the user asks what you *remember* or *know* about "
-                    "their hardware or identity → use long-term memory tools. "
-                    "Use system_info only when the user asks about the *current* machine "
-                    "state (OS, CPU, RAM usage, processes) — not recalled stored facts. "
-                    "list_long_term_memory: call when the user asks broadly what is stored "
-                    "or remembered about them. "
-                    "Long-term memory is NOT injected automatically — call the tools "
-                    "explicitly when needed. "
-                    "Do NOT use long-term memory tools for current session message history "
-                    "or message order (use inspect_session_history for that). "
-                    "Do not auto-store facts that were not explicitly requested for storage.",
+                    "- Long-term memory tools are for previously stored persistent "
+                    "cross-session facts or preferences. They are not injected "
+                    "automatically.",
+                    "- Use search_long_term_memory for targeted recall of a stored fact.",
+                    "- Use list_long_term_memory for broad recall of stored memories.",
+                    "- Use remember_long_term_memory only when the user explicitly wants "
+                    "a fact saved for later or explicitly corrects a stored fact.",
+                    "- Use forget_long_term_memory only when the user explicitly wants a "
+                    "stored memory removed.",
+                    "- Use system_info for current local machine facts, not long-term "
+                    "memory.",
+                    "- Do not use long-term memory tools for current session message "
+                    "history or message order; use inspect_session_history for that.",
+                    "- Do not auto-store facts that were not explicitly requested for "
+                    "storage.",
                 )
             )
     else:
@@ -250,6 +244,34 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
     return "\n".join(lines)
 
 
+def _build_native_tool_choice_lines(
+    summary: RuntimeCapabilitySummary,
+) -> tuple[str, ...]:
+    lines: list[str] = []
+
+    if summary.local_directory_listing_available and summary.local_file_read_available:
+        lines.append(
+            "Use list_directory for local directories and read_text_file for "
+            "supported local text files."
+        )
+    elif summary.local_directory_listing_available:
+        lines.append("Use list_directory for local directories.")
+    elif summary.local_file_read_available:
+        lines.append("Use read_text_file for supported local text files.")
+
+    if summary.web_search_available and summary.url_fetch_available:
+        lines.append(
+            "Use search_web for up-to-date external information. "
+            "Use fetch_url_text for a specific public URL."
+        )
+    elif summary.web_search_available:
+        lines.append("Use search_web for up-to-date external information.")
+    elif summary.url_fetch_available:
+        lines.append("Use fetch_url_text for a specific public URL.")
+
+    return tuple(f"- {line}" for line in lines)
+
+
 def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str, ...]:
     lines: list[str] = []
     if summary.local_file_read_available:
@@ -269,9 +291,9 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
         )
     if summary.system_info_available:
         lines.append(
-            "system_info: return a read-only summary of the current local machine "
-            "and runtime, including local date/time, day, OS, CPU core count, "
-            "total RAM, hostname, and locale."
+            "system_info: return current local machine and runtime facts, "
+            "including local date/time, day, OS, CPU core count, total RAM, "
+            "hostname, and locale."
         )
     if summary.notes_available:
         lines.append(
@@ -325,14 +347,10 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "remember_long_term_memory / search_long_term_memory / "
             "list_long_term_memory / forget_long_term_memory: "
             "store, search, list, or delete persistent cross-session facts "
-            "(identity, hardware, preferences). "
+            "and preferences. "
             "Not injected automatically — call tools explicitly. "
-            "For remembered-name recall, use search_long_term_memory with "
-            "query='name' and category='identity'. "
-            "For broad 'what do you remember/know about me?' requests, use "
-            "list_long_term_memory. "
-            "For recall in any language, pass a concise semantic query term "
-            "(e.g. query='name', query='GPU'). "
+            "Use search_long_term_memory for targeted recall and "
+            "list_long_term_memory for broad recall. "
             "Not for session message history — use inspect_session_history for that."
         )
     return tuple(lines)

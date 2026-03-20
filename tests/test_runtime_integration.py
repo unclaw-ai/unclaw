@@ -38,7 +38,11 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
-from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
+from unclaw.tools.file_tools import (
+    LIST_DIRECTORY_DEFINITION,
+    READ_TEXT_FILE_DEFINITION,
+    WRITE_TEXT_FILE_DEFINITION,
+)
 from unclaw.tools.long_term_memory_tools import (
     LIST_LONG_TERM_MEMORY_DEFINITION,
     SEARCH_LONG_TERM_MEMORY_DEFINITION,
@@ -599,6 +603,111 @@ def test_capability_context_native_turn_permits_model_tool_use() -> None:
     assert "You cannot invoke them yourself" not in context
     # Anti-hallucination rule still present
     assert "Do not claim you already searched" in context
+
+
+def test_capability_context_native_turn_includes_tool_choice_guidance() -> None:
+    registry = ToolRegistry()
+    for definition in (
+        READ_TEXT_FILE_DEFINITION,
+        LIST_DIRECTORY_DEFINITION,
+        FETCH_URL_TEXT_DEFINITION,
+        SEARCH_WEB_DEFINITION,
+        SYSTEM_INFO_DEFINITION,
+        SEARCH_LONG_TERM_MEMORY_DEFINITION,
+        LIST_LONG_TERM_MEMORY_DEFINITION,
+    ):
+        registry.register(
+            definition,
+            lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+        )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "reply directly without tools" in context
+    assert "decompose into the minimum useful sub-tasks" in context
+    assert "Preserve the user's requested order when practical" in context
+    assert "Do not call tools for parts already answerable from the conversation" in context
+    assert "Combine tool results into one coherent final answer" in context
+    assert "Use system_info for current local machine facts and runtime facts" in context
+    assert (
+        "Use list_directory for local directories and read_text_file for "
+        "supported local text files."
+    ) in context
+    assert "Use search_web for up-to-date external information." in context
+    assert "Use fetch_url_text for a specific public URL." in context
+    assert "Use search_long_term_memory for targeted recall of a stored fact." in context
+    assert "Use list_long_term_memory for broad recall of stored memories." in context
+    assert "Use remember_long_term_memory only when the user explicitly wants" in context
+    assert "Use forget_long_term_memory only when the user explicitly wants" in context
+    assert "not injected automatically" in context.lower()
+
+
+def test_capability_context_native_turn_omits_private_looking_memory_examples() -> None:
+    registry = ToolRegistry()
+    for definition in (
+        SYSTEM_INFO_DEFINITION,
+        SEARCH_LONG_TERM_MEMORY_DEFINITION,
+        LIST_LONG_TERM_MEMORY_DEFINITION,
+    ):
+        registry.register(
+            definition,
+            lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+        )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "Vincent" not in context
+    assert "RTX 4090" not in context
+    assert "souviens-toi" not in context
+    assert "enregistre que" not in context
+    assert "what is my name?" not in context
+    assert "how do I call myself?" not in context
+
+
+def test_capability_context_non_native_turn_omits_native_tool_choice_guidance() -> None:
+    registry = ToolRegistry()
+    for definition in (
+        READ_TEXT_FILE_DEFINITION,
+        LIST_DIRECTORY_DEFINITION,
+        FETCH_URL_TEXT_DEFINITION,
+        SEARCH_WEB_DEFINITION,
+        SYSTEM_INFO_DEFINITION,
+        SEARCH_LONG_TERM_MEMORY_DEFINITION,
+        LIST_LONG_TERM_MEMORY_DEFINITION,
+    ):
+        registry.register(
+            definition,
+            lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+        )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert "user-initiated slash commands only" in context
+    assert "reply directly without tools" not in context
+    assert "decompose into the minimum useful sub-tasks" not in context
+    assert "Use system_info for current local machine facts and runtime facts" not in context
+    assert (
+        "Use list_directory for local directories and read_text_file for "
+        "supported local text files."
+    ) not in context
+    assert "Use search_web for up-to-date external information." not in context
+    assert "Use search_long_term_memory for targeted recall of a stored fact." not in context
+    assert "Use list_long_term_memory for broad recall of stored memories." not in context
 
 
 def test_capability_context_without_tool_output_forbids_claiming_search_happened() -> None:
@@ -3107,7 +3216,7 @@ def test_main_and_deep_native_chat_turns_can_use_system_info_for_current_machine
 
             if responder_call_count == 1:
                 assert (
-                    "current local time, date, day, OS, RAM, CPU, hostname, or locale"
+                    "Use system_info for current local machine facts and runtime facts"
                     in capability_message
                 )
                 return LLMResponse(
@@ -3276,11 +3385,15 @@ def test_main_and_deep_native_chat_turns_can_use_long_term_memory_for_remembered
             )
 
             if responder_call_count == 1:
-                assert "query='name' with category='identity'" in capability_message
                 assert (
-                    "list_long_term_memory: call when the user asks broadly what is stored "
-                    "or remembered about them."
-                ) in capability_message
+                    "Use search_long_term_memory for targeted recall of a stored fact."
+                    in capability_message
+                )
+                assert (
+                    "Use list_long_term_memory for broad recall of stored memories."
+                    in capability_message
+                )
+                assert "not injected automatically" in capability_message.lower()
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -3369,6 +3482,189 @@ def test_main_and_deep_native_chat_turns_can_use_long_term_memory_for_remembered
         ]
         assert stored_messages[1].content.startswith(
             "Tool: search_long_term_memory\nOutcome: success\n"
+        )
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize(
+    "profile_name", ["main", "deep"]
+)
+def test_main_and_deep_native_chat_turns_can_use_long_term_memory_listing_for_broad_memory_questions(
+    monkeypatch,
+    make_temp_project,
+    profile_name: str,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = profile_name
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_LONG_TERM_MEMORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Search results for 'name'\n\n[id: memory-1]\n  key: user name",
+        ),
+    )
+    tool_registry.register(
+        LIST_LONG_TERM_MEMORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                "Long-term memories\n\n"
+                "[id: memory-1]\n"
+                "  key: user name\n"
+                "  value: Alice\n"
+                "  category: identity\n\n"
+                "[id: memory-2]\n"
+                "  key: preferred editor\n"
+                "  value: Neovim\n"
+                "  category: preferences"
+            ),
+        ),
+    )
+    observed_tool_calls: list[ToolCall] = []
+    responder_call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal responder_call_count
+            responder_call_count += 1
+            capability_message = next(
+                message.content
+                for message in messages
+                if message.role is LLMRole.SYSTEM
+                and "Runtime capability status:" in message.content
+            )
+
+            assert profile.name == profile_name
+            assert tools is not None
+            assert any(
+                tool.name == SEARCH_LONG_TERM_MEMORY_DEFINITION.name for tool in tools
+            )
+            assert any(
+                tool.name == LIST_LONG_TERM_MEMORY_DEFINITION.name for tool in tools
+            )
+
+            if responder_call_count == 1:
+                assert (
+                    "previously stored persistent cross-session facts or preferences"
+                    in capability_message
+                )
+                assert (
+                    "Use list_long_term_memory for broad recall of stored memories."
+                    in capability_message
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T09:43:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(tool_name="list_long_term_memory", arguments={}),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "list_long_term_memory",
+                                        "arguments": {},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            assert any(
+                message.role is LLMRole.TOOL and "preferred editor" in message.content
+                for message in messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="I remember your name is Alice and your preferred editor is Neovim.",
+                created_at="2026-03-20T09:43:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.route_request",
+        lambda **kwargs: SimpleNamespace(
+            kind=RouteKind.CHAT,
+            model_profile_name=profile_name,
+            search_query=None,
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "What do you remember about me?",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What do you remember about me?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
+        )
+
+        assert (
+            reply
+            == "I remember your name is Alice and your preferred editor is Neovim."
+        )
+        assert responder_call_count == 2
+        assert observed_tool_calls == [
+            ToolCall(tool_name="list_long_term_memory", arguments={})
+        ]
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith(
+            "Tool: list_long_term_memory\nOutcome: success\n"
         )
     finally:
         session_manager.close()
