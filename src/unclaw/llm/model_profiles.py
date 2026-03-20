@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from unclaw.constants import ROUTER_PROFILE_NAME
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import ModelCapabilities, ResolvedModelProfile
-from unclaw.settings import ModelProfile, Settings
+from unclaw.settings import ModelProfile, RouterSettings, Settings
 
 
 def resolve_model_profile(
@@ -27,6 +28,11 @@ def get_default_model_profile(settings: Settings) -> ResolvedModelProfile:
     return resolve_model_profile(settings, settings.app.default_model_profile)
 
 
+def resolve_router_profile(settings: Settings) -> ResolvedModelProfile:
+    """Resolve the dedicated router model profile from router.yaml."""
+    return _to_resolved_router_profile(settings.router)
+
+
 def _to_resolved_profile(profile: ModelProfile) -> ResolvedModelProfile:
     return ResolvedModelProfile(
         name=profile.name,
@@ -36,6 +42,23 @@ def _to_resolved_profile(profile: ModelProfile) -> ResolvedModelProfile:
         capabilities=_derive_capabilities(profile),
         num_ctx=profile.num_ctx,
         keep_alive=profile.keep_alive,
+    )
+
+
+def _to_resolved_router_profile(router: RouterSettings) -> ResolvedModelProfile:
+    return ResolvedModelProfile(
+        name=ROUTER_PROFILE_NAME,
+        provider=router.provider,
+        model_name=router.model_name,
+        temperature=router.temperature,
+        capabilities=ModelCapabilities(
+            thinking_supported=False,
+            tool_mode="none",
+            supports_tools=False,
+            supports_native_tool_calling=False,
+        ),
+        num_ctx=router.num_ctx,
+        keep_alive=router.keep_alive,
     )
 
 

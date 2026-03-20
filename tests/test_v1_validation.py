@@ -45,12 +45,13 @@ from unclaw.llm.base import (
     ModelCapabilities,
     ResolvedModelProfile,
 )
-from unclaw.llm.model_profiles import resolve_model_profile
+from unclaw.llm.model_profiles import resolve_model_profile, resolve_router_profile
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import ModelProfile, load_settings
+from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.contracts import (
     ToolCall,
     ToolDefinition,
@@ -58,6 +59,7 @@ from unclaw.tools.contracts import (
     ToolResult,
 )
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.unit
 
@@ -741,6 +743,123 @@ def test_v1_router_pass_through_end_to_end_with_fake_classifier(
         session_manager.close()
 
 
+def test_v1_routed_native_web_search_keeps_shared_native_responder_tools(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """Native routed WEB_SEARCH turns must keep the shared responder tool surface."""
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    user_input = "Search the web for Marine Leleu and then save a short note locally."
+    reformulated_query = "Marine Leleu recent profile"
+    captured_search_queries: list[str] = []
+    captured_responder_tools: list[tuple[str, ...] | None] = []
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):
+            del profile, messages, kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name="test",
+                content=json.dumps(
+                    {"route": "web_search", "search_query": reformulated_query}
+                ),
+                created_at="2026-03-20T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    registry = ToolRegistry()
+
+    def _fake_search(call: ToolCall) -> ToolResult:
+        captured_search_queries.append(str(call.arguments.get("query", "")))
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text="Fake search results for validation.",
+            payload={
+                "query": call.arguments.get("query", ""),
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete."
+                ],
+                "display_sources": [],
+            },
+        )
+
+    registry.register(SEARCH_WEB_DEFINITION, _fake_search)
+    registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name="write_text_file",
+            output_text=f"unused write: {call.arguments.get('path', '')}",
+        ),
+    )
+
+    class FakeOrchestratorProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):
+            del profile, messages
+            tools = kwargs.get("tools")
+            if tools is None:
+                captured_responder_tools.append(None)
+            else:
+                captured_responder_tools.append(tuple(tool.name for tool in tools))
+            return LLMResponse(
+                provider="ollama",
+                model_name="test",
+                content="Marine Leleu is a French endurance athlete.",
+                created_at="2026-03-20T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr(
+        "unclaw.core.orchestrator.OllamaProvider",
+        FakeOrchestratorProvider,
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            tool_registry=registry,
+        )
+
+        assert reply == "Marine Leleu is a French endurance athlete."
+        assert captured_search_queries == [reformulated_query]
+        assert captured_responder_tools == [
+            ("search_web", "write_text_file"),
+        ]
+    finally:
+        session_manager.close()
+
+
 # ---------------------------------------------------------------------------
 # 3. Native vs non-native (json_plan) runtime path validation
 # ---------------------------------------------------------------------------
@@ -836,26 +955,27 @@ def test_v1_shipped_fast_profile_is_chat_only() -> None:
     )
 
 
-def test_v1_shipped_codex_profile_is_native() -> None:
-    """The shipped 'codex' profile must stay native for safe fallback.
-
-    BIG-FIX-ROUTER-1 adds planner routing for codex, but the responder profile
-    still needs native capability metadata for the explicit fallback path.
-    """
+def test_v1_shipped_codex_profile_is_lite_chat_only() -> None:
+    """The shipped 'codex' profile must stay lite with tool_mode=none."""
     settings = _load_repo_settings()
     codex_profile = settings.models["codex"]
-    assert codex_profile.tool_mode == "native", (
-        "The 'codex' profile must be tool_mode=native. "
-        "The planner/responder split keeps codex as the responder and preserves "
-        "native fallback behavior when the planner is unavailable."
+    assert codex_profile.tool_mode == "none", (
+        "The shipped 'codex' profile must stay tool_mode=none for the lite "
+        "chat/code product contract."
     )
 
 
-def test_v1_shipped_agentic_profiles_use_fast_as_their_planner() -> None:
+def test_v1_shipped_router_config_is_dedicated_and_authoritative() -> None:
     settings = _load_repo_settings()
-    assert settings.models["main"].planner_profile == "fast"
-    assert settings.models["deep"].planner_profile == "fast"
-    assert settings.models["codex"].planner_profile == "fast"
+    router_profile = resolve_router_profile(settings)
+
+    assert settings.models["main"].planner_profile is None
+    assert settings.models["deep"].planner_profile is None
+    assert settings.models["codex"].planner_profile is None
+    assert settings.router.enabled is True
+    assert settings.router.model_name == "qwen3:1.7b"
+    assert router_profile.name == "router"
+    assert router_profile.model_name == "qwen3:1.7b"
 
 
 def test_v1_json_plan_profile_does_not_receive_tools_in_model_call(

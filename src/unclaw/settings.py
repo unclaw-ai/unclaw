@@ -28,6 +28,8 @@ from unclaw.constants import (
     MODELS_CONFIG_FILE_NAME,
     PROMPTS_DIRECTORY_NAME,
     PROJECT_ROOT_ENV_VAR,
+    ROUTER_CONFIG_FILE_NAME,
+    ROUTER_CLASSIFIER_TIMEOUT_SECONDS,
     SESSIONS_DIRECTORY_NAME,
     SYSTEM_PROMPT_FILE_NAME,
 )
@@ -132,6 +134,17 @@ class ModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RouterSettings:
+    enabled: bool
+    provider: str
+    model_name: str
+    temperature: float
+    timeout_seconds: float
+    num_ctx: int | None = None
+    keep_alive: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimePaths:
     project_root: Path
     config_dir: Path
@@ -168,6 +181,7 @@ class RuntimePaths:
 class Settings:
     app: AppSettings
     models: dict[str, ModelProfile]
+    router: RouterSettings
     paths: RuntimePaths
     system_prompt: str
 
@@ -181,15 +195,18 @@ def load_settings(project_root: Path | None = None) -> Settings:
     config_dir = resolved_project_root / CONFIG_DIRECTORY_NAME
     app_config_path = config_dir / APP_CONFIG_FILE_NAME
     models_config_path = config_dir / MODELS_CONFIG_FILE_NAME
+    router_config_path = config_dir / ROUTER_CONFIG_FILE_NAME
 
     app_payload = _load_yaml_file(app_config_path)
     models_payload = _load_yaml_file(models_config_path)
+    router_payload = _load_yaml_file(router_config_path)
 
     app_settings = _build_app_settings(
         app_payload,
         project_root=resolved_project_root,
     )
     model_profiles = _build_model_profiles(models_payload)
+    router_settings = _build_router_settings(router_payload)
     runtime_paths = _build_runtime_paths(
         project_root=resolved_project_root,
         config_dir=config_dir,
@@ -212,6 +229,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
     return Settings(
         app=app_settings,
         models=model_profiles,
+        router=router_settings,
         paths=runtime_paths,
         system_prompt=system_prompt,
     )
@@ -410,6 +428,22 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
         raise ConfigurationError("At least one model profile must be defined.")
 
     return profiles
+
+
+def _build_router_settings(payload: Mapping[str, Any]) -> RouterSettings:
+    return RouterSettings(
+        enabled=_get_bool(payload, "enabled", True),
+        provider=_get_str(payload, "provider"),
+        model_name=_get_str(payload, "model_name"),
+        temperature=_get_float(payload, "temperature", 0.0),
+        timeout_seconds=_get_positive_float(
+            payload,
+            "timeout_seconds",
+            default=ROUTER_CLASSIFIER_TIMEOUT_SECONDS,
+        ),
+        num_ctx=_get_optional_positive_int(payload, "num_ctx"),
+        keep_alive=_get_optional_str(payload, "keep_alive"),
+    )
 
 
 def _build_runtime_paths(

@@ -9,10 +9,10 @@ from datetime import date
 from enum import StrEnum
 
 from unclaw.core.capabilities import RuntimeCapabilitySummary
-from unclaw.constants import ROUTER_CLASSIFIER_TIMEOUT_SECONDS
+from unclaw.constants import ROUTER_PROFILE_NAME
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
-from unclaw.llm.model_profiles import resolve_model_profile
+from unclaw.llm.model_profiles import resolve_model_profile, resolve_router_profile
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
 
@@ -103,6 +103,8 @@ def route_request(
     allow_web_search_routing: bool = True,
 ) -> RouteDecision:
     """Select the current route with a conservative capability-aware check."""
+    # Legacy compatibility only: route selection now comes from settings.router.
+    del planner_profile_name
     profile = settings.models.get(model_profile_name)
     if profile is None:
         raise ConfigurationError(
@@ -113,19 +115,18 @@ def route_request(
         thinking_enabled=thinking_enabled,
         thinking_supported=profile.thinking_supported,
     )
+    route_selector_profile_name = _resolve_route_selector_profile_name(settings)
 
     if is_command:
         return RouteDecision(
             kind=RouteKind.COMMAND,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
         )
 
     if not allow_web_search_routing:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
         )
 
     normalized_user_input = (user_input or "").strip()
@@ -133,21 +134,19 @@ def route_request(
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
         )
 
     if capability_summary is None or not capability_summary.web_search_available:
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
         )
 
     classifier_decision, planner_available, planner_fallback_reason = (
-        _classify_route_with_optional_planner(
+        _classify_route_with_optional_router(
             settings=settings,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
+            route_selector_profile_name=route_selector_profile_name,
             user_input=normalized_user_input,
         )
     )
@@ -155,7 +154,7 @@ def route_request(
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
+            planner_profile_name=route_selector_profile_name,
             planner_available=planner_available,
             planner_fallback_reason=planner_fallback_reason,
         )
@@ -163,7 +162,7 @@ def route_request(
         return RouteDecision(
             kind=chat_route_kind,
             model_profile_name=model_profile_name,
-            planner_profile_name=planner_profile_name,
+            planner_profile_name=route_selector_profile_name,
             planner_available=planner_available,
             planner_fallback_reason=planner_fallback_reason,
         )
@@ -177,20 +176,26 @@ def route_request(
         search_query=_guard_exact_spans(
             normalized_user_input, classifier_decision.search_query
         ),
-        planner_profile_name=planner_profile_name,
+        planner_profile_name=route_selector_profile_name,
         planner_available=planner_available,
         planner_fallback_reason=planner_fallback_reason,
     )
 
 
-def _classify_route_with_optional_planner(
+def _resolve_route_selector_profile_name(settings: Settings) -> str | None:
+    if settings.router.enabled:
+        return ROUTER_PROFILE_NAME
+    return None
+
+
+def _classify_route_with_optional_router(
     *,
     settings: Settings,
     model_profile_name: str,
-    planner_profile_name: str | None,
+    route_selector_profile_name: str | None,
     user_input: str,
 ) -> tuple[_RouterClassifierDecision | None, bool, str | None]:
-    if not planner_profile_name:
+    if not route_selector_profile_name:
         return (
             _classify_route_with_model(
                 settings=settings,
@@ -201,17 +206,17 @@ def _classify_route_with_optional_planner(
             None,
         )
 
-    planner_decision = _classify_route_with_model(
+    router_decision = _classify_route_with_model(
         settings=settings,
-        model_profile_name=planner_profile_name,
+        model_profile_name=route_selector_profile_name,
         user_input=user_input,
     )
-    if planner_decision is not None:
-        return planner_decision, True, None
+    if router_decision is not None:
+        return router_decision, True, None
 
     fallback_reason = (
-        "Planner profile "
-        f"'{planner_profile_name}' was unavailable for route selection; "
+        "Dedicated router profile "
+        f"'{route_selector_profile_name}' was unavailable for route selection; "
         "falling back to the responder profile."
     )
     legacy_decision = _classify_route_with_model(
@@ -311,7 +316,10 @@ def _classify_route_with_model(
     user_input: str,
 ) -> _RouterClassifierDecision | None:
     try:
-        profile = resolve_model_profile(settings, model_profile_name)
+        if model_profile_name == ROUTER_PROFILE_NAME:
+            profile = resolve_router_profile(settings)
+        else:
+            profile = resolve_model_profile(settings, model_profile_name)
     except ConfigurationError:
         return None
 
@@ -324,7 +332,7 @@ def _classify_route_with_model(
         response = provider.chat(
             profile=classifier_profile,
             messages=_build_router_messages(user_input),
-            timeout_seconds=ROUTER_CLASSIFIER_TIMEOUT_SECONDS,
+            timeout_seconds=settings.router.timeout_seconds,
             thinking_enabled=False,
         )
     except LLMProviderError:

@@ -14,9 +14,11 @@ NOTES_DIRECTORY_NAME = "notes"
 
 APP_CONFIG_FILE_NAME = "app.yaml"
 MODELS_CONFIG_FILE_NAME = "models.yaml"
+ROUTER_CONFIG_FILE_NAME = "router.yaml"
 SYSTEM_PROMPT_FILE_NAME = "system.txt"
 DATABASE_FILE_NAME = "memory/app.db"
 LOG_FILE_NAME = "runtime.log"
+ROUTER_PROFILE_NAME = "router"
 
 PROJECT_ROOT_ENV_VAR = "UNCLAW_PROJECT_ROOT"
 

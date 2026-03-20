@@ -1,0 +1,9 @@
+# Developer-facing dedicated route-selection model configuration.
+# This model is the authoritative source of truth for route selection.
+enabled: true
+provider: ollama
+model_name: qwen3:1.7b
+temperature: 0.0
+num_ctx: 4096
+keep_alive: 10m
+timeout_seconds: 15.0

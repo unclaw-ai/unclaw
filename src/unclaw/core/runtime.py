@@ -4,17 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 import threading
 from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any
 
 from unclaw.core.capabilities import build_runtime_capability_summary
-from unclaw.core.context_builder import (
-    build_context_messages,
-    build_untrusted_tool_message_content,
-)
+from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.orchestrator import (
@@ -24,11 +21,9 @@ from unclaw.core.orchestrator import (
     OrchestratorTurnResult,
 )
 from unclaw.core.router import RouteKind, route_request
-from unclaw.core.search_grounding import has_search_grounding_context
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
 from unclaw.constants import (
-    DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT,
     DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     EMPTY_RESPONSE_REPLY,
     RUNTIME_ERROR_REPLY,
@@ -52,22 +47,10 @@ _TOOL_BUDGET_FALLBACK_REPLY = (
     "I stopped after reaching the tool-call limit for this request."
 )
 _TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
-_PLANNER_SYSTEM_PROMPT = (
-    "Decide the next runtime action. Return JSON only with keys action, "
-    "tool_name, arguments, and search_query. action must be one of: "
-    "direct_chat, route_web_search, tool_call, no_tool. Use direct_chat when "
-    "the responder should answer now from general knowledge or local reasoning "
-    "without more tool work. Use no_tool when existing tool results already "
-    "suffice and the responder should answer from current context. Use "
-    "route_web_search when grounded public-web evidence is needed. Use "
-    "tool_call only for exactly one available built-in tool with explicit "
-    "arguments. Never write the final user-facing answer."
+_INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
+    "I couldn't safely execute a tool request because the model returned an "
+    "invalid tool payload. Please try again or rephrase the request."
 )
-
-_PLANNER_DIRECT_CHAT = "direct_chat"
-_PLANNER_ROUTE_WEB_SEARCH = "route_web_search"
-_PLANNER_TOOL_CALL = "tool_call"
-_PLANNER_NO_TOOL = "no_tool"
 
 # ---------------------------------------------------------------------------
 # Overwrite intent guard — P3-4 corrective mission.
@@ -205,17 +188,10 @@ class _PendingToolExecution:
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannerAction:
-    action: str
-    tool_call: ToolCall | None = None
-    search_query: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _PlannerLoopResult:
-    assistant_reply: str | None = None
-    fallback_to_legacy: bool = False
-    fallback_reason: str | None = None
+class _InlineToolPayloadAnalysis:
+    tool_calls: tuple[ToolCall, ...] | None = None
+    raw_tool_calls_payload: tuple[dict[str, Any], ...] | None = None
+    invalid_tool_payload: bool = False
 
 
 def run_user_turn(
@@ -256,9 +232,12 @@ def run_user_turn(
         session_manager.settings,
         session_manager=session_manager,
     )
-    chat_only_profile = _is_chat_only_profile(selected_model)
+    router_exempt_profile = _is_router_exempt_chat_profile(
+        selected_model_profile_name,
+        selected_model,
+    )
     capability_tool_registry = (
-        ToolRegistry() if chat_only_profile else active_tool_registry
+        ToolRegistry() if router_exempt_profile else active_tool_registry
     )
     tool_guard_state = _RuntimeToolGuardState(
         tool_timeout_seconds=(
@@ -270,32 +249,17 @@ def run_user_turn(
         cancellation=turn_cancellation,
     )
 
-    # Determine the responder-native tool path and the optional planner path
-    # up front so routing and capability notes stay honest.
+    # Determine the responder-native tool path up front so routing and the
+    # responder share the same native-tool runtime after route selection.
     legacy_tool_definitions = _resolve_tool_definitions(
         tool_registry=active_tool_registry,
         model_profile=selected_model,
     )
-    planner_profile_name = _read_planner_profile_name(selected_model)
-    planner_tool_definitions = (
-        active_tool_registry.list_tools() if planner_profile_name is not None else ()
-    )
-    planner_can_call_tools = bool(planner_profile_name) and bool(planner_tool_definitions)
     legacy_can_call_tools = legacy_tool_definitions is not None
-    routing_capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
-        memory_summary_available=command_handler.memory_manager is not None,
-        model_can_call_tools=planner_can_call_tools or legacy_can_call_tools,
-    )
-    legacy_responder_capability_summary = build_runtime_capability_summary(
+    capability_summary = build_runtime_capability_summary(
         tool_registry=capability_tool_registry,
         memory_summary_available=command_handler.memory_manager is not None,
         model_can_call_tools=legacy_can_call_tools,
-    )
-    planner_responder_capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
-        memory_summary_available=command_handler.memory_manager is not None,
-        model_can_call_tools=False,
     )
     turn_started_at = perf_counter()
 
@@ -324,18 +288,14 @@ def run_user_turn(
         route = route_request(
             settings=session_manager.settings,
             model_profile_name=selected_model_profile_name,
-            planner_profile_name=planner_profile_name,
             user_input=user_input,
             thinking_enabled=thinking_enabled,
-            capability_summary=routing_capability_summary,
+            capability_summary=capability_summary,
             allow_web_search_routing=(
-                explicit_tool_call is None and not chat_only_profile
+                explicit_tool_call is None and not router_exempt_profile
             ),
         )
-        route_planner_profile_name = _read_route_planner_profile_name(
-            route,
-            default=planner_profile_name,
-        )
+        route_planner_profile_name = _read_route_planner_profile_name(route)
         route_planner_available = _read_route_planner_available(route)
         route_planner_fallback_reason = _read_route_planner_fallback_reason(route)
         active_tracer.trace_route_selected(
@@ -346,28 +306,8 @@ def run_user_turn(
             planner_available=route_planner_available,
             planner_fallback_reason=route_planner_fallback_reason,
         )
-        recent_history_has_grounding = _recent_history_has_search_grounding(
-            session_manager=session_manager,
-            session_id=session.id,
-        )
-        planner_active = (
-            bool(planner_profile_name)
-            and route_planner_available
-            and route_planner_fallback_reason is None
-            and not chat_only_profile
-            and runtime_explicit_tool_call is None
-            and route.kind is not RouteKind.WEB_SEARCH
-            and not recent_history_has_grounding
-            and stream_output_func is None
-        )
-        responder_tool_definitions = (
-            None if planner_active else legacy_tool_definitions
-        )
-        responder_capability_summary = (
-            planner_responder_capability_summary
-            if planner_active
-            else legacy_responder_capability_summary
-        )
+        responder_tool_definitions = legacy_tool_definitions
+        responder_capability_summary = capability_summary
 
         if route.kind is RouteKind.WEB_SEARCH:
             if on_search_route is not None:
@@ -384,6 +324,9 @@ def run_user_turn(
                 assistant_reply_transform=assistant_reply_transform,
             )
             system_context_notes = (*system_context_notes, *route_context_notes)
+            # Keep the shared native responder loop available after the forced
+            # initial search. Non-native / chat-only profiles already have
+            # responder_tool_definitions=None from _resolve_tool_definitions().
 
         if runtime_explicit_tool_call is not None and (
             route.kind is RouteKind.WEB_SEARCH or responder_tool_definitions is None
@@ -413,30 +356,6 @@ def run_user_turn(
                 session_manager=session_manager,
                 tracer=active_tracer,
             )
-            if planner_active:
-                planner_result = _run_planner_loop(
-                    orchestrator=orchestrator,
-                    session_id=session.id,
-                    session_manager=session_manager,
-                    tracer=active_tracer,
-                    tool_registry=active_tool_registry,
-                    planner_profile_name=planner_profile_name,
-                    responder_profile_name=route.model_profile_name,
-                    user_message=user_input,
-                    capability_summary=routing_capability_summary,
-                    system_context_notes=system_context_notes,
-                    tool_definitions=planner_tool_definitions,
-                    max_steps=max_agent_steps,
-                    tool_guard_state=tool_guard_state,
-                    tool_call_callback=tool_call_callback,
-                    user_input=user_input,
-                )
-                if planner_result.assistant_reply is not None:
-                    assistant_reply = planner_result.assistant_reply
-                elif planner_result.fallback_to_legacy:
-                    responder_tool_definitions = legacy_tool_definitions
-                    responder_capability_summary = legacy_responder_capability_summary
-
             if assistant_reply is None:
                 response = orchestrator.run_turn(
                     session_id=session.id,
@@ -468,27 +387,23 @@ def run_user_turn(
                 # Explicitly required by BIG-FIX-ROUTER-1R3.  Complies with
                 # mandatory_rules rule 5 allowed exception: defensive, scoped to
                 # the native legacy path only, easy to audit and remove.
-                if (
-                    not response.response.tool_calls
-                    and responder_tool_definitions
-                    and max_agent_steps > 0
-                ):
-                    recovered_calls = _try_recover_inline_tool_calls(
-                        response.response.content, responder_tool_definitions
-                    )
-                    if recovered_calls:
-                        from dataclasses import replace as _dc_replace
-
-                        response = _dc_replace(
-                            response,
-                            response=_dc_replace(
-                                response.response, tool_calls=recovered_calls
-                            ),
+                if not response.response.tool_calls:
+                    inline_tool_response, inline_tool_reply = (
+                        _recover_inline_native_tool_response(
+                            response.response,
+                            tool_definitions=responder_tool_definitions or (),
+                            max_agent_steps=max_agent_steps,
                         )
+                    )
+                    if inline_tool_response is not None:
+                        response = replace(response, response=inline_tool_response)
+                    elif inline_tool_reply is not None:
+                        assistant_reply = inline_tool_reply
 
                 # --- Legacy native tool loop fallback ---
                 if (
-                    response.response.tool_calls
+                    assistant_reply is None
+                    and response.response.tool_calls
                     and responder_tool_definitions
                     and max_agent_steps > 0
                 ):
@@ -508,7 +423,7 @@ def run_user_turn(
                         tool_call_callback=tool_call_callback,
                         user_input=user_input,
                     )
-                else:
+                elif assistant_reply is None:
                     assistant_reply = (
                         response.response.content.strip() or EMPTY_RESPONSE_REPLY
                     )
@@ -581,10 +496,8 @@ def _build_session_memory_context_note(
 
 def _read_route_planner_profile_name(
     route: Any,
-    *,
-    default: str | None = None,
 ) -> str | None:
-    value = getattr(route, "planner_profile_name", default)
+    value = getattr(route, "planner_profile_name", None)
     if not isinstance(value, str):
         return None
     normalized = value.strip()
@@ -603,293 +516,17 @@ def _read_route_planner_fallback_reason(route: Any) -> str | None:
     return normalized or None
 
 
-def _read_planner_profile_name(model_profile: Any) -> str | None:
-    planner_profile = getattr(model_profile, "planner_profile", None)
-    if not isinstance(planner_profile, str):
-        return None
-    normalized = planner_profile.strip()
-    return normalized or None
-
-
-def _is_chat_only_profile(model_profile: Any) -> bool:
+def _is_router_exempt_chat_profile(
+    model_profile_name: str,
+    model_profile: Any,
+) -> bool:
+    """Fast stays pure chat; lite codex still participates in dedicated routing."""
     tool_mode = getattr(model_profile, "tool_mode", None)
     if not isinstance(tool_mode, str):
         return False
-    return tool_mode.strip().lower() == "none" and (
-        _read_planner_profile_name(model_profile) is None
-    )
-
-
-def _recent_history_has_search_grounding(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-) -> bool:
-    history = session_manager.list_messages(session_id)
-    if DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT is None:
-        recent_history = history
-    else:
-        recent_history = history[-DEFAULT_CONTEXT_HISTORY_MESSAGE_LIMIT:]
-    return has_search_grounding_context(recent_history)
-
-
-def _run_planner_loop(
-    *,
-    orchestrator: Orchestrator,
-    session_id: str,
-    session_manager: SessionManager,
-    tracer: Tracer,
-    tool_registry: ToolRegistry,
-    planner_profile_name: str | None,
-    responder_profile_name: str,
-    user_message: str,
-    capability_summary: Any,
-    system_context_notes: Sequence[str],
-    tool_definitions: Sequence[ToolDefinition],
-    max_steps: int,
-    tool_guard_state: _RuntimeToolGuardState,
-    tool_call_callback: Callable[[ToolCall], None] | None,
-    user_input: str,
-) -> _PlannerLoopResult:
-    if not planner_profile_name:
-        return _PlannerLoopResult(
-            fallback_to_legacy=True,
-            fallback_reason="No planner profile is configured for this responder.",
-        )
-
-    for _step in range(max_steps):
-        if tool_guard_state.is_cancelled():
-            return _PlannerLoopResult(assistant_reply=_TURN_CANCELLED_REPLY)
-
-        planner_action, fallback_reason = _plan_next_action(
-            orchestrator=orchestrator,
-            session_id=session_id,
-            session_manager=session_manager,
-            tracer=tracer,
-            planner_profile_name=planner_profile_name,
-            responder_profile_name=responder_profile_name,
-            user_message=user_message,
-            capability_summary=capability_summary,
-            system_context_notes=system_context_notes,
-            tool_definitions=tool_definitions,
-        )
-        if planner_action is None:
-            return _PlannerLoopResult(
-                fallback_to_legacy=True,
-                fallback_reason=fallback_reason,
-            )
-        if planner_action.action in {_PLANNER_DIRECT_CHAT, _PLANNER_NO_TOOL}:
-            return _PlannerLoopResult()
-
-        if planner_action.action == _PLANNER_ROUTE_WEB_SEARCH:
-            search_query = (
-                planner_action.search_query.strip()
-                if isinstance(planner_action.search_query, str)
-                else ""
-            )
-            if not search_query:
-                return _PlannerLoopResult(
-                    fallback_to_legacy=True,
-                    fallback_reason=(
-                        "Planner returned route_web_search without a usable query."
-                    ),
-                )
-            tool_calls: tuple[ToolCall, ...] = (
-                ToolCall(
-                    tool_name="search_web",
-                    arguments={"query": search_query},
-                ),
-            )
-        elif planner_action.tool_call is not None:
-            tool_calls = (planner_action.tool_call,)
-        else:
-            return _PlannerLoopResult(
-                fallback_to_legacy=True,
-                fallback_reason="Planner returned tool_call without a valid tool payload.",
-            )
-
-        tool_calls = tuple(_guard_write_overwrite_intent(tool_calls, user_input))
-        stop_reply = _preflight_runtime_tool_batch(
-            tool_calls=tool_calls,
-            tool_guard_state=tool_guard_state,
-        )
-        if stop_reply is not None:
-            return _PlannerLoopResult(assistant_reply=stop_reply)
-
-        tool_results = _execute_runtime_tool_calls(
-            session_manager=session_manager,
-            session_id=session_id,
-            tracer=tracer,
-            tool_registry=tool_registry,
-            tool_calls=tool_calls,
-            tool_guard_state=tool_guard_state,
-            tool_call_callback=tool_call_callback,
-        )
-        overwrite_refusal = _build_overwrite_refusal_reply(tool_results)
-        if overwrite_refusal is not None:
-            return _PlannerLoopResult(assistant_reply=overwrite_refusal)
-        if tool_guard_state.is_cancelled():
-            return _PlannerLoopResult(assistant_reply=_TURN_CANCELLED_REPLY)
-
-    return _PlannerLoopResult(assistant_reply=_MAX_STEPS_FALLBACK_REPLY)
-
-
-def _plan_next_action(
-    *,
-    orchestrator: Orchestrator,
-    session_id: str,
-    session_manager: SessionManager,
-    tracer: Tracer,
-    planner_profile_name: str,
-    responder_profile_name: str,
-    user_message: str,
-    capability_summary: Any,
-    system_context_notes: Sequence[str],
-    tool_definitions: Sequence[ToolDefinition],
-) -> tuple[_PlannerAction | None, str | None]:
-    planner_messages = _build_planner_messages(
-        session_manager=session_manager,
-        session_id=session_id,
-        user_message=user_message,
-        capability_summary=capability_summary,
-        system_context_notes=system_context_notes,
-        responder_profile_name=responder_profile_name,
-        tool_definitions=tool_definitions,
-    )
-    try:
-        planner_response = orchestrator.call_model(
-            session_id=session_id,
-            messages=planner_messages,
-            model_profile_name=planner_profile_name,
-            thinking_enabled=False,
-            tools=None,
-        )
-    except ModelCallFailedError as exc:
-        return (
-            None,
-            "Planner profile "
-            f"'{planner_profile_name}' failed during tool planning; "
-            "falling back to the responder profile.",
-        )
-
-    tracer.trace_model_succeeded(
-        session_id=session_id,
-        provider=planner_response.response.provider,
-        model_name=planner_response.response.model_name,
-        finish_reason=planner_response.response.finish_reason,
-        output_length=len(planner_response.response.content),
-        model_duration_ms=planner_response.model_duration_ms,
-        reasoning=planner_response.response.reasoning,
-    )
-
-    planner_action = _parse_planner_action(
-        planner_response.response.content,
-        tool_definitions=tool_definitions,
-    )
-    if planner_action is None:
-        return (
-            None,
-            "Planner profile "
-            f"'{planner_profile_name}' returned an invalid action payload; "
-            "falling back to the responder profile.",
-        )
-    return planner_action, None
-
-
-def _build_planner_messages(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    user_message: str,
-    capability_summary: Any,
-    system_context_notes: Sequence[str],
-    responder_profile_name: str,
-    tool_definitions: Sequence[ToolDefinition],
-) -> list[LLMMessage]:
-    base_messages = build_context_messages(
-        session_manager=session_manager,
-        session_id=session_id,
-        user_message=user_message,
-        capability_summary=capability_summary,
-        system_context_notes=system_context_notes,
-        model_profile_name=responder_profile_name,
-    )
-    return [
-        LLMMessage(role=LLMRole.SYSTEM, content=_PLANNER_SYSTEM_PROMPT),
-        LLMMessage(
-            role=LLMRole.SYSTEM,
-            content=_build_planner_tool_catalog_note(tool_definitions),
-        ),
-        *base_messages,
-    ]
-
-
-def _build_planner_tool_catalog_note(
-    tool_definitions: Sequence[ToolDefinition],
-) -> str:
-    if not tool_definitions:
-        return "Available built-in tools: none."
-
-    lines = ["Available built-in tools:"]
-    for tool in tool_definitions:
-        argument_names = ", ".join(tool.arguments)
-        signature = f"{tool.name}({argument_names})" if argument_names else tool.name
-        lines.append(f"- {signature}")
-    return "\n".join(lines)
-
-
-def _parse_planner_action(
-    content: str,
-    *,
-    tool_definitions: Sequence[ToolDefinition],
-) -> _PlannerAction | None:
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(payload, dict):
-        return None
-
-    action = payload.get("action")
-    if action not in {
-        _PLANNER_DIRECT_CHAT,
-        _PLANNER_ROUTE_WEB_SEARCH,
-        _PLANNER_TOOL_CALL,
-        _PLANNER_NO_TOOL,
-    }:
-        return None
-
-    if action in {_PLANNER_DIRECT_CHAT, _PLANNER_NO_TOOL}:
-        return _PlannerAction(action=action)
-
-    if action == _PLANNER_ROUTE_WEB_SEARCH:
-        search_query = payload.get("search_query")
-        if not isinstance(search_query, str) or not search_query.strip():
-            return None
-        return _PlannerAction(
-            action=action,
-            search_query=search_query.strip(),
-        )
-
-    tool_name = payload.get("tool_name")
-    if not isinstance(tool_name, str) or not tool_name.strip():
-        return None
-    normalized_tool_name = tool_name.strip()
-    allowed_tool_names = {tool.name for tool in tool_definitions}
-    if normalized_tool_name not in allowed_tool_names:
-        return None
-
-    arguments = payload.get("arguments")
-    if not isinstance(arguments, dict):
-        return None
-
-    return _PlannerAction(
-        action=action,
-        tool_call=ToolCall(
-            tool_name=normalized_tool_name,
-            arguments=arguments,
-        ),
+    return (
+        tool_mode.strip().lower() == "none"
+        and model_profile_name.strip().lower() == "fast"
     )
 
 
@@ -1304,59 +941,239 @@ def _supports_native_tool_calling(model_profile: Any) -> bool:
     return tool_mode.strip().lower() == "native"
 
 
-def _try_recover_inline_tool_calls(
-    content: str,
+def _recover_inline_native_tool_response(
+    response: LLMResponse,
+    *,
     tool_definitions: Sequence[ToolDefinition],
-) -> tuple[ToolCall, ...] | None:
-    """Try to parse raw inline tool-call JSON that the model emitted as text content.
+    max_agent_steps: int,
+) -> tuple[LLMResponse | None, str | None]:
+    """Normalize inline JSON tool payloads into the shared native tool path.
 
-    Some native-capable models (e.g. qwen2.5-coder:7b via Ollama) may output
-    tool call requests as JSON text in `content` rather than in the structured
-    `tool_calls` field.  Common formats observed:
-    - {"name": "<tool>", "arguments": {...}}
-    - [{"name": "<tool>", "arguments": {...}}, ...]
-
-    Returns a non-empty tuple of ToolCall objects when the content is parseable
-    as one of these formats AND the named tool exists in tool_definitions.
-    Returns None in all other cases so normal non-tool content is unaffected.
-
-    Explicitly required by BIG-FIX-ROUTER-1R3 (codex raw JSON regression).
-    Complies with mandatory_rules rule 5 allowed exception and rule 10:
-    explicitly justified, visibly scoped to the native legacy path, easy to
-    audit and remove.
+    Some native-capable local models emit tool requests as assistant-visible
+    JSON instead of filling the structured ``tool_calls`` field. When recovery
+    is safe, rebuild a synthetic native payload so the existing agent loop can
+    run unchanged. When the content clearly looks like a tool payload but is
+    invalid or tool execution is unavailable, return a normal assistant reply
+    instead of exposing raw JSON to the user.
     """
+    analysis = _analyze_inline_tool_payload(
+        response.content,
+        tool_definitions=tool_definitions,
+    )
+    if analysis.tool_calls is None:
+        if analysis.invalid_tool_payload:
+            return None, _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY
+        return None, None
+
+    if max_agent_steps <= 0:
+        return None, _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY
+
+    raw_message = response.raw_payload.get("message")
+    normalized_message = dict(raw_message) if isinstance(raw_message, dict) else {}
+    normalized_message["content"] = ""
+    normalized_message["tool_calls"] = list(analysis.raw_tool_calls_payload or ())
+
+    normalized_payload = dict(response.raw_payload)
+    normalized_payload["message"] = normalized_message
+    return (
+        replace(
+            response,
+            content="",
+            tool_calls=analysis.tool_calls,
+            raw_payload=normalized_payload,
+        ),
+        None,
+    )
+
+
+def _analyze_inline_tool_payload(
+    content: str,
+    *,
+    tool_definitions: Sequence[ToolDefinition],
+) -> _InlineToolPayloadAnalysis:
+    candidate = _extract_inline_tool_payload_candidate(content)
+    if candidate is None:
+        return _InlineToolPayloadAnalysis()
+
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        return _InlineToolPayloadAnalysis(
+            invalid_tool_payload=_looks_like_inline_tool_payload_text(candidate)
+        )
+
+    if not _looks_like_inline_tool_payload(payload):
+        return _InlineToolPayloadAnalysis()
+
+    parsed = _parse_inline_tool_payload(
+        payload,
+        allowed_tool_names={tool.name for tool in tool_definitions},
+    )
+    if parsed is None:
+        return _InlineToolPayloadAnalysis(invalid_tool_payload=True)
+
+    tool_calls, raw_tool_calls_payload = parsed
+    return _InlineToolPayloadAnalysis(
+        tool_calls=tool_calls,
+        raw_tool_calls_payload=raw_tool_calls_payload,
+    )
+
+
+def _extract_inline_tool_payload_candidate(content: str) -> str | None:
     stripped = content.strip()
-    if not stripped or stripped[0] not in ("{", "["):
+    if not stripped:
+        return None
+
+    fenced_candidate = _extract_fenced_json_candidate(stripped)
+    if fenced_candidate is not None:
+        return fenced_candidate
+
+    if stripped[0] in ("{", "["):
+        return stripped
+
+    return None
+
+
+def _extract_fenced_json_candidate(content: str) -> str | None:
+    fence_start = content.find("```")
+    if fence_start == -1:
+        return None
+
+    fence_end = content.find("```", fence_start + 3)
+    if fence_end == -1:
+        return None
+
+    candidate = content[fence_start + 3 : fence_end].strip()
+    if not candidate:
+        return None
+
+    if "\n" in candidate:
+        first_line, remainder = candidate.split("\n", 1)
+        if first_line.strip().lower() in {"json", "jsonc", "javascript", "js"}:
+            candidate = remainder.strip()
+
+    if not candidate or candidate[0] not in ("{", "["):
+        return None
+    return candidate
+
+
+def _looks_like_inline_tool_payload_text(candidate: str) -> bool:
+    lowered = candidate.lower()
+    if "\"tool_calls\"" in lowered or "\"function\"" in lowered:
+        return True
+    return "\"arguments\"" in lowered and (
+        "\"name\"" in lowered or "\"tool_name\"" in lowered
+    )
+
+
+def _looks_like_inline_tool_payload(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return bool(payload) and all(
+            _looks_like_inline_tool_payload(item) for item in payload
+        )
+
+    if not isinstance(payload, dict):
+        return False
+
+    if "tool_calls" in payload:
+        return set(payload).issubset({"tool_calls", "id", "type"})
+
+    if "function" in payload:
+        return set(payload).issubset({"function", "id", "type", "index"})
+
+    name = payload.get("name")
+    tool_name = payload.get("tool_name")
+    return (
+        (isinstance(name, str) or isinstance(tool_name, str))
+        and set(payload).issubset({"name", "tool_name", "arguments", "id", "type"})
+    )
+
+
+def _parse_inline_tool_payload(
+    payload: Any,
+    *,
+    allowed_tool_names: set[str],
+) -> tuple[tuple[ToolCall, ...], tuple[dict[str, Any], ...]] | None:
+    if isinstance(payload, dict) and "tool_calls" in payload:
+        raw_calls = payload.get("tool_calls")
+    elif isinstance(payload, list):
+        raw_calls = payload
+    else:
+        raw_calls = [payload]
+
+    if not isinstance(raw_calls, list) or not raw_calls:
+        return None
+
+    parsed_calls: list[ToolCall] = []
+    raw_payloads: list[dict[str, Any]] = []
+    for raw_call in raw_calls:
+        parsed = _parse_one_inline_tool_call(
+            raw_call,
+            allowed_tool_names=allowed_tool_names,
+        )
+        if parsed is None:
+            return None
+        tool_call, raw_payload = parsed
+        parsed_calls.append(tool_call)
+        raw_payloads.append(raw_payload)
+
+    return tuple(parsed_calls), tuple(raw_payloads)
+
+
+def _parse_one_inline_tool_call(
+    payload: Any,
+    *,
+    allowed_tool_names: set[str],
+) -> tuple[ToolCall, dict[str, Any]] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    if "function" in payload:
+        function = payload.get("function")
+        if not isinstance(function, dict):
+            return None
+        raw_name = function.get("name")
+        raw_arguments = function.get("arguments")
+    else:
+        raw_name = payload.get("name")
+        if not isinstance(raw_name, str):
+            raw_name = payload.get("tool_name")
+        raw_arguments = payload.get("arguments")
+
+    if not isinstance(raw_name, str) or raw_name not in allowed_tool_names:
+        return None
+
+    arguments = _normalize_inline_tool_arguments(raw_arguments)
+    if arguments is None:
+        return None
+
+    return (
+        ToolCall(tool_name=raw_name, arguments=arguments),
+        {
+            "function": {
+                "name": raw_name,
+                "arguments": arguments,
+            }
+        },
+    )
+
+
+def _normalize_inline_tool_arguments(arguments: Any) -> dict[str, Any] | None:
+    if arguments is None:
+        return {}
+    if isinstance(arguments, dict):
+        return arguments
+    if not isinstance(arguments, str):
         return None
 
     try:
-        payload = json.loads(stripped)
+        parsed = json.loads(arguments)
     except json.JSONDecodeError:
         return None
 
-    allowed_names = {tool.name for tool in tool_definitions}
-
-    def _parse_one(obj: Any) -> ToolCall | None:
-        if not isinstance(obj, dict):
-            return None
-        name = obj.get("name")
-        if not isinstance(name, str) or name not in allowed_names:
-            return None
-        arguments = obj.get("arguments")
-        if not isinstance(arguments, dict):
-            arguments = {}
-        return ToolCall(tool_name=name, arguments=arguments)
-
-    if isinstance(payload, dict):
-        call = _parse_one(payload)
-        return (call,) if call is not None else None
-
-    if isinstance(payload, list):
-        calls = [_parse_one(item) for item in payload]
-        valid = tuple(call for call in calls if call is not None)
-        return valid if valid else None
-
-    return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...] | None:

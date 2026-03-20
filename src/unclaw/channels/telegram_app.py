@@ -65,6 +65,7 @@ def start_telegram_app(
                             f"{settings.default_model.model_name}"
                         ),
                     ),
+                    ("router", f"router -> {settings.router.model_name}"),
                     ("logging", settings.app.logging.mode),
                     ("polling", f"{telegram_config.polling_timeout_seconds}s"),
                     (

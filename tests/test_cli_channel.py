@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.settings import load_settings
+from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.contracts import (
     ToolCall,
     ToolDefinition,
@@ -24,6 +26,37 @@ from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.integration
+
+
+class _CliFakeNonStreamResponse:
+    def __init__(self, body: str) -> None:
+        self._body = body
+
+    def __enter__(self) -> _CliFakeNonStreamResponse:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    def read(self) -> bytes:
+        return self._body.encode("utf-8")
+
+
+class _CliFakeStreamResponse:
+    def __init__(self, payloads: tuple[dict[str, object], ...]) -> None:
+        self._lines = [
+            json.dumps(payload, sort_keys=True).encode("utf-8") + b"\n"
+            for payload in payloads
+        ]
+
+    def __enter__(self) -> _CliFakeStreamResponse:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
 
 
 def test_terminal_assistant_stream_finishes_cleanly_when_stream_matches(capsys) -> None:
@@ -284,6 +317,142 @@ def test_cli_shows_model_requested_tool_call_before_final_reply(
 
     output = capsys.readouterr().out
     assert exit_code == 0
+    tool_line = '[tool] fetch_url_text {"url": "https://example.com"}'
+    reply_line = "Unclaw> The page contains example content."
+    assert tool_line in output
+    assert reply_line in output
+    assert output.index(tool_line) < output.index(reply_line)
+
+
+def test_cli_streamed_native_tool_call_shows_tool_before_final_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        ToolDefinition(
+            name="fetch_url_text",
+            description="Fetch URL text.",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={"url": "The URL to fetch"},
+        ),
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Example Domain content",
+        ),
+    )
+
+    call_count = 0
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        nonlocal call_count
+        del timeout
+        payload = json.loads(request.data.decode("utf-8"))
+
+        if not payload.get("stream", False):
+            return _CliFakeNonStreamResponse(
+                json.dumps(
+                    {
+                        "model": "qwen3.5:4b",
+                        "created_at": "2026-03-20T10:00:00Z",
+                        "done_reason": "stop",
+                        "message": {"content": '{"route":"chat","search_query":""}'},
+                    }
+                )
+            )
+
+        call_count += 1
+        if call_count == 1:
+            return _CliFakeStreamResponse(
+                (
+                    {
+                        "model": "qwen3.5:4b",
+                        "created_at": "2026-03-20T10:00:01Z",
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {"url": "https://example.com"},
+                                    }
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "model": "qwen3.5:4b",
+                        "created_at": "2026-03-20T10:00:02Z",
+                        "done_reason": "stop",
+                    },
+                )
+            )
+
+        return _CliFakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-20T10:00:03Z",
+                    "message": {"content": "The page contains example content."},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-20T10:00:04Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr("unclaw.llm.ollama_provider.urlopen", fake_urlopen)
+
+    scripted_inputs = iter(["Fetch example.com"])
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=tool_registry,
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert call_count == 2
     tool_line = '[tool] fetch_url_text {"url": "https://example.com"}'
     reply_line = "Unclaw> The page contains example content."
     assert tool_line in output
@@ -679,3 +848,234 @@ def test_cli_search_non_native_uses_runtime_tool_path_without_channel_preexecuti
     assert "Sources:\n- Ollama Blog: https://ollama.com/blog/search-update" in output
     assert "- Release Notes: https://example.com/releases/ollama-search" in output
     assert captured_messages
+
+
+def test_cli_routed_web_search_can_continue_into_native_write_tool_loop(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+
+    reformulated_query = "Marine Leleu recent profile"
+    output_path = project_root / "marine-leleu.txt"
+    file_contents = "Marine Leleu is a French endurance athlete and content creator."
+    search_calls: list[ToolCall] = []
+    write_calls: list[ToolCall] = []
+    responder_call_count = 0
+
+    tool_registry = ToolRegistry()
+
+    def _search_tool(call: ToolCall) -> ToolResult:
+        search_calls.append(call)
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete and content creator."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Marine Leleu",
+                        "url": "https://example.com/marine-leleu",
+                    },
+                    {
+                        "title": "Athlete Profile",
+                        "url": "https://example.com/athletes/marine-leleu",
+                    },
+                ],
+            },
+        )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        write_calls.append(call)
+        output_path.write_text(str(call.arguments["content"]), encoding="utf-8")
+        return ToolResult.ok(
+            tool_name="write_text_file",
+            output_text=f"Wrote text file: {output_path}",
+            payload={"path": str(output_path)},
+        )
+
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+            del profile, messages, kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    '{"route":"web_search",'
+                    f'"search_query":"{reformulated_query}"'
+                    "}"
+                ),
+                created_at="2026-03-20T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOrchestratorProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, tools
+            nonlocal responder_call_count
+            responder_call_count += 1
+            if responder_call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name="qwen3.5:4b",
+                    content="",
+                    created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="write_text_file",
+                            arguments={
+                                "path": str(output_path),
+                                "content": file_contents,
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "write_text_file",
+                                        "arguments": {
+                                            "path": str(output_path),
+                                            "content": file_contents,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            reply = "I saved a short briefing to marine-leleu.txt."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=reply,
+                created_at="2026-03-20T10:00:02Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr(
+        "unclaw.core.orchestrator.OllamaProvider",
+        FakeOrchestratorProvider,
+    )
+    monkeypatch.setattr(
+        "unclaw.core.runtime.create_default_tool_registry",
+        lambda settings_arg, session_manager=None: tool_registry,
+    )
+
+    scripted_inputs = iter(
+        [
+            "Search the web for Marine Leleu, save a short summary to marine-leleu.txt, then tell me what you saved."
+        ]
+    )
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=tool_registry,
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert responder_call_count == 2
+    assert search_calls == [
+        ToolCall(tool_name="search_web", arguments={"query": reformulated_query})
+    ]
+    assert write_calls == [
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(output_path), "content": file_contents},
+        )
+    ]
+    assert output_path.read_text(encoding="utf-8") == file_contents
+    tool_line = (
+        f'[tool] write_text_file {{"content": "{file_contents}", '
+        f'"path": "{output_path}"}}'
+    )
+    reply_line = "Unclaw> I saved a short briefing to marine-leleu.txt."
+    assert tool_line in output
+    assert output.index(tool_line) < output.index(reply_line)
+    assert "Unclaw> I saved a short briefing to marine-leleu.txt." in output
+    assert "Sources:\n- Marine Leleu: https://example.com/marine-leleu" in output
+    assert "- Athlete Profile: https://example.com/athletes/marine-leleu" in output
+    assert "[answer refined]" in output

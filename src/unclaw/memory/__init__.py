@@ -1,6 +1,9 @@
 """Memory helpers for unclaw."""
 
-from unclaw.memory.manager import MemoryManager, SessionMemoryState
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 from unclaw.memory.summarizer import (
     SessionMemoryFinding,
     SessionMemoryStats,
@@ -10,6 +13,9 @@ from unclaw.memory.summarizer import (
     serialize_structured_session_memory,
     summarize_session_messages,
 )
+
+if TYPE_CHECKING:
+    from unclaw.memory.manager import MemoryManager, SessionMemoryState
 
 __all__ = [
     "MemoryManager",
@@ -22,3 +28,15 @@ __all__ = [
     "serialize_structured_session_memory",
     "summarize_session_messages",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"MemoryManager", "SessionMemoryState"}:
+        from unclaw.memory.manager import MemoryManager, SessionMemoryState
+
+        exports = {
+            "MemoryManager": MemoryManager,
+            "SessionMemoryState": SessionMemoryState,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

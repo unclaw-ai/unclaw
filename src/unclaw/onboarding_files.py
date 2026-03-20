@@ -36,7 +36,6 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         tool_mode="native",
         num_ctx=8192,
         keep_alive="30m",
-        planner_profile="fast",
     ),
     "deep": ModelProfileDraft(
         provider="ollama",
@@ -46,17 +45,15 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         tool_mode="native",
         num_ctx=8192,
         keep_alive="10m",
-        planner_profile="fast",
     ),
     "codex": ModelProfileDraft(
         provider="ollama",
         model_name="qwen2.5-coder:7b",
         temperature=0.1,
         thinking_supported=True,
-        tool_mode="native",
+        tool_mode="none",
         num_ctx=4096,
         keep_alive="10m",
-        planner_profile="fast",
     ),
 }
 
@@ -73,7 +70,6 @@ def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
             tool_mode=draft.tool_mode,
             num_ctx=draft.num_ctx,
             keep_alive=draft.keep_alive,
-            planner_profile=draft.planner_profile,
         )
         for name, draft in _RECOMMENDED_PROFILES.items()
     }
@@ -158,8 +154,6 @@ def build_onboarding_file_payloads(
             profile_payload["num_ctx"] = draft.num_ctx
         if draft.keep_alive is not None:
             profile_payload["keep_alive"] = draft.keep_alive
-        if draft.planner_profile is not None:
-            profile_payload["planner_profile"] = draft.planner_profile
         profiles_section[profile_name] = profile_payload
 
     telegram_payload: dict[str, object] = {

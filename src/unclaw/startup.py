@@ -19,6 +19,7 @@ from unclaw.constants import (
     OLLAMA_STARTUP_POLL_INTERVAL_SECONDS,
     OLLAMA_STARTUP_RECHECK_TIMEOUT_SECONDS,
     OLLAMA_STARTUP_WAIT_TIMEOUT_SECONDS,
+    ROUTER_PROFILE_NAME,
 )
 from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole, ResolvedModelProfile
@@ -209,6 +210,10 @@ def build_startup_report(
             installed_model_names=ollama_status.model_names,
             profile_names=optional_profile_names,
         )
+        missing_router = find_missing_router_model(
+            settings,
+            installed_model_names=ollama_status.model_names,
+        )
 
         checks.extend(
             _build_required_model_checks(
@@ -217,6 +222,12 @@ def build_startup_report(
                 missing_profiles=required_missing,
             )
         )
+        router_check = _build_router_check(
+            settings,
+            missing_router=missing_router,
+        )
+        if router_check is not None:
+            checks.append(router_check)
         checks.extend(_build_optional_model_checks(missing_profiles=optional_missing))
         if (
             warm_default_model
@@ -328,6 +339,23 @@ def find_missing_model_profiles(
         missing_profiles.append((profile.name, profile.model_name))
 
     return tuple(missing_profiles)
+
+
+def find_missing_router_model(
+    settings: Settings,
+    *,
+    installed_model_names: tuple[str, ...],
+) -> tuple[str, str] | None:
+    """Return the dedicated router config/model pair when it is missing locally."""
+
+    router = settings.router
+    if not router.enabled or router.provider != OllamaProvider.provider_name:
+        return None
+
+    if router.model_name in set(installed_model_names):
+        return None
+
+    return (ROUTER_PROFILE_NAME, router.model_name)
 
 
 def build_banner(
@@ -511,6 +539,44 @@ def _build_required_model_checks(
             status=CheckStatus.OK,
             label="Models",
             detail=f"Required model profiles are available: {configured_models}.",
+        ),
+    )
+
+
+def _build_router_check(
+    settings: Settings,
+    *,
+    missing_router: tuple[str, str] | None,
+) -> StartupCheck | None:
+    if not settings.router.enabled:
+        return StartupCheck(
+            status=CheckStatus.INFO,
+            label="Router",
+            detail=(
+                "Dedicated route-selection config is disabled; route selection will "
+                "use the active responder model."
+            ),
+        )
+
+    if missing_router is not None:
+        router_name, model_name = missing_router
+        return StartupCheck(
+            status=CheckStatus.WARN,
+            label="Router",
+            detail=(
+                "Dedicated route-selection model is missing: "
+                f"{router_name}={model_name}. Route selection will fall back to "
+                "the active responder model."
+            ),
+            guidance="Pull it with `ollama pull <model>`, or run `unclaw onboard` for guided local setup.",
+        )
+
+    return StartupCheck(
+        status=CheckStatus.OK,
+        label="Router",
+        detail=(
+            "Dedicated route-selection model is available: "
+            f"{ROUTER_PROFILE_NAME}={settings.router.model_name}."
         ),
     )
 

@@ -164,6 +164,14 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                     "Reply to the user in their language after reading the tool result.",
                 )
             )
+        if summary.system_info_available:
+            lines.extend(
+                (
+                    "- For questions about the current local time, date, day, OS, "
+                    "RAM, CPU, hostname, or locale on this machine, call "
+                    "system_info instead of guessing.",
+                )
+            )
         if summary.long_term_memory_available:
             lines.extend(
                 (
@@ -182,14 +190,16 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                     "'que sais-tu de mon setup?', "
                     "'sur mon matériel informatique, tu as quoi ?'). "
                     "Pass a concise semantic English query term when calling search — e.g. "
-                    "for 'je m'appelle comment?' or 'mon prénom ?' pass query='name' "
+                    "for 'what is my name?', 'what's my name?', "
+                    "'je m'appelle comment?', or 'mon prénom ?' pass query='name' "
                     "with category='identity'; "
                     "for 'what GPU do I have?' pass query='GPU' with category='hardware'. "
                     "TOOL CHOICE: when the user asks what you *remember* or *know* about "
                     "their hardware or identity → use long-term memory tools. "
                     "Use system_info only when the user asks about the *current* machine "
                     "state (OS, CPU, RAM usage, processes) — not recalled stored facts. "
-                    "list_long_term_memory: call when the user asks broadly what is stored. "
+                    "list_long_term_memory: call when the user asks broadly what is stored "
+                    "or remembered about them. "
                     "Long-term memory is NOT injected automatically — call the tools "
                     "explicitly when needed. "
                     "Do NOT use long-term memory tools for current session message history "
@@ -259,7 +269,9 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
         )
     if summary.system_info_available:
         lines.append(
-            "system_info: return a read-only summary of the local machine and runtime."
+            "system_info: return a read-only summary of the current local machine "
+            "and runtime, including local date/time, day, OS, CPU core count, "
+            "total RAM, hostname, and locale."
         )
     if summary.notes_available:
         lines.append(
@@ -315,6 +327,10 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
             "store, search, list, or delete persistent cross-session facts "
             "(identity, hardware, preferences). "
             "Not injected automatically — call tools explicitly. "
+            "For remembered-name recall, use search_long_term_memory with "
+            "query='name' and category='identity'. "
+            "For broad 'what do you remember/know about me?' requests, use "
+            "list_long_term_memory. "
             "For recall in any language, pass a concise semantic query term "
             "(e.g. query='name', query='GPU'). "
             "Not for session message history — use inspect_session_history for that."

@@ -41,7 +41,11 @@ from unclaw.onboarding_ui import (
     ask_select_question as _run_select_question,
 )
 from unclaw.settings import Settings
-from unclaw.startup import find_missing_model_profiles, inspect_ollama
+from unclaw.startup import (
+    find_missing_model_profiles,
+    find_missing_router_model,
+    inspect_ollama,
+)
 from unclaw.terminal_styles import onboarding_questionary_style_entries
 
 try:
@@ -308,7 +312,11 @@ def run_onboarding(
             installed_model_names=ollama_status.model_names,
             profile_names=tuple(plan.model_profiles),
         )
-        if missing_profiles:
+        missing_router = find_missing_router_model(
+            configured_settings,
+            installed_model_names=ollama_status.model_names,
+        )
+        if missing_profiles or missing_router is not None:
             output_func("- Pull the remaining missing models before heavier use.")
 
     return 0

@@ -15,7 +15,6 @@ profiles:
     tool_mode: native
     num_ctx: 8192
     keep_alive: 30m
-    planner_profile: fast
   deep:
     provider: ollama
     model_name: qwen3.5:9b
@@ -24,13 +23,11 @@ profiles:
     tool_mode: native
     num_ctx: 8192
     keep_alive: 10m
-    planner_profile: fast
   codex:
     provider: ollama
     model_name: qwen2.5-coder:7b
     temperature: 0.1
     thinking_supported: true
-    tool_mode: native
+    tool_mode: none
     num_ctx: 4096
     keep_alive: 10m
-    planner_profile: fast

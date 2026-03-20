@@ -38,8 +38,14 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
+from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
+from unclaw.tools.long_term_memory_tools import (
+    LIST_LONG_TERM_MEMORY_DEFINITION,
+    SEARCH_LONG_TERM_MEMORY_DEFINITION,
+)
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel, ToolResult
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.integration
@@ -50,10 +56,9 @@ def _make_offline_router_provider():
 
     Used to make the router unable to contact Ollama during tests that verify
     non-routing behaviour (subscriber resilience, adversarial tool wrapping).
-    Raising LLMProviderError causes _classify_route_with_model to return None,
-    which sets planner_available=False and keeps planner_active=False — giving
-    the expected 5-event legacy sequence without depending on whether a real
-    Ollama process is running on the test machine.
+    Raising LLMProviderError makes the route classifier fall back cleanly
+    without depending on whether a real Ollama process is running on the
+    test machine.
     """
 
     class _OfflineRouterProvider:
@@ -264,12 +269,8 @@ def test_run_user_turn_continues_when_event_bus_subscriber_raises(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    # Make the router unable to contact Ollama so planner_available stays False
-    # and planner_active stays False — the test exercises subscriber resilience,
-    # not planner behaviour. Without this patch, a running local Ollama causes
-    # the router to set planner_available=True, which triggers the planner loop
-    # (extra model.called + model.succeeded) before the responder call, producing
-    # 7 events instead of the expected 5.
+    # Keep the route classifier offline so this test stays focused on subscriber
+    # resilience without depending on local Ollama availability.
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
@@ -786,10 +787,8 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    # Make the router unable to contact Ollama so planner_active stays False.
-    # Without this, a running local Ollama activates the planner loop, which
-    # calls the model twice, causing the TOOL message to appear in captured_messages
-    # twice (once for the planner call, once for the responder call).
+    # Keep the route classifier offline so the test captures only the responder
+    # turn and does not depend on local Ollama availability.
     monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
@@ -1015,7 +1014,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_shared_search_path_
         session_manager.close()
 
 
-def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_native_profile(
+def test_run_user_turn_routes_normal_web_backed_request_into_grounded_responder_path_for_native_profile(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1125,11 +1124,11 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
             captured_turn_tools.append(tools)
             captured_turn_messages.append(list(messages))
 
-            # P5-2: by the time the model is called (turn 1), the forced initial
-            # search has already executed and its result is in the session history,
-            # so the model's context already contains a TOOL message.
+            # By the time the model is called, the forced initial search has
+            # already executed and its result is in the session history. The
+            # responder should stay on the shared native tool path.
             assert tools is not None
-            assert any(tool.name == SEARCH_WEB_DEFINITION.name for tool in tools)
+            assert any(tool.name == "search_web" for tool in tools)
             assert any(
                 message.role is LLMRole.SYSTEM
                 and f"Ground this request: {reformulated_query}" in message.content
@@ -1191,7 +1190,7 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
         assert captured_search_calls[0].arguments["query"] == reformulated_query
         assert len(captured_turn_tools) == 1
         assert captured_turn_tools[0] is not None, (
-            "Native profile must still receive tool definitions on the model call."
+            "Routed WEB_SEARCH turns must continue through the shared native tool path."
         )
         assert any(
             message.role is LLMRole.SYSTEM
@@ -1213,6 +1212,272 @@ def test_run_user_turn_routes_normal_web_backed_request_into_agent_loop_for_nati
             "runtime.started",
             "route.selected",
             "tool.started",    # P5-2: forced initial search (before model)
+            "tool.finished",
+            "model.called",
+            "model.succeeded",
+            "assistant.reply.persisted",
+        ]
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_routed_web_search_can_continue_into_shared_native_write_tool_loop(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    user_input = (
+        "Search the web for Marine Leleu, write a short summary to marine-leleu.txt, "
+        "then tell me what you saved."
+    )
+    reformulated_query = "Marine Leleu recent profile"
+    output_path = project_root / "marine-leleu.txt"
+    file_contents = "Marine Leleu is a French endurance athlete and content creator."
+    captured_search_calls: list[ToolCall] = []
+    captured_write_calls: list[ToolCall] = []
+    captured_turn_tools: list[object | None] = []
+    captured_turn_messages: list[list[LLMMessage]] = []
+    responder_call_count = 0
+
+    tool_registry = ToolRegistry()
+
+    def _search_tool(call: ToolCall) -> ToolResult:
+        captured_search_calls.append(call)
+        query = str(call.arguments.get("query", ""))
+        return ToolResult.ok(
+            tool_name="search_web",
+            output_text=(
+                f"Search query: {query}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": query,
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete and content creator."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Marine Leleu",
+                        "url": "https://example.com/marine-leleu",
+                    },
+                    {
+                        "title": "Athlete Profile",
+                        "url": "https://example.com/athletes/marine-leleu",
+                    },
+                ],
+            },
+        )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        captured_write_calls.append(call)
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name="write_text_file",
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+            del profile, messages, kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    '{"route":"web_search",'
+                    f'"search_query":"{reformulated_query}"'
+                    "}"
+                ),
+                created_at="2026-03-20T10:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOrchestratorProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal responder_call_count
+            responder_call_count += 1
+            captured_turn_tools.append(tools)
+            captured_turn_messages.append(list(messages))
+
+            assert tools is not None
+            assert any(tool.name == "search_web" for tool in tools)
+            assert any(tool.name == "write_text_file" for tool in tools)
+
+            if responder_call_count == 1:
+                assert any(
+                    message.role is LLMRole.SYSTEM
+                    and f"Ground this request: {reformulated_query}" in message.content
+                    for message in messages
+                )
+                assert any(
+                    message.role is LLMRole.TOOL
+                    and reformulated_query in message.content
+                    for message in messages
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="write_text_file",
+                            arguments={
+                                "path": str(output_path),
+                                "content": file_contents,
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "write_text_file",
+                                        "arguments": {
+                                            "path": str(output_path),
+                                            "content": file_contents,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            assert any(
+                message.role is LLMRole.TOOL
+                and f"Wrote text file: {output_path}" in message.content
+                for message in messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="I saved a short briefing to marine-leleu.txt.",
+                created_at="2026-03-20T10:00:02Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr(
+        "unclaw.core.orchestrator.OllamaProvider",
+        FakeOrchestratorProvider,
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            event_bus=event_bus,
+            tool_registry=tool_registry,
+        )
+
+        assert responder_call_count == 2
+        assert len(captured_search_calls) == 1
+        assert captured_search_calls[0].arguments["query"] == reformulated_query
+        assert captured_write_calls == [
+            ToolCall(
+                tool_name="write_text_file",
+                arguments={
+                    "path": str(output_path),
+                    "content": file_contents,
+                },
+            )
+        ]
+        assert output_path.read_text(encoding="utf-8") == file_contents
+        assert len(captured_turn_tools) == 2
+        assert all(tools is not None for tools in captured_turn_tools)
+        assert "I saved a short briefing to marine-leleu.txt." in reply
+        assert "Sources:" in reply
+        assert "https://example.com/marine-leleu" in reply
+        assert "https://example.com/athletes/marine-leleu" in reply
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
+        assert stored_messages[2].content.startswith(
+            "Tool: write_text_file\nOutcome: success\n"
+        )
+
+        event_types = [event.event_type for event in published_events]
+        assert event_types == [
+            "runtime.started",
+            "route.selected",
+            "tool.started",
+            "tool.finished",
+            "model.called",
+            "model.succeeded",
+            "tool.started",
             "tool.finished",
             "model.called",
             "model.succeeded",
@@ -2774,6 +3039,14 @@ def test_run_user_turn_uses_configured_ollama_timeout(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.route_request",
+        lambda **kwargs: SimpleNamespace(
+            kind=RouteKind.CHAT,
+            model_profile_name="main",
+            search_query=None,
+        ),
+    )
 
     try:
         session = session_manager.ensure_current_session()
@@ -2793,6 +3066,348 @@ def test_run_user_turn_uses_configured_ollama_timeout(
         assert assistant_reply == "Timed reply"
         assert captured["default_timeout_seconds"] == 123.0
         assert captured["base_url"] == "http://127.0.0.1:11434"
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize("profile_name", ["main", "deep"])
+def test_main_and_deep_native_chat_turns_can_use_system_info_for_current_machine_questions(
+    monkeypatch,
+    make_temp_project,
+    profile_name: str,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = profile_name
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SYSTEM_INFO_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                "OS: ExampleOS 1.0 (x86_64)\n"
+                "CPU logical cores: 8\n"
+                "RAM total: 32.0 GiB\n"
+                "Hostname: workstation\n"
+                "Local datetime: 2026-03-20 09:41:00 CET\n"
+                "Locale: en_US/UTF-8"
+            ),
+        ),
+    )
+    observed_tool_calls: list[ToolCall] = []
+    responder_call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal responder_call_count
+            responder_call_count += 1
+            capability_message = next(
+                message.content
+                for message in messages
+                if message.role is LLMRole.SYSTEM
+                and "Runtime capability status:" in message.content
+            )
+
+            assert profile.name == profile_name
+            assert tools is not None
+            assert any(tool.name == SYSTEM_INFO_DEFINITION.name for tool in tools)
+
+            if responder_call_count == 1:
+                assert (
+                    "current local time, date, day, OS, RAM, CPU, hostname, or locale"
+                    in capability_message
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T09:41:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(tool_name="system_info", arguments={}),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "system_info",
+                                        "arguments": {},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            assert any(
+                message.role is LLMRole.TOOL
+                and "Local datetime: 2026-03-20 09:41:00 CET" in message.content
+                for message in messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="It is Friday, 2026-03-20, and the local time is 09:41 CET.",
+                created_at="2026-03-20T09:41:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.route_request",
+        lambda **kwargs: SimpleNamespace(
+            kind=RouteKind.CHAT,
+            model_profile_name=profile_name,
+            search_query=None,
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "What is the local date, day, and time on this machine?",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What is the local date, day, and time on this machine?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
+        )
+
+        assert reply == "It is Friday, 2026-03-20, and the local time is 09:41 CET."
+        assert responder_call_count == 2
+        assert observed_tool_calls == [ToolCall(tool_name="system_info", arguments={})]
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith(
+            "Tool: system_info\nOutcome: success\n"
+        )
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize("profile_name", ["main", "deep"])
+def test_main_and_deep_native_chat_turns_can_use_long_term_memory_for_remembered_name_lookup(
+    monkeypatch,
+    make_temp_project,
+    profile_name: str,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = profile_name
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_LONG_TERM_MEMORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                "Search results for 'name'\n\n"
+                "[id: memory-1]\n"
+                "  key: user name\n"
+                "  value: Alice\n"
+                "  category: identity\n"
+                "  created: 2026-03-18T08:00:00Z"
+            ),
+        ),
+    )
+    tool_registry.register(
+        LIST_LONG_TERM_MEMORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Long-term memories\n\n[id: memory-1]\n  key: user name",
+        ),
+    )
+    observed_tool_calls: list[ToolCall] = []
+    responder_call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal responder_call_count
+            responder_call_count += 1
+            capability_message = next(
+                message.content
+                for message in messages
+                if message.role is LLMRole.SYSTEM
+                and "Runtime capability status:" in message.content
+            )
+
+            assert profile.name == profile_name
+            assert tools is not None
+            assert any(
+                tool.name == SEARCH_LONG_TERM_MEMORY_DEFINITION.name for tool in tools
+            )
+            assert any(
+                tool.name == LIST_LONG_TERM_MEMORY_DEFINITION.name for tool in tools
+            )
+
+            if responder_call_count == 1:
+                assert "query='name' with category='identity'" in capability_message
+                assert (
+                    "list_long_term_memory: call when the user asks broadly what is stored "
+                    "or remembered about them."
+                ) in capability_message
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T09:42:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="search_long_term_memory",
+                            arguments={
+                                "query": "name",
+                                "category": "identity",
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "search_long_term_memory",
+                                        "arguments": {
+                                            "query": "name",
+                                            "category": "identity",
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            assert any(
+                message.role is LLMRole.TOOL and "value: Alice" in message.content
+                for message in messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Your remembered name is Alice.",
+                created_at="2026-03-20T09:42:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.route_request",
+        lambda **kwargs: SimpleNamespace(
+            kind=RouteKind.CHAT,
+            model_profile_name=profile_name,
+            search_query=None,
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Do you remember my name?",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Do you remember my name?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
+        )
+
+        assert reply == "Your remembered name is Alice."
+        assert responder_call_count == 2
+        assert observed_tool_calls == [
+            ToolCall(
+                tool_name="search_long_term_memory",
+                arguments={"query": "name", "category": "identity"},
+            )
+        ]
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[1].content.startswith(
+            "Tool: search_long_term_memory\nOutcome: success\n"
+        )
     finally:
         session_manager.close()
 
@@ -3322,8 +3937,8 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
         session_manager.close()
 
 
-@pytest.mark.parametrize("profile_name", ["main", "deep", "codex"])
-def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_for_final_reply(
+@pytest.mark.parametrize("profile_name", ["main", "deep"])
+def test_agentic_profiles_share_router_then_native_responder_runtime(
     monkeypatch,
     make_temp_project,
     profile_name: str,
@@ -3343,10 +3958,9 @@ def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_
     command_handler.current_model_profile_name = profile_name
 
     route_profiles: list[str] = []
-    planner_profiles: list[str] = []
     responder_profiles: list[str] = []
     responder_tools: list[object | None] = []
-    planner_turn = 0
+    responder_calls = 0
     tool_registry = ToolRegistry()
 
     def _search_tool(call: ToolCall) -> ToolResult:
@@ -3417,36 +4031,44 @@ def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_
             tools=None,
         ):
             del timeout_seconds, thinking_enabled, content_callback
-            nonlocal planner_turn
-            if (
+            nonlocal responder_calls
+            responder_calls += 1
+            responder_profiles.append(profile.name)
+            responder_tools.append(tools)
+            assert not (
                 messages
                 and messages[0].role is LLMRole.SYSTEM
                 and "Decide the next runtime action." in messages[0].content
-            ):
-                planner_profiles.append(profile.name)
-                planner_turn += 1
-                if planner_turn == 1:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name="llama3.2:3b",
-                        content=(
-                            '{"action":"tool_call","tool_name":"fetch_url_text",'
-                            '"arguments":{"url":"https://example.com"},'
-                            '"search_query":""}'
-                        ),
-                        created_at="2026-03-19T12:00:00Z",
-                        finish_reason="stop",
-                    )
+            )
+            if responder_calls == 1:
                 return LLMResponse(
                     provider="ollama",
-                    model_name="llama3.2:3b",
-                    content='{"action":"no_tool","tool_name":"","arguments":{},"search_query":""}',
+                    model_name=profile.model_name,
+                    content="",
                     created_at="2026-03-19T12:00:00Z",
                     finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fetch_url_text",
+                            arguments={"url": "https://example.com"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fetch_url_text",
+                                        "arguments": {
+                                            "url": "https://example.com"
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
                 )
-
-            responder_profiles.append(profile.name)
-            responder_tools.append(tools)
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -3474,12 +4096,17 @@ def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_
             tool_registry=tool_registry,
         )
 
-        assert settings.models[profile_name].planner_profile == "fast"
+        assert settings.models[profile_name].planner_profile is None
         assert reply == f"{profile_name} final reply"
-        assert route_profiles == ["fast"]
-        assert planner_profiles == ["fast", "fast"]
-        assert responder_profiles == [profile_name]
-        assert responder_tools == [None]
+        assert route_profiles == ["router"]
+        assert responder_profiles == [profile_name, profile_name]
+        assert len(responder_tools) == 2
+        assert all(tools is not None for tools in responder_tools)
+        assert all(
+            any(tool.name == "fetch_url_text" for tool in tools)
+            for tools in responder_tools
+            if tools is not None
+        )
 
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
@@ -3492,7 +4119,7 @@ def test_planner_enabled_profiles_use_fast_for_tool_planning_and_selected_model_
         session_manager.close()
 
 
-def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
+def test_chat_route_calls_native_responder_directly_without_tool_work(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -3510,7 +4137,7 @@ def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
     )
 
     route_profiles: list[str] = []
-    planner_profiles: list[str] = []
+    responder_profiles: list[str] = []
     responder_tools: list[object | None] = []
     tool_registry = ToolRegistry()
     tool_registry.register(
@@ -3574,20 +4201,7 @@ def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
             tools=None,
         ):
             del timeout_seconds, thinking_enabled, content_callback
-            if (
-                messages
-                and messages[0].role is LLMRole.SYSTEM
-                and "Decide the next runtime action." in messages[0].content
-            ):
-                planner_profiles.append(profile.name)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name="llama3.2:3b",
-                    content='{"action":"direct_chat","tool_name":"","arguments":{},"search_query":""}',
-                    created_at="2026-03-19T12:00:00Z",
-                    finish_reason="stop",
-                )
-
+            responder_profiles.append(profile.name)
             responder_tools.append(tools)
             return LLMResponse(
                 provider="ollama",
@@ -3617,9 +4231,11 @@ def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
         )
 
         assert reply == "Direct-chat responder reply."
-        assert route_profiles == ["fast"]
-        assert planner_profiles == ["fast"]
-        assert responder_tools == [None]
+        assert route_profiles == ["router"]
+        assert responder_profiles == ["main"]
+        assert len(responder_tools) == 1
+        assert responder_tools[0] is not None
+        assert any(tool.name == "search_web" for tool in responder_tools[0])
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
             MessageRole.USER,
@@ -3629,7 +4245,128 @@ def test_planner_enabled_profile_can_choose_direct_chat_without_tool_work(
         session_manager.close()
 
 
-def test_planner_route_fallback_uses_legacy_native_responder_loop(
+def test_lite_codex_uses_dedicated_router_without_native_tools(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "codex"
+
+    route_profiles: list[str] = []
+    responder_profiles: list[str] = []
+    responder_tools: list[object | None] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name="search_web",
+            output_text=f"Searched: {call.arguments['query']}",
+        ),
+    )
+
+    class FakeRouterProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            route_profiles.append(profile.name)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content='{"route":"chat","search_query":""}',
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback
+            responder_profiles.append(profile.name)
+            responder_tools.append(tools)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Codex lite chat reply.",
+                created_at="2026-03-19T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeRouterProvider)
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Explain this script in two sentences.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Explain this script in two sentences.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert settings.models["codex"].tool_mode == "none"
+        assert reply == "Codex lite chat reply."
+        assert route_profiles == ["router"]
+        assert responder_profiles == ["codex"]
+        assert responder_tools == [None]
+    finally:
+        session_manager.close()
+
+
+def test_router_fallback_still_uses_shared_native_responder_loop(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -3691,8 +4428,8 @@ def test_planner_route_fallback_uses_legacy_native_responder_loop(
         ):
             del messages, timeout_seconds, thinking_enabled, content_callback, tools
             route_profiles.append(profile.name)
-            if profile.name == "fast":
-                raise LLMProviderError("planner unavailable")
+            if profile.name == "router":
+                raise LLMProviderError("router classifier unavailable")
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -3784,13 +4521,18 @@ def test_planner_route_fallback_uses_legacy_native_responder_loop(
         )
 
         assert reply == "Legacy native fallback reply."
-        assert route_profiles == ["fast", "main"]
-        assert responder_tools[0] is not None
-        assert any(tool.name == "fetch_url_text" for tool in responder_tools[0])
+        assert route_profiles == ["router", "main"]
+        assert len(responder_tools) == 2
+        assert all(tools is not None for tools in responder_tools)
+        assert all(
+            any(tool.name == "fetch_url_text" for tool in tools)
+            for tools in responder_tools
+            if tools is not None
+        )
         route_event = next(
             event for event in published_events if event.event_type == "route.selected"
         )
-        assert route_event.payload["planner_profile_name"] == "fast"
+        assert route_event.payload["planner_profile_name"] == "router"
         assert route_event.payload["planner_available"] is False
         assert "planner_fallback_reason" in route_event.payload
     finally:
@@ -3872,6 +4614,190 @@ def test_agent_loop_native_profile_falls_back_to_text_when_no_tool_calls_returne
         event_types = [event.event_type for event in published_events]
         assert "tool.started" not in event_types
         assert "tool.finished" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_codex_inline_tool_json_is_recovered_when_native_mode_is_forced(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "codex", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "codex"
+    call_count = 0
+    observed_tool_calls: list[ToolCall] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=(
+                        "```json\n"
+                        '{"name":"fetch_url_text","arguments":{"url":"https://example.com"}}\n'
+                        "```"
+                    ),
+                    created_at="2026-03-20T12:00:00Z",
+                    finish_reason="stop",
+                )
+
+            assistant_messages = [
+                message for message in messages if message.role is LLMRole.ASSISTANT
+            ]
+            assert len(assistant_messages) == 1
+            assert assistant_messages[0].content == ""
+            assert assistant_messages[0].tool_calls_payload == (
+                {
+                    "function": {
+                        "name": "fetch_url_text",
+                        "arguments": {"url": "https://example.com"},
+                    }
+                },
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Recovered codex tool reply.",
+                created_at="2026-03-20T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Fetched example body.",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Inspect example.com for me.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Inspect example.com for me.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
+        )
+
+        assert reply == "Recovered codex tool reply."
+        assert call_count == 2
+        assert observed_tool_calls == [
+            ToolCall(
+                tool_name="fetch_url_text",
+                arguments={"url": "https://example.com"},
+            )
+        ]
+        assert "{\"name\":\"fetch_url_text\"" not in reply
+    finally:
+        session_manager.close()
+
+
+def test_codex_invalid_inline_tool_json_returns_honest_reply_when_native_mode_is_forced(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "codex", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    command_handler.current_model_profile_name = "codex"
+    observed_tool_calls: list[ToolCall] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen2.5-coder:7b",
+                content='{"name":"fetch_url_text","arguments":"not-json"}',
+                created_at="2026-03-20T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Fetched example body.",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Inspect example.com for me.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Inspect example.com for me.",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            tool_call_callback=observed_tool_calls.append,
+        )
+
+        assert reply.startswith("I couldn't safely execute a tool request")
+        assert "{\"name\":\"fetch_url_text\"" not in reply
+        assert observed_tool_calls == []
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.ASSISTANT,
+        ]
     finally:
         session_manager.close()
 

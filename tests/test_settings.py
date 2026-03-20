@@ -7,7 +7,7 @@ import yaml
 
 from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
-from unclaw.llm.model_profiles import resolve_model_profile
+from unclaw.llm.model_profiles import resolve_model_profile, resolve_router_profile
 from unclaw.settings import load_settings
 
 pytestmark = pytest.mark.unit
@@ -222,16 +222,23 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
     assert profile.keep_alive == "10m"
 
 
-def test_load_settings_reads_shipped_planner_split_defaults(
+def test_load_settings_reads_dedicated_router_defaults(
     make_temp_project,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
+    router_profile = resolve_router_profile(settings)
 
     assert settings.models["fast"].tool_mode == "none"
-    assert settings.models["main"].planner_profile == "fast"
-    assert settings.models["deep"].planner_profile == "fast"
-    assert settings.models["codex"].planner_profile == "fast"
+    assert settings.models["main"].planner_profile is None
+    assert settings.models["deep"].planner_profile is None
+    assert settings.models["codex"].planner_profile is None
+    assert settings.models["codex"].tool_mode == "none"
+    assert settings.router.enabled is True
+    assert settings.router.model_name == "qwen3:1.7b"
+    assert settings.router.timeout_seconds == 15.0
+    assert router_profile.name == "router"
+    assert router_profile.model_name == "qwen3:1.7b"
 
 
 def test_load_settings_allows_profile_keep_alive_to_be_absent(
