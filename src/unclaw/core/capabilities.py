@@ -187,7 +187,11 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
                     "- Long-term memory tools are for previously stored persistent "
                     "cross-session facts or preferences. They are not injected "
                     "automatically.",
+                    "- Use them for stable personal facts, preferences, and hardware "
+                    "or setup information.",
                     "- Use search_long_term_memory for targeted recall of a stored fact.",
+                    "- For search_long_term_memory, pass concise semantic query terms "
+                    "for the topic, even if the user asked in another language.",
                     "- Use list_long_term_memory for broad recall of stored memories.",
                     "- Use remember_long_term_memory only when the user explicitly wants "
                     "a fact saved for later or explicitly corrects a stored fact.",

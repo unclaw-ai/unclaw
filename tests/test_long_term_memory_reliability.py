@@ -18,7 +18,7 @@ B. Tool description quality (structural)
 C. Capability context quality (structural)
    - LTM guidance distinguishes from session history
    - LTM guidance mentions semantic query guidance
-   - LTM guidance mentions multilingual recall examples
+   - LTM guidance mentions multilingual semantic recall handling
 
 D. Explicit save reliability (English + French via tools)
    - English: "remember that my GPU is an RTX 4080" → stored and retrievable
@@ -255,12 +255,15 @@ class TestCapabilityContextQuality:
     def test_context_contains_semantic_query_guidance(self, make_temp_project) -> None:
         ctx = self._build_context(make_temp_project)
         # Must guide model to pass concise semantic query
-        assert "query=" in ctx or "semantic" in ctx.lower()
+        assert "semantic" in ctx.lower() or "concise" in ctx.lower()
 
-    def test_context_contains_french_recall_example(self, make_temp_project) -> None:
+    def test_context_contains_multilingual_semantic_recall_guidance(
+        self, make_temp_project
+    ) -> None:
         ctx = self._build_context(make_temp_project)
-        # Must contain a French recall example (je m'appelle or que sais-tu)
-        assert "appelle" in ctx or "sais-tu" in ctx
+        # Must guide recall semantically even when the user asks in another language.
+        assert "another language" in ctx.lower()
+        assert "search_long_term_memory" in ctx
 
     def test_context_says_not_injected_automatically(self, make_temp_project) -> None:
         ctx = self._build_context(make_temp_project)
