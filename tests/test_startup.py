@@ -51,11 +51,16 @@ def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
     )
 
 
-def test_startup_report_uses_pack_resolved_default_model(monkeypatch, make_temp_project) -> None:
+def test_startup_report_uses_pack_resolved_default_model(
+    monkeypatch,
+    make_temp_project,
+    pack_profiles,
+    write_models_config,
+) -> None:
     project_root = make_temp_project()
-    models_config_path = project_root / "config" / "models.yaml"
-    models_config_path.write_text("pack: power\nprofiles: {}\n", encoding="utf-8")
+    write_models_config(project_root, active_pack="power", dev_profiles={})
     settings = load_settings(project_root=project_root)
+    power_main_model_name = pack_profiles("power")["main"].model_name
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -75,10 +80,12 @@ def test_startup_report_uses_pack_resolved_default_model(monkeypatch, make_temp_
     )
 
     assert settings.model_pack == "power"
-    assert settings.default_model.model_name == "qwen3.5:14b"
+    assert settings.default_model.model_name == power_main_model_name
     assert report.has_errors is False
     assert any(
-        "main=qwen3.5:14b" in check.detail for check in report.checks if check.label == "Models"
+        f"main={power_main_model_name}" in check.detail
+        for check in report.checks
+        if check.label == "Models"
     )
 
 

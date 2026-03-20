@@ -103,26 +103,28 @@ def build_onboarding_file_payloads(
     }
 
     models_payload: dict[str, object] = {
-        "pack": plan.model_pack,
-        "profiles": {},
+        "active_pack": plan.model_pack,
+        "dev_profiles": {},
     }
-    profiles_section = models_payload["profiles"]
+    profiles_section = models_payload["dev_profiles"]
     assert isinstance(profiles_section, dict)
-    if plan.model_pack == DEV_MODEL_PACK_NAME:
-        for profile_name in PROFILE_ORDER:
-            draft = plan.model_profiles[profile_name]
-            profile_payload = {
-                "provider": draft.provider,
-                "model_name": draft.model_name,
-                "temperature": draft.temperature,
-                "thinking_supported": draft.thinking_supported,
-                "tool_mode": draft.tool_mode,
-            }
-            if draft.num_ctx is not None:
-                profile_payload["num_ctx"] = draft.num_ctx
-            if draft.keep_alive is not None:
-                profile_payload["keep_alive"] = draft.keep_alive
-            profiles_section[profile_name] = profile_payload
+    dev_profile_source = (
+        plan.model_profiles if plan.model_pack == DEV_MODEL_PACK_NAME else settings.dev_profiles
+    )
+    for profile_name in _ordered_profile_names(dev_profile_source):
+        profile = dev_profile_source[profile_name]
+        profile_payload = {
+            "provider": profile.provider,
+            "model_name": profile.model_name,
+            "temperature": profile.temperature,
+            "thinking_supported": profile.thinking_supported,
+            "tool_mode": profile.tool_mode,
+        }
+        if profile.num_ctx is not None:
+            profile_payload["num_ctx"] = profile.num_ctx
+        if profile.keep_alive is not None:
+            profile_payload["keep_alive"] = profile.keep_alive
+        profiles_section[profile_name] = profile_payload
 
     telegram_payload: dict[str, object] = {
         "bot_token_env_var": plan.telegram_bot_token_env_var,
@@ -179,6 +181,14 @@ def _backup_existing_files(paths: list[Path]) -> None:
             raise ConfigurationError(
                 f"Could not create a backup before overwriting {path}: {exc}"
             ) from exc
+
+
+def _ordered_profile_names(
+    profiles: object,
+) -> tuple[str, ...]:
+    if not isinstance(profiles, dict):
+        return PROFILE_ORDER
+    return tuple(dict.fromkeys((*PROFILE_ORDER, *profiles)))
 
 
 __all__ = [

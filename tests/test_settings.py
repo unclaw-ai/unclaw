@@ -113,15 +113,26 @@ def test_load_settings_errors_when_logging_retention_is_negative(
 
 def test_load_settings_reads_public_facing_shipped_defaults(
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
+
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+
+    app_section = app_payload["app"]
+    logging_section = app_payload["logging"]
+
+    assert isinstance(app_section, dict)
+    assert isinstance(logging_section, dict)
 
     settings = load_settings(project_root=project_root)
 
-    assert settings.app.environment == "production"
+    assert settings.app.environment == app_section["environment"]
     assert settings.model_pack == DEV_MODEL_PACK_NAME
-    assert settings.app.logging.level == "INFO"
-    assert settings.app.logging.mode == "simple"
+    assert settings.app.logging.level == logging_section["level"]
+    assert settings.app.logging.mode == logging_section["mode"]
 
 
 def test_load_settings_preserves_explicit_verbose_logging_overrides(
@@ -192,8 +203,10 @@ def test_load_settings_errors_when_default_profile_is_not_defined_in_models(
 
 def test_resolve_model_profile_marks_shipped_default_main_profile_as_native_tool_capable(
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
     settings = load_settings(project_root=project_root)
 
     assert settings.app.default_model_profile == "main"
@@ -211,48 +224,144 @@ def test_resolve_model_profile_marks_shipped_default_main_profile_as_native_tool
 
 def test_load_settings_resolves_selected_sweet_pack_profiles(
     make_temp_project,
+    pack_profiles,
+    write_models_config,
+) -> None:
+    project_root = make_temp_project()
+    manual_dev_profiles = _manual_dev_profiles_payload()
+    write_models_config(
+        project_root,
+        active_pack="sweet",
+        dev_profiles=manual_dev_profiles,
+    )
+
+    settings = load_settings(project_root=project_root)
+    codex_profile = resolve_model_profile(settings, "codex")
+    sweet_profiles = pack_profiles("sweet")
+
+    assert settings.model_pack == "sweet"
+    assert settings.dev_profiles["main"].model_name == "fixture-main:4b"
+    assert settings.models["fast"].model_name == sweet_profiles["fast"].model_name
+    assert settings.models["main"].model_name == sweet_profiles["main"].model_name
+    assert settings.models["deep"].model_name == sweet_profiles["deep"].model_name
+    assert settings.models["codex"].model_name == sweet_profiles["codex"].model_name
+    assert codex_profile.capabilities.supports_native_tool_calling is False
+    assert codex_profile.capabilities.tool_mode == "none"
+
+
+def test_load_settings_supports_legacy_dev_pack_shape(
+    make_temp_project,
 ) -> None:
     project_root = make_temp_project()
     models_config_path = project_root / "config" / "models.yaml"
     _write_yaml(
         models_config_path,
         {
-            "pack": "sweet",
-            "profiles": {},
+            "pack": "dev",
+            "profiles": {
+                "fast": {
+                    "provider": "ollama",
+                    "model_name": "legacy-fast:1b",
+                    "temperature": 0.2,
+                    "thinking_supported": False,
+                    "tool_mode": "none",
+                    "num_ctx": 4096,
+                    "keep_alive": "10m",
+                },
+                "main": {
+                    "provider": "ollama",
+                    "model_name": "legacy-main:4b",
+                    "temperature": 0.3,
+                    "thinking_supported": True,
+                    "tool_mode": "native",
+                    "num_ctx": 8192,
+                    "keep_alive": "30m",
+                },
+                "deep": {
+                    "provider": "ollama",
+                    "model_name": "legacy-deep:9b",
+                    "temperature": 0.2,
+                    "thinking_supported": True,
+                    "tool_mode": "native",
+                    "num_ctx": 8192,
+                    "keep_alive": "10m",
+                },
+                "codex": {
+                    "provider": "ollama",
+                    "model_name": "legacy-codex:7b",
+                    "temperature": 0.1,
+                    "thinking_supported": True,
+                    "tool_mode": "none",
+                    "num_ctx": 4096,
+                    "keep_alive": "10m",
+                },
+            },
         },
     )
 
     settings = load_settings(project_root=project_root)
-    codex_profile = resolve_model_profile(settings, "codex")
+
+    assert settings.model_pack == DEV_MODEL_PACK_NAME
+    assert settings.models["main"].model_name == "legacy-main:4b"
+    assert settings.dev_profiles["codex"].model_name == "legacy-codex:7b"
+
+
+def test_load_settings_preserves_legacy_profiles_as_dev_profiles_for_fixed_packs(
+    make_temp_project,
+    pack_profiles,
+    write_models_config,
+) -> None:
+    project_root = make_temp_project()
+    manual_dev_profiles = _manual_dev_profiles_payload()
+    write_models_config(
+        project_root,
+        active_pack=DEV_MODEL_PACK_NAME,
+        dev_profiles=manual_dev_profiles,
+    )
+    models_config_path = project_root / "config" / "models.yaml"
+    legacy_payload = _read_yaml(models_config_path)
+    dev_profiles = legacy_payload.pop("dev_profiles")
+    assert isinstance(dev_profiles, dict)
+    legacy_payload["pack"] = "sweet"
+    legacy_payload["profiles"] = dev_profiles
+    legacy_payload.pop("active_pack")
+    _write_yaml(models_config_path, legacy_payload)
+
+    settings = load_settings(project_root=project_root)
+    sweet_profiles = pack_profiles("sweet")
 
     assert settings.model_pack == "sweet"
-    assert settings.models["fast"].model_name == "ministral-3:3b"
-    assert settings.models["main"].model_name == "qwen3.5:9b"
-    assert settings.models["deep"].model_name == "qwen3.5:14b"
-    assert settings.models["codex"].model_name == "qwen2.5-codex:7b"
-    assert codex_profile.capabilities.supports_native_tool_calling is False
-    assert codex_profile.capabilities.tool_mode == "none"
+    assert settings.models["main"].model_name == sweet_profiles["main"].model_name
+    assert settings.dev_profiles["main"].model_name == "fixture-main:4b"
 
 
-def test_load_settings_defaults_to_dev_pack_when_pack_key_is_missing(
+def test_load_settings_errors_when_active_dev_pack_has_no_dev_profiles(
     make_temp_project,
 ) -> None:
     project_root = make_temp_project()
     models_config_path = project_root / "config" / "models.yaml"
-    models_payload = _read_yaml(models_config_path)
-    models_payload.pop("pack")
-    _write_yaml(models_config_path, models_payload)
+    _write_yaml(
+        models_config_path,
+        {
+            "active_pack": "dev",
+            "dev_profiles": {},
+        },
+    )
 
-    settings = load_settings(project_root=project_root)
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(project_root=project_root)
 
-    assert settings.model_pack == DEV_MODEL_PACK_NAME
-    assert settings.models["main"].model_name == "qwen3.5:4b"
+    assert "Active model pack 'dev' requires at least one profile" in str(
+        exc_info.value
+    )
 
 
 def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable(
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
     settings = load_settings(project_root=project_root)
 
     profile = resolve_model_profile(settings, "deep")
@@ -266,8 +375,10 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
 
 def test_load_settings_reads_dedicated_router_defaults(
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
     settings = load_settings(project_root=project_root)
     router_profile = resolve_router_profile(settings)
 
@@ -294,11 +405,13 @@ def test_recommend_model_pack_uses_ram_thresholds() -> None:
 
 def test_load_settings_allows_profile_keep_alive_to_be_absent(
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
     models_config_path = project_root / "config" / "models.yaml"
     models_payload = _read_yaml(models_config_path)
-    profiles = models_payload["profiles"]
+    profiles = models_payload["dev_profiles"]
     assert isinstance(profiles, dict)
     main_profile = profiles["main"]
     assert isinstance(main_profile, dict)
@@ -357,3 +470,44 @@ def _write_yaml(path: Path, payload: dict[str, object]) -> None:
         yaml.safe_dump(payload, sort_keys=False),
         encoding="utf-8",
     )
+
+
+def _manual_dev_profiles_payload() -> dict[str, dict[str, object]]:
+    return {
+        "fast": {
+            "provider": "ollama",
+            "model_name": "fixture-fast:1b",
+            "temperature": 0.2,
+            "thinking_supported": False,
+            "tool_mode": "none",
+            "num_ctx": 4096,
+            "keep_alive": "10m",
+        },
+        "main": {
+            "provider": "ollama",
+            "model_name": "fixture-main:4b",
+            "temperature": 0.3,
+            "thinking_supported": True,
+            "tool_mode": "native",
+            "num_ctx": 8192,
+            "keep_alive": "30m",
+        },
+        "deep": {
+            "provider": "ollama",
+            "model_name": "fixture-deep:9b",
+            "temperature": 0.2,
+            "thinking_supported": True,
+            "tool_mode": "native",
+            "num_ctx": 8192,
+            "keep_alive": "10m",
+        },
+        "codex": {
+            "provider": "ollama",
+            "model_name": "fixture-codex:7b",
+            "temperature": 0.1,
+            "thinking_supported": True,
+            "tool_mode": "none",
+            "num_ctx": 4096,
+            "keep_alive": "10m",
+        },
+    }

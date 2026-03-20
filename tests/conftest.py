@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 import yaml
+
+from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
 
 
 def _repo_root() -> Path:
@@ -129,3 +132,66 @@ def set_profile_tool_mode():
         )
 
     return _set_profile_tool_mode
+
+
+def _serialize_profile_for_models_config(profile: object) -> dict[str, object]:
+    if isinstance(profile, Mapping):
+        payload = dict(profile)
+    else:
+        payload = {
+            "provider": getattr(profile, "provider"),
+            "model_name": getattr(profile, "model_name"),
+            "temperature": getattr(profile, "temperature"),
+            "thinking_supported": getattr(profile, "thinking_supported"),
+            "tool_mode": getattr(profile, "tool_mode"),
+        }
+        num_ctx = getattr(profile, "num_ctx", None)
+        keep_alive = getattr(profile, "keep_alive", None)
+        planner_profile = getattr(profile, "planner_profile", None)
+        if num_ctx is not None:
+            payload["num_ctx"] = num_ctx
+        if keep_alive is not None:
+            payload["keep_alive"] = keep_alive
+        if planner_profile is not None:
+            payload["planner_profile"] = planner_profile
+
+    return payload
+
+
+@pytest.fixture
+def pack_profiles():
+    def _pack_profiles(pack_name: str):
+        return get_model_pack_profiles(pack_name)
+
+    return _pack_profiles
+
+
+@pytest.fixture
+def write_models_config():
+    def _write_models_config(
+        project_root: Path,
+        *,
+        active_pack: str = DEV_MODEL_PACK_NAME,
+        dev_profiles: Mapping[str, object] | None = None,
+        dev_profile_pack: str = "power",
+    ) -> dict[str, object]:
+        profiles_source = (
+            dev_profiles
+            if dev_profiles is not None
+            else get_model_pack_profiles(dev_profile_pack)
+        )
+        payload = {
+            "active_pack": active_pack,
+            "dev_profiles": {
+                profile_name: _serialize_profile_for_models_config(profile)
+                for profile_name, profile in profiles_source.items()
+            },
+        }
+        models_path = project_root / "config" / "models.yaml"
+        models_path.write_text(
+            yaml.safe_dump(payload, sort_keys=False),
+            encoding="utf-8",
+        )
+        return payload
+
+    return _write_models_config

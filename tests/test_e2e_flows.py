@@ -304,9 +304,11 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
 def test_cli_search_command_runs_end_to_end_via_shared_runtime(
     monkeypatch,
     make_temp_project,
+    write_models_config,
     capsys,
 ) -> None:
     project_root = make_temp_project()
+    write_models_config(project_root, active_pack="dev")
     # Explicitly pin main to non-native (json_plan) so the runtime pre-executes
     # the explicit /search tool call before the LLM answer step. main is now
     # native by default (P2-5 shipped); this test keeps non-native path coverage.
@@ -463,7 +465,8 @@ def _force_main_json_plan(project_root: Path) -> None:
     """
     models_yaml = project_root / "config" / "models.yaml"
     config = yaml.safe_load(models_yaml.read_text(encoding="utf-8"))
-    config["profiles"]["main"]["tool_mode"] = "json_plan"
+    profile_key = "dev_profiles" if "dev_profiles" in config else "profiles"
+    config[profile_key]["main"]["tool_mode"] = "json_plan"
     models_yaml.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
 

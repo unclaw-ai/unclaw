@@ -97,7 +97,7 @@ _MODEL_PACKS = {
         profiles=_build_pack_profiles(
             fast_model_name="ministral-3:3b",
             main_model_name="qwen3.5:9b",
-            deep_model_name="qwen3.5:14b",
+            deep_model_name="ministral-3:14b",
             codex_model_name="qwen2.5-coder:7b",
         ),
     ),
@@ -108,9 +108,9 @@ _MODEL_PACKS = {
         ram_guidance="Best for more than 32 GB of memory.",
         profiles=_build_pack_profiles(
             fast_model_name="ministral-3:8b",
-            main_model_name="qwen3.5:14b",
+            main_model_name="ministral-3:14b",
             deep_model_name="qwen3.5:27b",
-            codex_model_name="qwen3-coder:30b",
+            codex_model_name="deepcoder:14b",
         ),
     ),
     DEV_MODEL_PACK_NAME: ModelPackDefinition(

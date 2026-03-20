@@ -191,7 +191,10 @@ def test_terminal_main_requests_default_model_warm_load(
 def test_preflight_banner_shows_active_model_pack(make_temp_project) -> None:
     project_root = make_temp_project()
     models_config_path = project_root / "config" / "models.yaml"
-    models_config_path.write_text("pack: sweet\nprofiles: {}\n", encoding="utf-8")
+    models_config_path.write_text(
+        "active_pack: sweet\ndev_profiles: {}\n",
+        encoding="utf-8",
+    )
     settings = load_settings(project_root=project_root)
 
     banner = cli_channel._build_preflight_banner(settings)

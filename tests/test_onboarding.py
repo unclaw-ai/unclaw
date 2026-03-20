@@ -29,9 +29,17 @@ EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
 def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     monkeypatch,
     make_temp_project,
+    pack_profiles,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
+    write_models_config(
+        project_root,
+        active_pack="dev",
+        dev_profiles=_manual_dev_profiles_payload(),
+    )
     settings = load_settings(project_root=project_root)
+    sweet_profiles = pack_profiles("sweet")
 
     monkeypatch.setattr(
         "unclaw.onboarding.inspect_ollama",
@@ -69,17 +77,19 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
         "terminal_enabled": True,
         "telegram_enabled": True,
     }
-    assert models_payload["pack"] == "sweet"
-    assert models_payload["profiles"] == {}
+    assert models_payload["active_pack"] == "sweet"
+    assert models_payload["dev_profiles"]["main"]["model_name"] == "fixture-main:4b"
+    assert models_payload["dev_profiles"]["codex"]["model_name"] == "fixture-codex:7b"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
     assert telegram_payload["allowed_chat_ids"] == []
     assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
     configured_settings = load_settings(project_root=project_root)
     assert configured_settings.model_pack == "sweet"
-    assert configured_settings.models["fast"].model_name == "ministral-3:3b"
-    assert configured_settings.models["main"].model_name == "qwen3.5:9b"
-    assert configured_settings.models["deep"].model_name == "qwen3.5:14b"
-    assert configured_settings.models["codex"].model_name == "qwen2.5-codex:7b"
+    assert configured_settings.models["fast"].model_name == sweet_profiles["fast"].model_name
+    assert configured_settings.models["main"].model_name == sweet_profiles["main"].model_name
+    assert configured_settings.models["deep"].model_name == sweet_profiles["deep"].model_name
+    assert configured_settings.models["codex"].model_name == sweet_profiles["codex"].model_name
+    assert configured_settings.dev_profiles["main"].model_name == "fixture-main:4b"
     assert any("BotFather" in line for line in outputs)
     assert any("Detected memory: about 24 GB." in line for line in outputs)
     assert any("config/secrets.yaml" in line for line in outputs)
@@ -100,8 +110,14 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
 def test_advanced_onboarding_can_choose_installed_and_custom_models(
     monkeypatch,
     make_temp_project,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project(allowed_chat_ids=[], remove_secrets=True)
+    write_models_config(
+        project_root,
+        active_pack="dev",
+        dev_profiles=_manual_dev_profiles_payload(),
+    )
     settings = load_settings(project_root=project_root)
 
     monkeypatch.setattr(
@@ -147,26 +163,26 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
         "terminal_enabled": True,
         "telegram_enabled": False,
     }
-    assert models_payload["pack"] == "dev"
-    assert models_payload["profiles"]["fast"]["model_name"] == "phi4-mini:3.8b"
-    assert models_payload["profiles"]["fast"]["thinking_supported"] is False
-    assert models_payload["profiles"]["fast"]["tool_mode"] == "none"
-    assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
-    assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
-    assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
-    assert models_payload["profiles"]["main"]["tool_mode"] == "native"
-    assert models_payload["profiles"]["main"]["num_ctx"] == 8192
-    assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
-    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
-    assert models_payload["profiles"]["deep"]["num_ctx"] == 8192
-    assert models_payload["profiles"]["deep"]["keep_alive"] == "10m"
-    assert models_payload["profiles"]["codex"]["model_name"] == "devstral:latest"
-    assert models_payload["profiles"]["codex"]["tool_mode"] == "none"
-    assert models_payload["profiles"]["codex"]["num_ctx"] == 4096
-    assert models_payload["profiles"]["codex"]["keep_alive"] == "10m"
-    assert "planner_profile" not in models_payload["profiles"]["main"]
-    assert "planner_profile" not in models_payload["profiles"]["deep"]
-    assert "planner_profile" not in models_payload["profiles"]["codex"]
+    assert models_payload["active_pack"] == "dev"
+    assert models_payload["dev_profiles"]["fast"]["model_name"] == "phi4-mini:3.8b"
+    assert models_payload["dev_profiles"]["fast"]["thinking_supported"] is False
+    assert models_payload["dev_profiles"]["fast"]["tool_mode"] == "none"
+    assert models_payload["dev_profiles"]["fast"]["num_ctx"] == 4096
+    assert models_payload["dev_profiles"]["fast"]["keep_alive"] == "10m"
+    assert models_payload["dev_profiles"]["main"]["model_name"] == "fixture-main:4b"
+    assert models_payload["dev_profiles"]["main"]["tool_mode"] == "native"
+    assert models_payload["dev_profiles"]["main"]["num_ctx"] == 8192
+    assert models_payload["dev_profiles"]["main"]["keep_alive"] == "30m"
+    assert models_payload["dev_profiles"]["deep"]["model_name"] == "fixture-deep:9b"
+    assert models_payload["dev_profiles"]["deep"]["num_ctx"] == 8192
+    assert models_payload["dev_profiles"]["deep"]["keep_alive"] == "10m"
+    assert models_payload["dev_profiles"]["codex"]["model_name"] == "devstral:latest"
+    assert models_payload["dev_profiles"]["codex"]["tool_mode"] == "none"
+    assert models_payload["dev_profiles"]["codex"]["num_ctx"] == 4096
+    assert models_payload["dev_profiles"]["codex"]["keep_alive"] == "10m"
+    assert "planner_profile" not in models_payload["dev_profiles"]["main"]
+    assert "planner_profile" not in models_payload["dev_profiles"]["deep"]
+    assert "planner_profile" not in models_payload["dev_profiles"]["codex"]
 
 
 def test_interactive_select_uses_value_for_initial_choice(monkeypatch) -> None:
@@ -419,52 +435,23 @@ def test_onboarding_restricts_secret_backup_permissions_to_owner_only(
 
 
 def test_recommended_model_profiles_match_lite_pack_defaults() -> None:
-    assert recommended_model_profiles("lite") == {
-        "fast": ModelProfileDraft(
-            provider="ollama",
-            model_name="ministral-3:3b",
-            temperature=0.2,
-            thinking_supported=False,
-            tool_mode="none",
-            num_ctx=4096,
-            keep_alive="10m",
-        ),
-        "main": ModelProfileDraft(
-            provider="ollama",
-            model_name="qwen3.5:4b",
-            temperature=0.3,
-            thinking_supported=True,
-            tool_mode="native",
-            num_ctx=8192,
-            keep_alive="30m",
-        ),
-        "deep": ModelProfileDraft(
-            provider="ollama",
-            model_name="qwen3.5:9b",
-            temperature=0.2,
-            thinking_supported=True,
-            tool_mode="native",
-            num_ctx=8192,
-            keep_alive="10m",
-        ),
-        "codex": ModelProfileDraft(
-            provider="ollama",
-            model_name="qwen2.5-codex:7b",
-            temperature=0.1,
-            thinking_supported=True,
-            tool_mode="none",
-            num_ctx=4096,
-            keep_alive="10m",
-        ),
-    }
+    assert recommended_model_profiles("lite") == _pack_profile_drafts("lite")
 
 
 def test_onboarding_allows_manual_power_pack_selection(
     monkeypatch,
     make_temp_project,
+    pack_profiles,
+    write_models_config,
 ) -> None:
     project_root = make_temp_project(remove_secrets=True)
+    write_models_config(
+        project_root,
+        active_pack="dev",
+        dev_profiles=_manual_dev_profiles_payload(),
+    )
     settings = load_settings(project_root=project_root)
+    power_profiles = pack_profiles("power")
 
     monkeypatch.setattr(
         "unclaw.onboarding.inspect_ollama",
@@ -491,13 +478,14 @@ def test_onboarding_allows_manual_power_pack_selection(
     models_payload = _read_yaml(project_root / "config" / "models.yaml")
     configured_settings = load_settings(project_root=project_root)
 
-    assert models_payload["pack"] == "power"
-    assert models_payload["profiles"] == {}
+    assert models_payload["active_pack"] == "power"
+    assert models_payload["dev_profiles"]["main"]["model_name"] == "fixture-main:4b"
     assert configured_settings.model_pack == "power"
-    assert configured_settings.models["fast"].model_name == "ministral-3:8b"
-    assert configured_settings.models["main"].model_name == "qwen3.5:14b"
-    assert configured_settings.models["deep"].model_name == "qwen3.5:27b"
-    assert configured_settings.models["codex"].model_name == "qwen3-coder:30b"
+    assert configured_settings.models["fast"].model_name == power_profiles["fast"].model_name
+    assert configured_settings.models["main"].model_name == power_profiles["main"].model_name
+    assert configured_settings.models["deep"].model_name == power_profiles["deep"].model_name
+    assert configured_settings.models["codex"].model_name == power_profiles["codex"].model_name
+    assert configured_settings.dev_profiles["main"].model_name == "fixture-main:4b"
 
 
 def test_load_telegram_config_rejects_pasted_bot_token(
@@ -561,3 +549,62 @@ def _read_yaml(path: Path) -> dict[str, object]:
         payload = yaml.safe_load(handle)
     assert isinstance(payload, dict)
     return payload
+
+
+def _pack_profile_drafts(pack_name: str) -> dict[str, ModelProfileDraft]:
+    from unclaw.model_packs import get_model_pack_profiles
+
+    return {
+        profile_name: ModelProfileDraft(
+            provider=profile.provider,
+            model_name=profile.model_name,
+            temperature=profile.temperature,
+            thinking_supported=profile.thinking_supported,
+            tool_mode=profile.tool_mode,
+            num_ctx=profile.num_ctx,
+            keep_alive=profile.keep_alive,
+            planner_profile=profile.planner_profile,
+        )
+        for profile_name, profile in get_model_pack_profiles(pack_name).items()
+    }
+
+
+def _manual_dev_profiles_payload() -> dict[str, dict[str, object]]:
+    return {
+        "fast": {
+            "provider": "ollama",
+            "model_name": "fixture-fast:1b",
+            "temperature": 0.2,
+            "thinking_supported": False,
+            "tool_mode": "none",
+            "num_ctx": 4096,
+            "keep_alive": "10m",
+        },
+        "main": {
+            "provider": "ollama",
+            "model_name": "fixture-main:4b",
+            "temperature": 0.3,
+            "thinking_supported": True,
+            "tool_mode": "native",
+            "num_ctx": 8192,
+            "keep_alive": "30m",
+        },
+        "deep": {
+            "provider": "ollama",
+            "model_name": "fixture-deep:9b",
+            "temperature": 0.2,
+            "thinking_supported": True,
+            "tool_mode": "native",
+            "num_ctx": 8192,
+            "keep_alive": "10m",
+        },
+        "codex": {
+            "provider": "ollama",
+            "model_name": "fixture-codex:7b",
+            "temperature": 0.1,
+            "thinking_supported": True,
+            "tool_mode": "none",
+            "num_ctx": 4096,
+            "keep_alive": "10m",
+        },
+    }

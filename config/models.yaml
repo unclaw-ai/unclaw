@@ -1,2 +1,34 @@
-pack: lite
-profiles: {}
+active_pack: power
+dev_profiles:
+  fast:
+    provider: ollama
+    model_name: ministral-3:8b
+    temperature: 0.2
+    thinking_supported: false
+    tool_mode: none
+    num_ctx: 4096
+    keep_alive: 10m
+  main:
+    provider: ollama
+    model_name: ministral-3:14b
+    temperature: 0.3
+    thinking_supported: true
+    tool_mode: native
+    num_ctx: 8192
+    keep_alive: 30m
+  deep:
+    provider: ollama
+    model_name: qwen3.5:27b
+    temperature: 0.2
+    thinking_supported: true
+    tool_mode: native
+    num_ctx: 8192
+    keep_alive: 10m
+  codex:
+    provider: ollama
+    model_name: deepcoder:14b
+    temperature: 0.1
+    thinking_supported: true
+    tool_mode: none
+    num_ctx: 4096
+    keep_alive: 10m

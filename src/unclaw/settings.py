@@ -188,6 +188,7 @@ class Settings:
     app: AppSettings
     model_pack: str
     models: dict[str, ModelProfile]
+    dev_profiles: dict[str, ModelProfile]
     router: RouterSettings
     paths: RuntimePaths
     system_prompt: str
@@ -212,15 +213,11 @@ def load_settings(project_root: Path | None = None) -> Settings:
         app_payload,
         project_root=resolved_project_root,
     )
-    model_pack = _get_choice(
-        models_payload,
-        "pack",
-        DEV_MODEL_PACK_NAME,
-        set(model_pack_names()),
-    )
-    model_profiles = _build_model_profiles(
-        models_payload,
+    model_pack = _resolve_model_pack_name(models_payload)
+    dev_model_profiles = _build_dev_model_profiles(models_payload)
+    model_profiles = _build_active_model_profiles(
         model_pack=model_pack,
+        dev_model_profiles=dev_model_profiles,
     )
     router_settings = _build_router_settings(router_payload)
     runtime_paths = _build_runtime_paths(
@@ -246,6 +243,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         app=app_settings,
         model_pack=model_pack,
         models=model_profiles,
+        dev_profiles=dev_model_profiles,
         router=router_settings,
         paths=runtime_paths,
         system_prompt=system_prompt,
@@ -417,10 +415,20 @@ def _build_app_settings(
     )
 
 
-def _build_model_profiles(
-    payload: Mapping[str, Any],
+def _resolve_model_pack_name(payload: Mapping[str, Any]) -> str:
+    key = "active_pack" if "active_pack" in payload else "pack"
+    return _get_choice(
+        payload,
+        key,
+        DEV_MODEL_PACK_NAME,
+        set(model_pack_names()),
+    )
+
+
+def _build_active_model_profiles(
     *,
     model_pack: str,
+    dev_model_profiles: dict[str, ModelProfile],
 ) -> dict[str, ModelProfile]:
     if not is_manual_model_pack(model_pack):
         return {
@@ -438,7 +446,47 @@ def _build_model_profiles(
             for profile_name, profile in get_model_pack_profiles(model_pack).items()
         }
 
-    profiles_section = _get_mapping(payload, "profiles")
+    return _copy_model_profiles(
+        _require_dev_model_profiles(dev_model_profiles=dev_model_profiles)
+    )
+
+
+def _build_dev_model_profiles(
+    payload: Mapping[str, Any],
+) -> dict[str, ModelProfile]:
+    section_name = None
+    if "dev_profiles" in payload:
+        section_name = "dev_profiles"
+    elif "profiles" in payload:
+        section_name = "profiles"
+    if section_name is None:
+        return {}
+
+    profiles_section = _get_mapping(payload, section_name)
+    return _build_model_profiles_from_mapping(profiles_section)
+
+
+def _require_dev_model_profiles(
+    *,
+    dev_model_profiles: dict[str, ModelProfile],
+) -> dict[str, ModelProfile]:
+    if dev_model_profiles:
+        return dev_model_profiles
+    raise ConfigurationError(
+        "Active model pack 'dev' requires at least one profile in "
+        "'dev_profiles' (legacy 'profiles' is also accepted while loading)."
+    )
+
+
+def _copy_model_profiles(
+    profiles: dict[str, ModelProfile],
+) -> dict[str, ModelProfile]:
+    return {profile_name: profile for profile_name, profile in profiles.items()}
+
+
+def _build_model_profiles_from_mapping(
+    profiles_section: Mapping[str, Any],
+) -> dict[str, ModelProfile]:
     profiles: dict[str, ModelProfile] = {}
 
     for profile_name, raw_profile in profiles_section.items():
@@ -460,9 +508,6 @@ def _build_model_profiles(
             keep_alive=_get_optional_str(raw_profile, "keep_alive"),
             planner_profile=_get_optional_str(raw_profile, "planner_profile"),
         )
-
-    if not profiles:
-        raise ConfigurationError("At least one model profile must be defined.")
 
     return profiles
 
