@@ -58,6 +58,7 @@ def start_telegram_app(
                 subtitle="Local-first bot channel with direct local model execution.",
                 rows=(
                     ("mode", "telegram"),
+                    ("pack", settings.model_pack),
                     (
                         "default",
                         (

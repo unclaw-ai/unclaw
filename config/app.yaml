@@ -10,8 +10,8 @@ paths:
   files_dir: files
   database_file: memory/app.db
 logging:
-  level: INFO
-  mode: simple
+  level: DEBUG
+  mode: full
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
@@ -32,11 +32,6 @@ runtime:
 security:
   tools:
     files:
-      # "." is resolved from the project/workspace root Unclaw discovers from the
-      # current working directory at startup. Running Unclaw from ~/ can make a
-      # very large part of your home directory part of the allowed file scope.
-      # Safer: launch from a dedicated workspace/project folder or set explicit
-      # allowed_roots paths here.
       allowed_roots:
       - .
     fetch:

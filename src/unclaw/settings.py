@@ -34,6 +34,12 @@ from unclaw.constants import (
     SYSTEM_PROMPT_FILE_NAME,
 )
 from unclaw.errors import ConfigurationError, PathResolutionError
+from unclaw.model_packs import (
+    DEV_MODEL_PACK_NAME,
+    get_model_pack_profiles,
+    is_manual_model_pack,
+    model_pack_names,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +186,7 @@ class RuntimePaths:
 @dataclass(frozen=True, slots=True)
 class Settings:
     app: AppSettings
+    model_pack: str
     models: dict[str, ModelProfile]
     router: RouterSettings
     paths: RuntimePaths
@@ -205,7 +212,16 @@ def load_settings(project_root: Path | None = None) -> Settings:
         app_payload,
         project_root=resolved_project_root,
     )
-    model_profiles = _build_model_profiles(models_payload)
+    model_pack = _get_choice(
+        models_payload,
+        "pack",
+        DEV_MODEL_PACK_NAME,
+        set(model_pack_names()),
+    )
+    model_profiles = _build_model_profiles(
+        models_payload,
+        model_pack=model_pack,
+    )
     router_settings = _build_router_settings(router_payload)
     runtime_paths = _build_runtime_paths(
         project_root=resolved_project_root,
@@ -228,6 +244,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
 
     return Settings(
         app=app_settings,
+        model_pack=model_pack,
         models=model_profiles,
         router=router_settings,
         paths=runtime_paths,
@@ -400,7 +417,27 @@ def _build_app_settings(
     )
 
 
-def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]:
+def _build_model_profiles(
+    payload: Mapping[str, Any],
+    *,
+    model_pack: str,
+) -> dict[str, ModelProfile]:
+    if not is_manual_model_pack(model_pack):
+        return {
+            profile_name: _build_model_profile_from_values(
+                profile_name=profile_name,
+                provider=profile.provider,
+                model_name=profile.model_name,
+                temperature=profile.temperature,
+                thinking_supported=profile.thinking_supported,
+                tool_mode=profile.tool_mode,
+                num_ctx=profile.num_ctx,
+                keep_alive=profile.keep_alive,
+                planner_profile=profile.planner_profile,
+            )
+            for profile_name, profile in get_model_pack_profiles(model_pack).items()
+        }
+
     profiles_section = _get_mapping(payload, "profiles")
     profiles: dict[str, ModelProfile] = {}
 
@@ -412,8 +449,8 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
                 f"Model profile '{profile_name}' must contain a mapping."
             )
 
-        profiles[profile_name] = ModelProfile(
-            name=profile_name,
+        profiles[profile_name] = _build_model_profile_from_values(
+            profile_name=profile_name,
             provider=_get_str(raw_profile, "provider"),
             model_name=_get_str(raw_profile, "model_name"),
             temperature=_get_float(raw_profile, "temperature"),
@@ -428,6 +465,31 @@ def _build_model_profiles(payload: Mapping[str, Any]) -> dict[str, ModelProfile]
         raise ConfigurationError("At least one model profile must be defined.")
 
     return profiles
+
+
+def _build_model_profile_from_values(
+    *,
+    profile_name: str,
+    provider: str,
+    model_name: str,
+    temperature: float,
+    thinking_supported: bool,
+    tool_mode: str,
+    num_ctx: int | None,
+    keep_alive: str | None,
+    planner_profile: str | None,
+) -> ModelProfile:
+    return ModelProfile(
+        name=profile_name,
+        provider=provider,
+        model_name=model_name,
+        temperature=temperature,
+        thinking_supported=thinking_supported,
+        tool_mode=tool_mode,
+        num_ctx=num_ctx,
+        keep_alive=keep_alive,
+        planner_profile=planner_profile,
+    )
 
 
 def _build_router_settings(payload: Mapping[str, Any]) -> RouterSettings:

@@ -42,6 +42,7 @@ class OnboardingPlan:
     logging_mode: str
     enabled_channels: tuple[str, ...]
     default_profile: str
+    model_pack: str
     model_profiles: dict[str, ModelProfileDraft]
     telegram_bot_token: str | None
     telegram_bot_token_env_var: str

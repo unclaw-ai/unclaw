@@ -43,8 +43,9 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
             error_message="not installed",
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
 
-    responses = iter(["", "", "2", EXAMPLE_TELEGRAM_TOKEN, ""])
+    responses = iter(["", "", "2", "", EXAMPLE_TELEGRAM_TOKEN, ""])
     outputs: list[str] = []
 
     result = run_onboarding(
@@ -68,29 +69,19 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
         "terminal_enabled": True,
         "telegram_enabled": True,
     }
-    assert models_payload["profiles"]["fast"]["model_name"] == "llama3.2:3b"
-    assert models_payload["profiles"]["fast"]["thinking_supported"] is False
-    assert models_payload["profiles"]["fast"]["tool_mode"] == "none"
-    assert models_payload["profiles"]["fast"]["num_ctx"] == 4096
-    assert models_payload["profiles"]["fast"]["keep_alive"] == "10m"
-    assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
-    assert models_payload["profiles"]["main"]["tool_mode"] == "native"
-    assert models_payload["profiles"]["main"]["num_ctx"] == 8192
-    assert models_payload["profiles"]["main"]["keep_alive"] == "30m"
-    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
-    assert models_payload["profiles"]["deep"]["num_ctx"] == 8192
-    assert models_payload["profiles"]["deep"]["keep_alive"] == "10m"
-    assert models_payload["profiles"]["codex"]["model_name"] == "qwen2.5-coder:7b"
-    assert models_payload["profiles"]["codex"]["tool_mode"] == "none"
-    assert models_payload["profiles"]["codex"]["num_ctx"] == 4096
-    assert models_payload["profiles"]["codex"]["keep_alive"] == "10m"
-    assert "planner_profile" not in models_payload["profiles"]["main"]
-    assert "planner_profile" not in models_payload["profiles"]["deep"]
-    assert "planner_profile" not in models_payload["profiles"]["codex"]
+    assert models_payload["pack"] == "sweet"
+    assert models_payload["profiles"] == {}
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
     assert telegram_payload["allowed_chat_ids"] == []
     assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
+    configured_settings = load_settings(project_root=project_root)
+    assert configured_settings.model_pack == "sweet"
+    assert configured_settings.models["fast"].model_name == "ministral-3:3b"
+    assert configured_settings.models["main"].model_name == "qwen3.5:9b"
+    assert configured_settings.models["deep"].model_name == "qwen3.5:14b"
+    assert configured_settings.models["codex"].model_name == "qwen2.5-codex:7b"
     assert any("BotFather" in line for line in outputs)
+    assert any("Detected memory: about 24 GB." in line for line in outputs)
     assert any("config/secrets.yaml" in line for line in outputs)
     assert any("visible while you type" in line for line in outputs)
     assert any("Secure by default" in line for line in outputs)
@@ -123,12 +114,14 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
             error_message=None,
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 64.0)
 
     responses = iter(
         [
             "2",
             "",
             "1",
+            "",
             "3",
             "2",
             "",
@@ -154,6 +147,7 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
         "terminal_enabled": True,
         "telegram_enabled": False,
     }
+    assert models_payload["pack"] == "dev"
     assert models_payload["profiles"]["fast"]["model_name"] == "phi4-mini:3.8b"
     assert models_payload["profiles"]["fast"]["thinking_supported"] is False
     assert models_payload["profiles"]["fast"]["tool_mode"] == "none"
@@ -263,8 +257,9 @@ def test_onboarding_can_keep_existing_local_telegram_token(
             error_message="not installed",
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
 
-    responses = iter(["", "", "2", "", ""])
+    responses = iter(["", "", "2", "", "", ""])
     prompts: list[str] = []
 
     result = run_onboarding(
@@ -299,8 +294,9 @@ def test_channel_preset_writes_telegram_only_to_app_config(
             error_message="not installed",
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
 
-    responses = iter(["", "", "3", EXAMPLE_TELEGRAM_TOKEN, ""])
+    responses = iter(["", "", "3", "", EXAMPLE_TELEGRAM_TOKEN, ""])
 
     result = run_onboarding(
         settings,
@@ -355,8 +351,9 @@ def test_onboarding_creates_backups_before_overwriting_existing_files(
             error_message="not installed",
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
 
-    responses = iter(["", "", "2", "", ""])
+    responses = iter(["", "", "2", "", "", ""])
     result = run_onboarding(
         settings,
         input_func=lambda _prompt: next(responses),
@@ -405,8 +402,9 @@ def test_onboarding_restricts_secret_backup_permissions_to_owner_only(
             error_message="not installed",
         ),
     )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
 
-    responses = iter(["", "", "2", "", ""])
+    responses = iter(["", "", "2", "", "", ""])
     result = run_onboarding(
         settings,
         input_func=lambda _prompt: next(responses),
@@ -420,11 +418,11 @@ def test_onboarding_restricts_secret_backup_permissions_to_owner_only(
     )
 
 
-def test_recommended_model_profiles_match_target_defaults() -> None:
-    assert recommended_model_profiles() == {
+def test_recommended_model_profiles_match_lite_pack_defaults() -> None:
+    assert recommended_model_profiles("lite") == {
         "fast": ModelProfileDraft(
             provider="ollama",
-            model_name="llama3.2:3b",
+            model_name="ministral-3:3b",
             temperature=0.2,
             thinking_supported=False,
             tool_mode="none",
@@ -451,7 +449,7 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
         ),
         "codex": ModelProfileDraft(
             provider="ollama",
-            model_name="qwen2.5-coder:7b",
+            model_name="qwen2.5-codex:7b",
             temperature=0.1,
             thinking_supported=True,
             tool_mode="none",
@@ -459,6 +457,47 @@ def test_recommended_model_profiles_match_target_defaults() -> None:
             keep_alive="10m",
         ),
     }
+
+
+def test_onboarding_allows_manual_power_pack_selection(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project(remove_secrets=True)
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 8.0)
+
+    responses = iter(["", "", "1", "3", "", ""])
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _message: None,
+    )
+
+    assert result == 0
+
+    models_payload = _read_yaml(project_root / "config" / "models.yaml")
+    configured_settings = load_settings(project_root=project_root)
+
+    assert models_payload["pack"] == "power"
+    assert models_payload["profiles"] == {}
+    assert configured_settings.model_pack == "power"
+    assert configured_settings.models["fast"].model_name == "ministral-3:8b"
+    assert configured_settings.models["main"].model_name == "qwen3.5:14b"
+    assert configured_settings.models["deep"].model_name == "qwen3.5:27b"
+    assert configured_settings.models["codex"].model_name == "qwen3-coder:30b"
 
 
 def test_load_telegram_config_rejects_pasted_bot_token(

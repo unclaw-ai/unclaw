@@ -188,6 +188,18 @@ def test_terminal_main_requests_default_model_warm_load(
     assert capsys.readouterr().out == "banner\nreport\n"
 
 
+def test_preflight_banner_shows_active_model_pack(make_temp_project) -> None:
+    project_root = make_temp_project()
+    models_config_path = project_root / "config" / "models.yaml"
+    models_config_path.write_text("pack: sweet\nprofiles: {}\n", encoding="utf-8")
+    settings = load_settings(project_root=project_root)
+
+    banner = cli_channel._build_preflight_banner(settings)
+
+    assert "PACK" in banner
+    assert "sweet" in banner
+
+
 def test_cli_shows_model_requested_tool_call_before_final_reply(
     monkeypatch,
     make_temp_project,

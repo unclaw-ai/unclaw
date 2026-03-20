@@ -16,6 +16,7 @@ from unclaw.onboarding_files import (
 )
 from unclaw.onboarding_flow import (
     build_onboarding_banner as _build_onboarding_banner,
+    detect_system_ram_gib as _detect_system_ram_gib,
     default_channel_preset as _default_channel_preset,
     enabled_channels_from_preset as _enabled_channels_from_preset,
     load_existing_local_secrets as _load_existing_local_secrets,
@@ -23,9 +24,11 @@ from unclaw.onboarding_flow import (
     post_configure_ollama as _post_configure_ollama,
     print_plan_summary as _print_plan_summary,
     prompt_channel_preset as _prompt_channel_preset,
+    prompt_model_pack as _prompt_model_pack,
     prompt_model_profiles as _prompt_model_profiles,
     prompt_telegram_bot_token as _prompt_telegram_bot_token,
 )
+from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
 from unclaw.onboarding_types import (
     InputFunc,
     MenuOption,
@@ -187,7 +190,6 @@ def run_onboarding(
         default="recommended",
     )
     beginner_mode = setup_mode == "recommended"
-    automatic_configuration = beginner_mode
 
     prompt_ui.section(
         "🪵 Logging",
@@ -212,21 +214,33 @@ def run_onboarding(
 
     prompt_ui.section(
         "🧠 Model profiles",
-        "Choose the local models for quick replies, default chat, deeper work, and code tasks.",
+        "Choose a pack for your machine, or switch to manual control with the dev pack.",
     )
-    if beginner_mode:
-        model_profiles = recommended_model_profiles()
-        prompt_ui.info("Using the recommended starter model lineup:")
-        for profile_name in _PROFILE_ORDER:
-            prompt_ui.info(
-                f"- {profile_name}: {model_profiles[profile_name].model_name}"
-            )
-    else:
+    detected_ram_gib = _detect_system_ram_gib()
+    recommended_pack = recommend_model_pack(detected_ram_gib)
+    default_pack = recommended_pack if beginner_mode else settings.model_pack
+    selected_pack = _prompt_model_pack(
+        prompt_ui=prompt_ui,
+        detected_ram_gib=detected_ram_gib,
+        default_pack=default_pack,
+    )
+    manual_model_pack = selected_pack == DEV_MODEL_PACK_NAME
+    automatic_configuration = beginner_mode and not manual_model_pack
+
+    if manual_model_pack:
         model_profiles = _prompt_model_profiles(
             settings,
             prompt_ui=prompt_ui,
             ollama_status=ollama_status,
+            recommended_pack=recommended_pack,
         )
+    else:
+        model_profiles = recommended_model_profiles(selected_pack)
+        prompt_ui.info(f"Using the {selected_pack} pack model lineup:")
+        for profile_name in _PROFILE_ORDER:
+            prompt_ui.info(
+                f"- {profile_name}: {model_profiles[profile_name].model_name}"
+            )
 
     telegram_bot_token = local_secrets.telegram_bot_token
     telegram_bot_token_env_var = telegram_config.bot_token_env_var
@@ -242,6 +256,7 @@ def run_onboarding(
         logging_mode=logging_mode,
         enabled_channels=enabled_channels,
         default_profile="main",
+        model_pack=selected_pack,
         model_profiles=model_profiles,
         telegram_bot_token=telegram_bot_token,
         telegram_bot_token_env_var=telegram_bot_token_env_var,

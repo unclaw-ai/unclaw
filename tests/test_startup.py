@@ -51,6 +51,37 @@ def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
     )
 
 
+def test_startup_report_uses_pack_resolved_default_model(monkeypatch, make_temp_project) -> None:
+    project_root = make_temp_project()
+    models_config_path = project_root / "config" / "models.yaml"
+    models_config_path.write_text("pack: power\nprofiles: {}\n", encoding="utf-8")
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=True,
+            model_names=(settings.default_model.model_name,),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(settings.app.default_model_profile,),
+    )
+
+    assert settings.model_pack == "power"
+    assert settings.default_model.model_name == "qwen3.5:14b"
+    assert report.has_errors is False
+    assert any(
+        "main=qwen3.5:14b" in check.detail for check in report.checks if check.label == "Models"
+    )
+
+
 def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> None:
     settings = load_settings(project_root=_repo_root())
 

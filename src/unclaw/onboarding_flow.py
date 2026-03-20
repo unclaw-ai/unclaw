@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 
 from unclaw.channels.telegram_bot import TelegramConfig, load_telegram_config
@@ -12,6 +15,11 @@ from unclaw.local_secrets import (
     LocalSecrets,
     load_local_secrets,
     validate_telegram_bot_token,
+)
+from unclaw.model_packs import (
+    DEV_MODEL_PACK_NAME,
+    get_model_pack_definition,
+    recommend_model_pack,
 )
 from unclaw.onboarding_files import recommended_model_profiles
 from unclaw.onboarding_types import (
@@ -131,9 +139,10 @@ def prompt_model_profiles(
     *,
     prompt_ui: PromptUI,
     ollama_status: OllamaStatus,
+    recommended_pack: str,
 ) -> dict[str, ModelProfileDraft]:
     profiles: dict[str, ModelProfileDraft] = {}
-    recommended = recommended_model_profiles()
+    recommended = recommended_model_profiles(recommended_pack)
     installed_model_names = (
         ollama_status.model_names if ollama_status.is_running else ()
     )
@@ -217,6 +226,42 @@ def prompt_model_profiles(
     return profiles
 
 
+def detect_system_ram_gib() -> float | None:
+    if sys.platform == "win32":
+        return _detect_windows_ram_gib()
+
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        page_count = os.sysconf("SC_PHYS_PAGES")
+    except (AttributeError, OSError, ValueError):
+        return None
+
+    if not isinstance(page_size, int) or not isinstance(page_count, int):
+        return None
+    if page_size <= 0 or page_count <= 0:
+        return None
+
+    return (page_size * page_count) / float(1024**3)
+
+
+def prompt_model_pack(
+    *,
+    prompt_ui: PromptUI,
+    detected_ram_gib: float | None,
+    default_pack: str,
+) -> str:
+    recommended_pack = recommend_model_pack(detected_ram_gib)
+    return prompt_ui.select(
+        "Which model pack should Unclaw use?",
+        options=_build_model_pack_options(recommended_pack),
+        default=default_pack,
+        help_text=_build_model_pack_help_text(
+            detected_ram_gib=detected_ram_gib,
+            recommended_pack=recommended_pack,
+        ),
+    )
+
+
 def prompt_telegram_bot_token(
     *,
     existing_token: str | None,
@@ -267,6 +312,7 @@ def print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None
         f"{'recommended guided' if plan.beginner_mode else 'advanced custom'}"
     )
     output_func(f"- Logging: {plan.logging_mode}")
+    output_func(f"- Model pack: {_format_model_pack_summary(plan.model_pack)}")
     output_func(
         "- Channels: "
         + ", ".join(
@@ -567,14 +613,90 @@ def _describe_installed_model(
     return ", ".join(tags)
 
 
+def _build_model_pack_options(
+    recommended_pack: str,
+) -> tuple[MenuOption, ...]:
+    options: list[MenuOption] = []
+    for pack_name in ("lite", "sweet", "power", DEV_MODEL_PACK_NAME):
+        definition = get_model_pack_definition(pack_name)
+        label = definition.title
+        if pack_name == recommended_pack:
+            label = f"{label} (recommended)"
+        options.append(
+            MenuOption(
+                value=pack_name,
+                label=label,
+                description=f"{definition.description} {definition.ram_guidance}",
+            )
+        )
+    return tuple(options)
+
+
+def _build_model_pack_help_text(
+    *,
+    detected_ram_gib: float | None,
+    recommended_pack: str,
+) -> str:
+    recommended_title = get_model_pack_definition(recommended_pack).title
+    if detected_ram_gib is None:
+        return (
+            "Unclaw could not read this machine's memory, so "
+            f"{recommended_title} is the safest starting point. "
+            "You can still choose any pack."
+        )
+
+    return (
+        f"Detected memory: about {_format_ram_gib(detected_ram_gib)}. "
+        f"{recommended_title} is the recommended fit for this machine. "
+        "You can still choose any pack."
+    )
+
+
+def _format_ram_gib(total_ram_gib: float) -> str:
+    rounded = round(total_ram_gib)
+    if abs(total_ram_gib - rounded) < 0.25:
+        return f"{rounded} GB"
+    return f"{total_ram_gib:.1f} GB"
+
+
+def _format_model_pack_summary(pack_name: str) -> str:
+    definition = get_model_pack_definition(pack_name)
+    if pack_name == DEV_MODEL_PACK_NAME:
+        return f"{definition.title} (manual)"
+    return definition.title.lower()
+
+
+def _detect_windows_ram_gib() -> float | None:
+    class _MemoryStatus(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", ctypes.c_ulong),
+            ("dwMemoryLoad", ctypes.c_ulong),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    memory_status = _MemoryStatus()
+    memory_status.dwLength = ctypes.sizeof(_MemoryStatus)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status)):
+        return None
+    return memory_status.ullTotalPhys / float(1024**3)
+
+
 __all__ = [
     "build_onboarding_banner",
+    "detect_system_ram_gib",
     "default_channel_preset",
     "enabled_channels_from_preset",
     "load_existing_local_secrets",
     "load_existing_telegram_config",
     "post_configure_ollama",
     "print_plan_summary",
+    "prompt_model_pack",
     "prompt_channel_preset",
     "prompt_model_profiles",
     "prompt_telegram_bot_token",

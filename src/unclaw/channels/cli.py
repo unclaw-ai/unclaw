@@ -313,6 +313,7 @@ def _print_banner(
             rows=(
                 ("mode", "terminal"),
                 ("session", session_id),
+                ("pack", settings.model_pack),
                 (
                     "default",
                     (
@@ -335,6 +336,7 @@ def _build_preflight_banner(settings: Settings) -> str:
         subtitle="Local-first assistant runtime with direct local model execution.",
         rows=(
             ("mode", "terminal"),
+            ("pack", settings.model_pack),
             (
                 "default",
                 f"{settings.app.default_model_profile} -> {settings.default_model.model_name}",

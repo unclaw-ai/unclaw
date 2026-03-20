@@ -8,6 +8,7 @@ import yaml
 from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
 from unclaw.llm.model_profiles import resolve_model_profile, resolve_router_profile
+from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
 from unclaw.settings import load_settings
 
 pytestmark = pytest.mark.unit
@@ -118,6 +119,7 @@ def test_load_settings_reads_public_facing_shipped_defaults(
     settings = load_settings(project_root=project_root)
 
     assert settings.app.environment == "production"
+    assert settings.model_pack == DEV_MODEL_PACK_NAME
     assert settings.app.logging.level == "INFO"
     assert settings.app.logging.mode == "simple"
 
@@ -207,6 +209,46 @@ def test_resolve_model_profile_marks_shipped_default_main_profile_as_native_tool
     assert profile.keep_alive == "30m"
 
 
+def test_load_settings_resolves_selected_sweet_pack_profiles(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    models_config_path = project_root / "config" / "models.yaml"
+    _write_yaml(
+        models_config_path,
+        {
+            "pack": "sweet",
+            "profiles": {},
+        },
+    )
+
+    settings = load_settings(project_root=project_root)
+    codex_profile = resolve_model_profile(settings, "codex")
+
+    assert settings.model_pack == "sweet"
+    assert settings.models["fast"].model_name == "ministral-3:3b"
+    assert settings.models["main"].model_name == "qwen3.5:9b"
+    assert settings.models["deep"].model_name == "qwen3.5:14b"
+    assert settings.models["codex"].model_name == "qwen2.5-codex:7b"
+    assert codex_profile.capabilities.supports_native_tool_calling is False
+    assert codex_profile.capabilities.tool_mode == "none"
+
+
+def test_load_settings_defaults_to_dev_pack_when_pack_key_is_missing(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    models_config_path = project_root / "config" / "models.yaml"
+    models_payload = _read_yaml(models_config_path)
+    models_payload.pop("pack")
+    _write_yaml(models_config_path, models_payload)
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.model_pack == DEV_MODEL_PACK_NAME
+    assert settings.models["main"].model_name == "qwen3.5:4b"
+
+
 def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable(
     make_temp_project,
 ) -> None:
@@ -239,6 +281,15 @@ def test_load_settings_reads_dedicated_router_defaults(
     assert settings.router.timeout_seconds == 15.0
     assert router_profile.name == "router"
     assert router_profile.model_name == "qwen3:1.7b"
+
+
+def test_recommend_model_pack_uses_ram_thresholds() -> None:
+    assert recommend_model_pack(8.0) == "lite"
+    assert recommend_model_pack(16.0) == "lite"
+    assert recommend_model_pack(16.1) == "sweet"
+    assert recommend_model_pack(32.0) == "sweet"
+    assert recommend_model_pack(48.0) == "power"
+    assert recommend_model_pack(None) == "lite"
 
 
 def test_load_settings_allows_profile_keep_alive_to_be_absent(

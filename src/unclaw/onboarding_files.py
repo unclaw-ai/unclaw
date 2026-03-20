@@ -15,52 +15,15 @@ from unclaw.local_secrets import (
     local_secrets_path,
     write_local_secrets,
 )
+from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
 from unclaw.onboarding_types import ModelProfileDraft, OnboardingPlan, PROFILE_ORDER
 from unclaw.settings import Settings
 
-_RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
-    "fast": ModelProfileDraft(
-        provider="ollama",
-        model_name="llama3.2:3b",
-        temperature=0.2,
-        thinking_supported=False,
-        tool_mode="none",
-        num_ctx=4096,
-        keep_alive="10m",
-    ),
-    "main": ModelProfileDraft(
-        provider="ollama",
-        model_name="qwen3.5:4b",
-        temperature=0.3,
-        thinking_supported=True,
-        tool_mode="native",
-        num_ctx=8192,
-        keep_alive="30m",
-    ),
-    "deep": ModelProfileDraft(
-        provider="ollama",
-        model_name="qwen3.5:9b",
-        temperature=0.2,
-        thinking_supported=True,
-        tool_mode="native",
-        num_ctx=8192,
-        keep_alive="10m",
-    ),
-    "codex": ModelProfileDraft(
-        provider="ollama",
-        model_name="qwen2.5-coder:7b",
-        temperature=0.1,
-        thinking_supported=True,
-        tool_mode="none",
-        num_ctx=4096,
-        keep_alive="10m",
-    ),
-}
 
+def recommended_model_profiles(pack_name: str) -> dict[str, ModelProfileDraft]:
+    """Return a fresh copy of one fixed pack's local model profiles."""
 
-def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
-    """Return a fresh copy of the recommended local model profiles."""
-
+    pack_profiles = get_model_pack_profiles(pack_name)
     return {
         name: ModelProfileDraft(
             provider=draft.provider,
@@ -70,8 +33,9 @@ def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
             tool_mode=draft.tool_mode,
             num_ctx=draft.num_ctx,
             keep_alive=draft.keep_alive,
+            planner_profile=draft.planner_profile,
         )
-        for name, draft in _RECOMMENDED_PROFILES.items()
+        for name, draft in pack_profiles.items()
     }
 
 
@@ -138,23 +102,27 @@ def build_onboarding_file_payloads(
         },
     }
 
-    models_payload: dict[str, object] = {"profiles": {}}
+    models_payload: dict[str, object] = {
+        "pack": plan.model_pack,
+        "profiles": {},
+    }
     profiles_section = models_payload["profiles"]
     assert isinstance(profiles_section, dict)
-    for profile_name in PROFILE_ORDER:
-        draft = plan.model_profiles[profile_name]
-        profile_payload = {
-            "provider": draft.provider,
-            "model_name": draft.model_name,
-            "temperature": draft.temperature,
-            "thinking_supported": draft.thinking_supported,
-            "tool_mode": draft.tool_mode,
-        }
-        if draft.num_ctx is not None:
-            profile_payload["num_ctx"] = draft.num_ctx
-        if draft.keep_alive is not None:
-            profile_payload["keep_alive"] = draft.keep_alive
-        profiles_section[profile_name] = profile_payload
+    if plan.model_pack == DEV_MODEL_PACK_NAME:
+        for profile_name in PROFILE_ORDER:
+            draft = plan.model_profiles[profile_name]
+            profile_payload = {
+                "provider": draft.provider,
+                "model_name": draft.model_name,
+                "temperature": draft.temperature,
+                "thinking_supported": draft.thinking_supported,
+                "tool_mode": draft.tool_mode,
+            }
+            if draft.num_ctx is not None:
+                profile_payload["num_ctx"] = draft.num_ctx
+            if draft.keep_alive is not None:
+                profile_payload["keep_alive"] = draft.keep_alive
+            profiles_section[profile_name] = profile_payload
 
     telegram_payload: dict[str, object] = {
         "bot_token_env_var": plan.telegram_bot_token_env_var,
