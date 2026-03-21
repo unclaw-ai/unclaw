@@ -35,6 +35,7 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
+from unclaw.skills.weather.tool import ground_weather_tool_result
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry
@@ -707,6 +708,7 @@ def _run_agent_loop(
             tool_calls=tool_calls,
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
+            user_input=user_input,
         )
         for tool_result in tool_results:
             context_messages.append(
@@ -779,6 +781,7 @@ def _execute_runtime_tool_calls(
     tool_calls: Sequence[ToolCall],
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None = None,
+    user_input: str = "",
 ) -> tuple[ToolResult, ...]:
     """Execute one tool-call batch while keeping context and persistence ordered."""
     pending_calls = _start_pending_tool_executions(
@@ -798,18 +801,22 @@ def _execute_runtime_tool_calls(
     )
     tool_results: list[ToolResult] = []
     for pending_call, tool_result, finished_at in resolved_results:
+        grounded_tool_result = ground_weather_tool_result(
+            tool_result,
+            user_input=user_input,
+        )
         _finalize_runtime_tool_call(
             session_manager=session_manager,
             session_id=session_id,
             tracer=tracer,
             tool_call=pending_call.tool_call,
-            tool_result=tool_result,
+            tool_result=grounded_tool_result,
             tool_duration_ms=max(
                 0,
                 round((finished_at - pending_call.started_at) * 1000),
             ),
         )
-        tool_results.append(tool_result)
+        tool_results.append(grounded_tool_result)
 
     return tuple(tool_results)
 

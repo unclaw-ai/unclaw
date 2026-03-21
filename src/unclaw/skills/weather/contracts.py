@@ -42,14 +42,37 @@ class WeatherDailyForecastPayload(TypedDict):
     wind_speed_max_kph: float | None
 
 
+class WeatherRelativeDayAnchorPayload(TypedDict):
+    """One relative-day forecast anchor returned by the weather tool."""
+
+    label: str
+    date: str
+    forecast: WeatherDailyForecastPayload
+
+
+class WeatherTemporalRequestPayload(TypedDict):
+    """Resolved or unsupported temporal request metadata for the weather tool."""
+
+    raw_text: str
+    normalized_kind: str
+    local_current_date: str
+    resolved_target_date: str | None
+    supported: bool
+    note: str | None
+
+
 class WeatherLookupPayload(TypedDict):
     """Formal schema for the dedicated weather tool result payload."""
 
     provider: str
     location_query: str
     forecast_days: int
+    local_current_date: str
     resolved_location: WeatherResolvedLocationPayload
     current: WeatherCurrentConditionsPayload | None
+    relative_day_anchors: list[WeatherRelativeDayAnchorPayload]
+    temporal_request: WeatherTemporalRequestPayload | None
+    selected_forecast: WeatherDailyForecastPayload | None
     daily_forecast: list[WeatherDailyForecastPayload]
 
 
@@ -57,5 +80,7 @@ __all__ = [
     "WeatherCurrentConditionsPayload",
     "WeatherDailyForecastPayload",
     "WeatherLookupPayload",
+    "WeatherRelativeDayAnchorPayload",
     "WeatherResolvedLocationPayload",
+    "WeatherTemporalRequestPayload",
 ]

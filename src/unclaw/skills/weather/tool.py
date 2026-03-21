@@ -6,6 +6,7 @@ import json
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
+from datetime import date, timedelta
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -15,7 +16,9 @@ from unclaw.skills.weather.contracts import (
     WeatherCurrentConditionsPayload,
     WeatherDailyForecastPayload,
     WeatherLookupPayload,
+    WeatherRelativeDayAnchorPayload,
     WeatherResolvedLocationPayload,
+    WeatherTemporalRequestPayload,
 )
 from unclaw.tools.contracts import (
     ToolCall,
@@ -33,6 +36,34 @@ _GEOCODING_ENDPOINT = "https://geocoding-api.open-meteo.com/v1/search"
 _FORECAST_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
 _DEFAULT_FORECAST_DAYS = 7
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_WEATHER_TEMPORAL_PATTERNS: tuple[tuple[str, bool, re.Pattern[str]], ...] = (
+    ("today", True, re.compile(r"\btoday\b", flags=re.IGNORECASE)),
+    ("today", True, re.compile(r"\baujourd['’]hui\b", flags=re.IGNORECASE)),
+    ("tomorrow", True, re.compile(r"\btomorrow\b", flags=re.IGNORECASE)),
+    ("tomorrow", True, re.compile(r"\bdemain\b", flags=re.IGNORECASE)),
+    (
+        "this_weekend",
+        False,
+        re.compile(r"\bthis\s+weekend\b", flags=re.IGNORECASE),
+    ),
+    (
+        "this_weekend",
+        False,
+        re.compile(r"\bce(?:\s+|-)?week-?end\b", flags=re.IGNORECASE),
+    ),
+)
+_LEADING_LOCATION_GLUE_PATTERNS = (
+    re.compile(r"^(?:for|in|at|on)\s+", flags=re.IGNORECASE),
+    re.compile(r"^(?:pour|a|à|au|en|sur)\s+", flags=re.IGNORECASE),
+)
+_TRAILING_LOCATION_GLUE_PATTERNS = (
+    re.compile(r"\s+(?:for|in|at|on)$", flags=re.IGNORECASE),
+    re.compile(r"\s+(?:pour|a|à|au|en|sur)$", flags=re.IGNORECASE),
+)
+_LOCATION_EDGE_TRIM_CHARS = " ,:;!?-"
+_UNSUPPORTED_RELATIVE_RANGE_NOTE = (
+    "Unsupported relative weather range; no single forecast day selected."
+)
 
 
 GET_WEATHER_DEFINITION = ToolDefinition(
@@ -55,6 +86,7 @@ class WeatherLookupRequest:
 
     location: str
     forecast_days: int = _DEFAULT_FORECAST_DAYS
+    temporal_request: WeatherTemporalRequest | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,14 +147,48 @@ class WeatherDailyForecast:
 
 
 @dataclass(frozen=True, slots=True)
+class WeatherRelativeDayAnchor:
+    """Relative-day anchor that maps a label like today/tomorrow to a forecast."""
+
+    label: str
+    forecast: WeatherDailyForecast
+
+    def to_payload(self) -> WeatherRelativeDayAnchorPayload:
+        return WeatherRelativeDayAnchorPayload(
+            label=self.label,
+            date=self.forecast.date,
+            forecast=self.forecast.to_payload(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WeatherTemporalRequest:
+    """Resolved temporal request metadata for a weather question."""
+
+    raw_text: str
+    normalized_kind: str
+    local_current_date: str
+    resolved_target_date: str | None
+    supported: bool
+    note: str | None = None
+
+    def to_payload(self) -> WeatherTemporalRequestPayload:
+        return WeatherTemporalRequestPayload(**asdict(self))
+
+
+@dataclass(frozen=True, slots=True)
 class WeatherLookupResponse:
     """Typed weather response returned by the dedicated backend path."""
 
     provider: str
     location_query: str
     forecast_days: int
+    local_current_date: str
     resolved_location: WeatherResolvedLocation
     current: WeatherCurrentConditions | None
+    relative_day_anchors: tuple[WeatherRelativeDayAnchor, ...]
+    temporal_request: WeatherTemporalRequest | None
+    selected_forecast: WeatherDailyForecast | None
     daily_forecast: tuple[WeatherDailyForecast, ...]
 
     def to_payload(self) -> WeatherLookupPayload:
@@ -130,8 +196,22 @@ class WeatherLookupResponse:
             provider=self.provider,
             location_query=self.location_query,
             forecast_days=self.forecast_days,
+            local_current_date=self.local_current_date,
             resolved_location=self.resolved_location.to_payload(),
             current=None if self.current is None else self.current.to_payload(),
+            relative_day_anchors=[
+                anchor.to_payload() for anchor in self.relative_day_anchors
+            ],
+            temporal_request=(
+                None
+                if self.temporal_request is None
+                else self.temporal_request.to_payload()
+            ),
+            selected_forecast=(
+                None
+                if self.selected_forecast is None
+                else self.selected_forecast.to_payload()
+            ),
             daily_forecast=[forecast.to_payload() for forecast in self.daily_forecast],
         )
 
@@ -194,6 +274,7 @@ async def get_weather_async(call: ToolCall) -> ToolResult:
 
 def lookup_weather(request: WeatherLookupRequest) -> WeatherLookupResponse:
     """Run the dedicated weather backend end to end."""
+    current_local_date = _resolve_request_local_date(request)
     resolved_location = _resolve_location(request.location)
     forecast_payload = _fetch_json_document(
         _build_forecast_url(resolved_location, forecast_days=request.forecast_days)
@@ -206,12 +287,25 @@ def lookup_weather(request: WeatherLookupRequest) -> WeatherLookupResponse:
             "Weather provider did not return any daily forecast data."
         )
 
+    relative_day_anchors = _build_relative_day_anchors(
+        daily_forecast,
+        current_local_date=current_local_date,
+    )
+    selected_forecast = _select_forecast_for_temporal_request(
+        daily_forecast,
+        request.temporal_request,
+    )
+
     return WeatherLookupResponse(
         provider=_WEATHER_PROVIDER_NAME,
         location_query=request.location,
         forecast_days=request.forecast_days,
+        local_current_date=current_local_date.isoformat(),
         resolved_location=resolved_location,
         current=current_conditions,
+        relative_day_anchors=relative_day_anchors,
+        temporal_request=request.temporal_request,
+        selected_forecast=selected_forecast,
         daily_forecast=daily_forecast,
     )
 
@@ -220,7 +314,103 @@ def _read_weather_request(call: ToolCall) -> WeatherLookupRequest:
     location = call.arguments.get("location")
     if not isinstance(location, str) or not location.strip():
         raise WeatherLookupError("Argument 'location' must be a non-empty string.")
-    return WeatherLookupRequest(location=location.strip())
+    raw_location = location.strip()
+    current_local_date = date.today()
+    temporal_request = resolve_weather_temporal_request(
+        raw_location,
+        current_local_date=current_local_date,
+    )
+    normalized_location = (
+        _strip_weather_temporal_phrase(raw_location)
+        if temporal_request is not None
+        else raw_location
+    )
+    if not normalized_location:
+        raise WeatherLookupError("Argument 'location' must include a place name.")
+    return WeatherLookupRequest(
+        location=normalized_location,
+        temporal_request=temporal_request,
+    )
+
+
+def resolve_weather_temporal_request(
+    text: str,
+    *,
+    current_local_date: date | None = None,
+) -> WeatherTemporalRequest | None:
+    """Resolve supported relative weather phrases against the local Python date."""
+
+    match = _find_weather_temporal_match(text)
+    if match is None:
+        return None
+
+    current_date = current_local_date or date.today()
+    matched_text, normalized_kind, supported = match
+    resolved_target_date: str | None = None
+    note: str | None = None
+
+    if normalized_kind == "today":
+        resolved_target_date = current_date.isoformat()
+    elif normalized_kind == "tomorrow":
+        resolved_target_date = (current_date + timedelta(days=1)).isoformat()
+    else:
+        note = _UNSUPPORTED_RELATIVE_RANGE_NOTE
+
+    return WeatherTemporalRequest(
+        raw_text=matched_text,
+        normalized_kind=normalized_kind,
+        local_current_date=current_date.isoformat(),
+        resolved_target_date=resolved_target_date,
+        supported=supported,
+        note=note,
+    )
+
+
+def _find_weather_temporal_match(
+    text: str,
+) -> tuple[str, str, bool] | None:
+    best_match: tuple[int, int, str, str, bool] | None = None
+    for normalized_kind, supported, pattern in _WEATHER_TEMPORAL_PATTERNS:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        candidate = (
+            match.start(),
+            -(match.end() - match.start()),
+            match.group(0).strip(),
+            normalized_kind,
+            supported,
+        )
+        if best_match is None or candidate < best_match:
+            best_match = candidate
+
+    if best_match is None:
+        return None
+    _, _, raw_text, normalized_kind, supported = best_match
+    return raw_text, normalized_kind, supported
+
+
+def _strip_weather_temporal_phrase(text: str) -> str:
+    stripped = text
+    for _, _, pattern in _WEATHER_TEMPORAL_PATTERNS:
+        stripped = pattern.sub(" ", stripped, count=1)
+    stripped = _WHITESPACE_PATTERN.sub(" ", stripped).strip(_LOCATION_EDGE_TRIM_CHARS)
+    for _ in range(4):
+        previous = stripped
+        for pattern in _LEADING_LOCATION_GLUE_PATTERNS:
+            stripped = pattern.sub("", stripped)
+        for pattern in _TRAILING_LOCATION_GLUE_PATTERNS:
+            stripped = pattern.sub("", stripped)
+        stripped = _WHITESPACE_PATTERN.sub(" ", stripped).strip(_LOCATION_EDGE_TRIM_CHARS)
+        if stripped == previous:
+            break
+    return stripped
+
+
+def _resolve_request_local_date(request: WeatherLookupRequest) -> date:
+    if request.temporal_request is None:
+        return date.today()
+    return date.fromisoformat(request.temporal_request.local_current_date)
 
 
 def _resolve_location(location_query: str) -> WeatherResolvedLocation:
@@ -507,6 +697,48 @@ def _parse_daily_forecast(raw_daily: Any) -> tuple[WeatherDailyForecast, ...]:
     return tuple(daily_forecast)
 
 
+def _build_relative_day_anchors(
+    daily_forecast: tuple[WeatherDailyForecast, ...],
+    *,
+    current_local_date: date,
+) -> tuple[WeatherRelativeDayAnchor, ...]:
+    anchored_labels = (
+        ("today", current_local_date.isoformat()),
+        ("tomorrow", (current_local_date + timedelta(days=1)).isoformat()),
+    )
+    anchors: list[WeatherRelativeDayAnchor] = []
+    for label, forecast_date in anchored_labels:
+        forecast = _find_forecast_by_date(daily_forecast, forecast_date)
+        if forecast is None:
+            continue
+        anchors.append(WeatherRelativeDayAnchor(label=label, forecast=forecast))
+    return tuple(anchors)
+
+
+def _select_forecast_for_temporal_request(
+    daily_forecast: tuple[WeatherDailyForecast, ...],
+    temporal_request: WeatherTemporalRequest | None,
+) -> WeatherDailyForecast | None:
+    if temporal_request is None or temporal_request.supported is not True:
+        return None
+    if temporal_request.resolved_target_date is None:
+        return None
+    return _find_forecast_by_date(
+        daily_forecast,
+        temporal_request.resolved_target_date,
+    )
+
+
+def _find_forecast_by_date(
+    daily_forecast: tuple[WeatherDailyForecast, ...],
+    forecast_date: str,
+) -> WeatherDailyForecast | None:
+    for forecast in daily_forecast:
+        if forecast.date == forecast_date:
+            return forecast
+    return None
+
+
 def _read_required_string(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -583,53 +815,277 @@ def _format_weather_result(response: WeatherLookupResponse) -> str:
             f"{response.resolved_location.longitude:.4f}"
         ),
         f"Timezone: {response.resolved_location.timezone}",
+        f"Local current date: {response.local_current_date}",
         "",
     ]
+
+    if response.temporal_request is not None:
+        lines.extend(_format_temporal_request_lines(response))
+        lines.append("")
+    elif response.relative_day_anchors:
+        lines.extend(_format_relative_day_anchor_lines(response.relative_day_anchors))
+        lines.append("")
 
     if response.current is not None:
         lines.extend(
             (
                 "Current conditions:",
-                (
-                    f"- {response.current.observed_at}: "
-                    f"{response.current.weather_description}; "
-                    f"{response.current.temperature_c:.1f} C "
-                    f"(feels {response.current.apparent_temperature_c:.1f} C); "
-                    f"precipitation {response.current.precipitation_mm:.1f} mm; "
-                    f"wind {response.current.wind_speed_kph:.1f} km/h "
-                    f"at {response.current.wind_direction_degrees} deg"
-                ),
+                _format_current_conditions(response.current),
                 "",
             )
         )
 
+    relative_labels_by_date = {
+        anchor.forecast.date: anchor.label for anchor in response.relative_day_anchors
+    }
     lines.append(f"{response.forecast_days}-day forecast:")
     for forecast in response.daily_forecast:
-        precipitation_bits: list[str] = []
-        if forecast.precipitation_probability_max_pct is not None:
-            precipitation_bits.append(
-                f"{forecast.precipitation_probability_max_pct}% precip probability"
-            )
-        if forecast.precipitation_sum_mm is not None:
-            precipitation_bits.append(f"{forecast.precipitation_sum_mm:.1f} mm precip")
-        precipitation_summary = (
-            "; " + ", ".join(precipitation_bits) if precipitation_bits else ""
-        )
-        wind_summary = (
-            ""
-            if forecast.wind_speed_max_kph is None
-            else f"; wind up to {forecast.wind_speed_max_kph:.1f} km/h"
-        )
         lines.append(
-            (
-                f"- {forecast.date}: {forecast.weather_description}; "
-                f"low {forecast.temperature_min_c:.1f} C, "
-                f"high {forecast.temperature_max_c:.1f} C"
-                f"{precipitation_summary}{wind_summary}"
+            _format_forecast_summary(
+                forecast,
+                label=relative_labels_by_date.get(forecast.date),
             )
         )
 
     return "\n".join(lines)
+
+
+def _format_temporal_request_lines(
+    response: WeatherLookupResponse,
+) -> tuple[str, ...]:
+    temporal_request = response.temporal_request
+    if temporal_request is None:
+        return ()
+
+    lines = [
+        f"Requested temporal phrase: {temporal_request.raw_text}",
+    ]
+    if temporal_request.supported is not True:
+        lines.append(
+            "Temporal grounding: "
+            f"{temporal_request.note or _UNSUPPORTED_RELATIVE_RANGE_NOTE}"
+        )
+        return tuple(lines)
+
+    if temporal_request.resolved_target_date is not None:
+        lines.append(f"Resolved target date: {temporal_request.resolved_target_date}")
+
+    if response.selected_forecast is not None:
+        lines.extend(
+            (
+                "Selected forecast day:",
+                _format_forecast_summary(
+                    response.selected_forecast,
+                    label=temporal_request.normalized_kind,
+                ),
+            )
+        )
+    else:
+        lines.append(
+            "Selected forecast day: no matching entry in the returned 7-day forecast."
+        )
+    return tuple(lines)
+
+
+def _format_relative_day_anchor_lines(
+    relative_day_anchors: tuple[WeatherRelativeDayAnchor, ...],
+) -> tuple[str, ...]:
+    if not relative_day_anchors:
+        return ()
+    return (
+        "Relative forecast anchors:",
+        *(
+            _format_forecast_summary(anchor.forecast, label=anchor.label)
+            for anchor in relative_day_anchors
+        ),
+    )
+
+
+def _format_current_conditions(current: WeatherCurrentConditions) -> str:
+    return (
+        f"- {current.observed_at}: "
+        f"{current.weather_description}; "
+        f"{current.temperature_c:.1f} C "
+        f"(feels {current.apparent_temperature_c:.1f} C); "
+        f"precipitation {current.precipitation_mm:.1f} mm; "
+        f"wind {current.wind_speed_kph:.1f} km/h "
+        f"at {current.wind_direction_degrees} deg"
+    )
+
+
+def _format_forecast_summary(
+    forecast: WeatherDailyForecast,
+    *,
+    label: str | None = None,
+) -> str:
+    precipitation_bits: list[str] = []
+    if forecast.precipitation_probability_max_pct is not None:
+        precipitation_bits.append(
+            f"{forecast.precipitation_probability_max_pct}% precip probability"
+        )
+    if forecast.precipitation_sum_mm is not None:
+        precipitation_bits.append(f"{forecast.precipitation_sum_mm:.1f} mm precip")
+    precipitation_summary = (
+        "; " + ", ".join(precipitation_bits) if precipitation_bits else ""
+    )
+    wind_summary = (
+        ""
+        if forecast.wind_speed_max_kph is None
+        else f"; wind up to {forecast.wind_speed_max_kph:.1f} km/h"
+    )
+    label_suffix = f" ({label})" if label else ""
+    return (
+        f"- {forecast.date}{label_suffix}: {forecast.weather_description}; "
+        f"low {forecast.temperature_min_c:.1f} C, "
+        f"high {forecast.temperature_max_c:.1f} C"
+        f"{precipitation_summary}{wind_summary}"
+    )
+
+
+def ground_weather_tool_result(
+    result: ToolResult,
+    *,
+    user_input: str,
+) -> ToolResult:
+    """Append lightweight temporal grounding for the current weather request."""
+
+    if result.tool_name != GET_WEATHER_DEFINITION.name or result.success is not True:
+        return result
+    if not isinstance(result.payload, dict):
+        return result
+
+    payload = dict(result.payload)
+    existing_temporal_request = payload.get("temporal_request")
+    if isinstance(existing_temporal_request, dict) and existing_temporal_request:
+        return result
+
+    current_local_date = _parse_iso_date(payload.get("local_current_date"))
+    temporal_request = resolve_weather_temporal_request(
+        user_input,
+        current_local_date=current_local_date,
+    )
+    if temporal_request is None:
+        return result
+
+    selected_forecast_payload = _find_selected_forecast_payload(
+        payload,
+        temporal_request=temporal_request,
+    )
+    grounding_lines = _format_temporal_grounding_lines(
+        temporal_request=temporal_request,
+        selected_forecast_payload=selected_forecast_payload,
+    )
+    if not grounding_lines:
+        return result
+
+    payload["temporal_request"] = temporal_request.to_payload()
+    payload["selected_forecast"] = selected_forecast_payload
+    output_text = result.output_text.rstrip()
+    if output_text:
+        output_text = f"{output_text}\n\n" + "\n".join(grounding_lines)
+    else:
+        output_text = "\n".join(grounding_lines)
+    return ToolResult(
+        tool_name=result.tool_name,
+        success=result.success,
+        output_text=output_text,
+        payload=payload,
+        error=result.error,
+    )
+
+
+def _parse_iso_date(value: Any) -> date | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def _find_selected_forecast_payload(
+    payload: dict[str, Any],
+    *,
+    temporal_request: WeatherTemporalRequest,
+) -> WeatherDailyForecastPayload | None:
+    if temporal_request.supported is not True:
+        return None
+    target_date = temporal_request.resolved_target_date
+    if not isinstance(target_date, str) or not target_date:
+        return None
+
+    raw_selected_forecast = payload.get("selected_forecast")
+    if isinstance(raw_selected_forecast, dict):
+        forecast_date = raw_selected_forecast.get("date")
+        if isinstance(forecast_date, str) and forecast_date == target_date:
+            return WeatherDailyForecastPayload(**raw_selected_forecast)
+
+    raw_daily_forecast = payload.get("daily_forecast")
+    if not isinstance(raw_daily_forecast, list):
+        return None
+    for raw_entry in raw_daily_forecast:
+        if not isinstance(raw_entry, dict):
+            continue
+        forecast_date = raw_entry.get("date")
+        if isinstance(forecast_date, str) and forecast_date == target_date:
+            return WeatherDailyForecastPayload(**raw_entry)
+    return None
+
+
+def _format_temporal_grounding_lines(
+    *,
+    temporal_request: WeatherTemporalRequest,
+    selected_forecast_payload: WeatherDailyForecastPayload | None,
+) -> tuple[str, ...]:
+    lines = [f"Requested temporal phrase: {temporal_request.raw_text}"]
+    if temporal_request.supported is not True:
+        lines.append(
+            "Temporal grounding: "
+            f"{temporal_request.note or _UNSUPPORTED_RELATIVE_RANGE_NOTE}"
+        )
+        return tuple(lines)
+
+    if temporal_request.resolved_target_date is not None:
+        lines.append(f"Resolved target date: {temporal_request.resolved_target_date}")
+
+    if selected_forecast_payload is None:
+        lines.append(
+            "Selected forecast day: no matching entry in the returned 7-day forecast."
+        )
+        return tuple(lines)
+
+    lines.extend(
+        (
+            "Selected forecast day:",
+            _format_forecast_payload_summary(
+                selected_forecast_payload,
+                label=temporal_request.normalized_kind,
+            ),
+        )
+    )
+    return tuple(lines)
+
+
+def _format_forecast_payload_summary(
+    forecast_payload: WeatherDailyForecastPayload,
+    *,
+    label: str | None = None,
+) -> str:
+    return _format_forecast_summary(
+        WeatherDailyForecast(
+            date=forecast_payload["date"],
+            weather_code=forecast_payload["weather_code"],
+            weather_description=forecast_payload["weather_description"],
+            temperature_min_c=forecast_payload["temperature_min_c"],
+            temperature_max_c=forecast_payload["temperature_max_c"],
+            precipitation_probability_max_pct=forecast_payload[
+                "precipitation_probability_max_pct"
+            ],
+            precipitation_sum_mm=forecast_payload["precipitation_sum_mm"],
+            wind_speed_max_kph=forecast_payload["wind_speed_max_kph"],
+        ),
+        label=label,
+    )
 
 
 def _describe_weather_code(weather_code: int) -> str:
@@ -675,9 +1131,13 @@ __all__ = [
     "WeatherLookupError",
     "WeatherLookupRequest",
     "WeatherLookupResponse",
+    "WeatherRelativeDayAnchor",
     "WeatherResolvedLocation",
+    "WeatherTemporalRequest",
     "get_weather",
     "get_weather_async",
+    "ground_weather_tool_result",
     "lookup_weather",
     "register_weather_tools",
+    "resolve_weather_temporal_request",
 ]

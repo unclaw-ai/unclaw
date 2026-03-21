@@ -7,11 +7,15 @@ from unclaw.skills.weather.tool import (
     WeatherLookupError,
     WeatherLookupRequest,
     WeatherLookupResponse,
+    WeatherRelativeDayAnchor,
     WeatherResolvedLocation,
+    WeatherTemporalRequest,
     get_weather,
     get_weather_async,
+    ground_weather_tool_result,
     lookup_weather,
     register_weather_tools,
+    resolve_weather_temporal_request,
 )
 
 __all__ = [
@@ -21,9 +25,13 @@ __all__ = [
     "WeatherLookupError",
     "WeatherLookupRequest",
     "WeatherLookupResponse",
+    "WeatherRelativeDayAnchor",
     "WeatherResolvedLocation",
+    "WeatherTemporalRequest",
     "get_weather",
     "get_weather_async",
+    "ground_weather_tool_result",
     "lookup_weather",
     "register_weather_tools",
+    "resolve_weather_temporal_request",
 ]

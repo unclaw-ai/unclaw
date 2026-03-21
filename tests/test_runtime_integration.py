@@ -51,6 +51,7 @@ from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 
 pytestmark = pytest.mark.integration
 
@@ -947,6 +948,208 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
         )
         assert "Release note: prompt injection defenses were added." in tool_messages[0]
         assert tool_messages[0].endswith("--- END UNTRUSTED TOOL OUTPUT ---")
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_surfaces_selected_weather_day_for_relative_request(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    _freeze_weather_grounding_date(monkeypatch)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    turn_call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal turn_call_count
+            turn_call_count += 1
+            assert profile.name == settings.app.default_model_profile
+            if turn_call_count == 1:
+                assert tools is not None
+                assert any(tool.name == "get_weather" for tool in tools)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-21T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="get_weather",
+                            arguments={"location": "Lille"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": {"location": "Lille"},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            tool_messages = [
+                message.content for message in messages if message.role is LLMRole.TOOL
+            ]
+            assert len(tool_messages) == 1
+            assert "Local current date: 2026-03-21" in tool_messages[0]
+            assert "Requested temporal phrase: demain" in tool_messages[0]
+            assert "Resolved target date: 2026-03-22" in tool_messages[0]
+            assert "Selected forecast day:" in tool_messages[0]
+            assert "- 2026-03-22 (tomorrow): partly cloudy;" in tool_messages[0]
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Forecast reply grounded to tomorrow.",
+                created_at="2026-03-21T10:00:01Z",
+                finish_reason="stop",
+            )
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        GET_WEATHER_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                "Provider: open-meteo\n"
+                "Location: Lille, Hauts-de-France, France\n"
+                "Coordinates: 50.6330, 3.0586\n"
+                "Timezone: Europe/Paris\n"
+                "Local current date: 2026-03-21\n"
+                "\n"
+                "Relative forecast anchors:\n"
+                "- 2026-03-21 (today): overcast; low 3.7 C, high 14.7 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
+                "- 2026-03-22 (tomorrow): partly cloudy; low 3.5 C, high 15.5 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
+                "\n"
+                "7-day forecast:\n"
+                "- 2026-03-21 (today): overcast; low 3.7 C, high 14.7 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
+                "- 2026-03-22 (tomorrow): partly cloudy; low 3.5 C, high 15.5 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h"
+            ),
+            payload={
+                "provider": "open-meteo",
+                "location_query": call.arguments["location"],
+                "forecast_days": 7,
+                "local_current_date": "2026-03-21",
+                "resolved_location": {
+                    "name": "Lille",
+                    "latitude": 50.6330,
+                    "longitude": 3.0586,
+                    "timezone": "Europe/Paris",
+                    "admin1": "Hauts-de-France",
+                    "country": "France",
+                },
+                "current": None,
+                "relative_day_anchors": [
+                    {
+                        "label": "today",
+                        "date": "2026-03-21",
+                        "forecast": {
+                            "date": "2026-03-21",
+                            "weather_code": 3,
+                            "weather_description": "overcast",
+                            "temperature_min_c": 3.7,
+                            "temperature_max_c": 14.7,
+                            "precipitation_probability_max_pct": 0,
+                            "precipitation_sum_mm": 0.0,
+                            "wind_speed_max_kph": 14.4,
+                        },
+                    },
+                    {
+                        "label": "tomorrow",
+                        "date": "2026-03-22",
+                        "forecast": {
+                            "date": "2026-03-22",
+                            "weather_code": 2,
+                            "weather_description": "partly cloudy",
+                            "temperature_min_c": 3.5,
+                            "temperature_max_c": 15.5,
+                            "precipitation_probability_max_pct": 0,
+                            "precipitation_sum_mm": 0.0,
+                            "wind_speed_max_kph": 14.4,
+                        },
+                    },
+                ],
+                "temporal_request": None,
+                "selected_forecast": None,
+                "daily_forecast": [
+                    {
+                        "date": "2026-03-21",
+                        "weather_code": 3,
+                        "weather_description": "overcast",
+                        "temperature_min_c": 3.7,
+                        "temperature_max_c": 14.7,
+                        "precipitation_probability_max_pct": 0,
+                        "precipitation_sum_mm": 0.0,
+                        "wind_speed_max_kph": 14.4,
+                    },
+                    {
+                        "date": "2026-03-22",
+                        "weather_code": 2,
+                        "weather_description": "partly cloudy",
+                        "temperature_min_c": 3.5,
+                        "temperature_max_c": 15.5,
+                        "precipitation_probability_max_pct": 0,
+                        "precipitation_sum_mm": 0.0,
+                        "wind_speed_max_kph": 14.4,
+                    },
+                ],
+            },
+        ),
+    )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
+
+    try:
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="quelle est la météo pour demain à Lille ?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Forecast reply grounded to tomorrow."
+        assert turn_call_count == 2
     finally:
         session_manager.close()
 
@@ -7009,6 +7212,15 @@ def _freeze_search_grounding_date(monkeypatch) -> None:
     monkeypatch.setattr("unclaw.core.context_builder.date", FixedDate)
     monkeypatch.setattr("unclaw.core.research_flow.date", FixedDate)
     monkeypatch.setattr("unclaw.core.search_grounding.date", FixedDate)
+
+
+def _freeze_weather_grounding_date(monkeypatch) -> None:
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> FixedDate:
+            return cls(2026, 3, 21)
+
+    monkeypatch.setattr("unclaw.skills.weather.tool.date", FixedDate)
 
 
 # ---------------------------------------------------------------------------

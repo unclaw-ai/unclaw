@@ -307,6 +307,7 @@ def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
                 "Active optional skill: Weather",
                 "- For current weather or short-forecast questions, use get_weather before stating live weather details.",
                 "- Use a precise place for the lookup. Answer from the returned current conditions and 7-day forecast, and state any assumption if the user was vague.",
+                "- When get_weather returns a selected forecast day or relative-day anchor like today or tomorrow, answer from that explicit day instead of remapping dates yourself.",
                 "- Use search_web only as a fallback for official alerts, longer-range outlooks, or when get_weather cannot resolve the requested place or detail.",
                 "- Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by get_weather or search results from this conversation.",
             )

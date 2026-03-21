@@ -11,7 +11,9 @@ from unclaw.skills.weather.contracts import (
     WeatherCurrentConditionsPayload,
     WeatherDailyForecastPayload,
     WeatherLookupPayload,
+    WeatherRelativeDayAnchorPayload,
     WeatherResolvedLocationPayload,
+    WeatherTemporalRequestPayload,
 )
 
 
@@ -248,6 +250,8 @@ __all__ = [
     "WeatherCurrentConditionsPayload",
     "WeatherDailyForecastPayload",
     "WeatherLookupPayload",
+    "WeatherRelativeDayAnchorPayload",
     "WeatherResolvedLocationPayload",
+    "WeatherTemporalRequestPayload",
     "resolve_tool_argument_spec",
 ]
