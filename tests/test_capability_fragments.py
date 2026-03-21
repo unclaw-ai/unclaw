@@ -22,6 +22,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.settings import load_settings
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.unit
@@ -39,6 +40,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "local_directory_listing",
         "url_fetch",
         "web_search",
+        "weather_lookup",
         "system_info",
         "notes",
         "local_file_write",
@@ -59,6 +61,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "available.local_directory_listing",
         "available.url_fetch",
         "available.web_search",
+        "available.weather_lookup",
         "available.system_info",
         "available.notes",
         "available.local_file_write",
@@ -73,6 +76,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "unavailable.local_directory_listing",
         "unavailable.url_fetch",
         "unavailable.web_search",
+        "unavailable.weather_lookup",
         "unavailable.system_info",
         "unavailable.notes",
         "unavailable.local_file_write",
@@ -145,6 +149,12 @@ def test_builtin_capability_fragment_registry_maps_current_tool_concepts_to_frag
         "guidance.model_callable.web_choice.full",
         "guidance.model_callable.web_choice.search_only",
         "guidance.model_callable.web_choice.fetch_only",
+    )
+    assert _fragment_ids(
+        registry.get_fragments_for_tool_name(GET_WEATHER_DEFINITION.name)
+    ) == (
+        "available.weather_lookup",
+        "unavailable.weather_lookup",
     )
 
     assert _fragment_ids(
@@ -253,6 +263,7 @@ def test_resolve_builtin_capability_fragments_for_empty_non_native_runtime() -> 
         "unavailable.local_directory_listing",
         "unavailable.url_fetch",
         "unavailable.web_search",
+        "unavailable.weather_lookup",
         "unavailable.system_info",
         "unavailable.notes",
         "unavailable.local_file_write",
@@ -293,6 +304,7 @@ def test_resolve_builtin_capability_fragments_tracks_native_and_non_native_defau
             "available.local_directory_listing",
             "available.url_fetch",
             "available.web_search",
+            "available.weather_lookup",
             "available.system_info",
             "available.notes",
             "available.local_file_write",
@@ -331,6 +343,7 @@ def test_resolve_builtin_capability_fragments_tracks_native_and_non_native_defau
             "available.local_directory_listing",
             "available.url_fetch",
             "available.web_search",
+            "available.weather_lookup",
             "available.system_info",
             "available.notes",
             "available.local_file_write",

@@ -13,7 +13,7 @@ from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 
 pytestmark = pytest.mark.integration
 
@@ -52,13 +52,28 @@ def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
 
     tool_registry = ToolRegistry()
 
-    def _search_tool(call: ToolCall) -> ToolResult:
+    def _weather_tool(call: ToolCall) -> ToolResult:
         return ToolResult.ok(
             tool_name=call.tool_name,
-            output_text="phase5 weather search grounding",
+            output_text="phase7A weather grounding",
+            payload={
+                "provider": "open-meteo",
+                "location_query": call.arguments["location"],
+                "forecast_days": 7,
+                "resolved_location": {
+                    "name": "Paris",
+                    "latitude": 48.8566,
+                    "longitude": 2.3522,
+                    "timezone": "Europe/Paris",
+                    "admin1": "Ile-de-France",
+                    "country": "France",
+                },
+                "current": None,
+                "daily_forecast": [],
+            },
         )
 
-    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
+    tool_registry.register(GET_WEATHER_DEFINITION, _weather_tool)
 
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
@@ -131,13 +146,13 @@ def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
 
         assert bool(weather_notes) is expect_weather_skill
         if expect_weather_skill:
-            assert "use search_web before stating weather details" in weather_notes[0]
+            assert "use get_weather before stating live weather details" in weather_notes[0]
         else:
             assert not weather_notes
 
         if expect_tools:
             assert captured_tools[0] is not None
-            assert any(tool.name == "search_web" for tool in captured_tools[0])
+            assert any(tool.name == "get_weather" for tool in captured_tools[0])
         else:
             assert captured_tools[0] is None
 

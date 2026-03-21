@@ -32,6 +32,7 @@ from unclaw.tools.notes_tools import (
 )
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 _MODULE_REFERENCE = "unclaw.core.capability_fragments"
@@ -445,6 +446,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "/search <query>: search the public web, read a few relevant pages, "
             "and answer naturally from grounded web context with compact sources.",
         ),
+        "available.weather_lookup": _static_prompt(
+            "available.weather_lookup",
+            "get_weather <location>: resolve a place and return current conditions plus a 7-day forecast.",
+        ),
         "available.system_info": _static_prompt(
             "available.system_info",
             "system_info: return current local machine and runtime facts, "
@@ -528,6 +533,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         "unavailable.web_search": _static_prompt(
             "unavailable.web_search",
             "Web search via /search <query>.",
+        ),
+        "unavailable.weather_lookup": _static_prompt(
+            "unavailable.weather_lookup",
+            "Live weather lookup via get_weather <location>.",
         ),
         "unavailable.system_info": _static_prompt(
             "unavailable.system_info",
@@ -761,6 +770,18 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         related_summary_flags=(CapabilitySummaryFlag.WEB_SEARCH_AVAILABLE,),
     ),
     _fragment(
+        fragment_id="available.weather_lookup",
+        capability_id="weather_lookup",
+        name="Available dedicated weather tool line",
+        kind=CapabilityFragmentKind.AVAILABLE_TOOL,
+        prompt_symbol="_build_available_tool_lines",
+        prompt_detail="weather_lookup",
+        availability=CapabilityAvailability(
+            required_builtin_tool_names=(GET_WEATHER_DEFINITION.name,),
+        ),
+        related_builtin_tool_names=(GET_WEATHER_DEFINITION.name,),
+    ),
+    _fragment(
         fragment_id="available.system_info",
         capability_id="system_info",
         name="Available system_info tool line",
@@ -952,6 +973,18 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         ),
         related_builtin_tool_names=(SEARCH_WEB_DEFINITION.name,),
         related_summary_flags=(CapabilitySummaryFlag.WEB_SEARCH_AVAILABLE,),
+    ),
+    _fragment(
+        fragment_id="unavailable.weather_lookup",
+        capability_id="weather_lookup",
+        name="Unavailable dedicated weather tool line",
+        kind=CapabilityFragmentKind.UNAVAILABLE_CAPABILITY,
+        prompt_symbol="_build_unavailable_lines",
+        prompt_detail="weather_lookup",
+        availability=CapabilityAvailability(
+            forbidden_builtin_tool_names=(GET_WEATHER_DEFINITION.name,),
+        ),
+        related_builtin_tool_names=(GET_WEATHER_DEFINITION.name,),
     ),
     _fragment(
         fragment_id="unavailable.system_info",

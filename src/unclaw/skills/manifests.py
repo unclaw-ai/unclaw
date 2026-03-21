@@ -138,8 +138,9 @@ _INFORMATION_WEATHER_SKILL = SkillManifest(
             name="Weather live lookup guidance",
             kind=SkillPromptFragmentKind.GUIDANCE,
             lines=(
-                "For current weather, forecast, or severe-weather questions, use search_web before stating weather details.",
-                "Use a precise place and date or time window in the query; if the user was vague, ask briefly or state the assumption you used.",
+                "For current weather or short-forecast questions, use get_weather before stating live weather details.",
+                "Use a precise place for the lookup. Answer from the returned current conditions and 7-day forecast, and state any assumption if the user was vague.",
+                "Use search_web only as a fallback for official alerts, longer-range outlooks, or when get_weather cannot resolve the requested place or detail.",
             ),
         ),
         _fragment(
@@ -148,21 +149,26 @@ _INFORMATION_WEATHER_SKILL = SkillManifest(
             name="Weather grounded-claims safety",
             kind=SkillPromptFragmentKind.SAFETY,
             lines=(
-                "Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by search results from this conversation.",
+                "Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by get_weather or search results from this conversation.",
             ),
         ),
     ),
     tool_bindings=(
         SkillToolBinding(
-            binding_id="information.weather.search",
-            tool_name="search_web",
-            description="Ground live weather and forecast answers with web search.",
+            binding_id="information.weather.lookup",
+            tool_name="get_weather",
+            description="Ground live weather and short forecasts with the dedicated weather backend.",
             required=True,
+        ),
+        SkillToolBinding(
+            binding_id="information.weather.search_fallback",
+            tool_name="search_web",
+            description="Fallback for official alerts or weather details outside the dedicated weather tool.",
         ),
     ),
     availability=SkillAvailability(
         supported_model_profiles=("main", "deep", "codex"),
-        required_builtin_tool_names=("search_web",),
+        required_builtin_tool_names=("get_weather",),
         requires_model_tool_support=True,
     ),
     budget=SkillBudgetMetadata(

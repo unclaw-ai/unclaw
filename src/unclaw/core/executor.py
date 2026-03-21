@@ -36,6 +36,7 @@ from unclaw.tools.notes_tools import (
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION, register_session_tools
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION, register_weather_tools
 from unclaw.tools.web_tools import (
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,
@@ -59,6 +60,7 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     """Register the built-in local tools on the provided registry."""
     register_file_tools(registry)
     register_web_tools(registry)
+    register_weather_tools(registry)
     register_system_tools(registry)
     register_notes_tools(
         registry,
@@ -87,6 +89,7 @@ def create_default_tool_registry(
             registry,
             allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
         )
+        register_weather_tools(registry)
         register_system_tools(registry)
         register_notes_tools(
             registry,
@@ -151,6 +154,7 @@ __all__ = [
     "CREATE_NOTE_DEFINITION",
     "DELETE_FILE_DEFINITION",
     "FORGET_LONG_TERM_MEMORY_DEFINITION",
+    "GET_WEATHER_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_LONG_TERM_MEMORY_DEFINITION",
     "LIST_NOTES_DEFINITION",

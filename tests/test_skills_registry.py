@@ -26,7 +26,7 @@ from unclaw.skills.runtime import (
     resolve_active_skill_manifests,
 )
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
+from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 
 pytestmark = pytest.mark.unit
 
@@ -162,6 +162,7 @@ def test_skill_registry_exposes_indexes_without_touching_builtin_capabilities() 
     weather_skill = registry.get_skill("information.weather")
     assert weather_skill.display_name == "Weather"
     assert tuple(binding.tool_name for binding in weather_skill.tool_bindings) == (
+        "get_weather",
         "search_web",
     )
     assert builtins.list_capability_ids()[0] == "local_file_read"
@@ -225,14 +226,14 @@ def test_load_skill_registry_is_cached_and_builtin_runtime_context_still_ignores
     assert "Weather" not in context
 
 
-def test_weather_skill_resolves_only_for_native_profiles_with_search(
+def test_weather_skill_resolves_only_for_native_profiles_with_dedicated_weather_tool(
     make_temp_project,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     tool_registry = ToolRegistry()
     tool_registry.register(
-        SEARCH_WEB_DEFINITION,
+        GET_WEATHER_DEFINITION,
         lambda call: None,  # pragma: no cover - tool execution is not used here
     )
 
@@ -279,7 +280,7 @@ def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
     settings = load_settings(project_root=project_root)
     tool_registry = ToolRegistry()
     tool_registry.register(
-        SEARCH_WEB_DEFINITION,
+        GET_WEATHER_DEFINITION,
         lambda call: None,  # pragma: no cover - tool execution is not used here
     )
 
@@ -304,9 +305,10 @@ def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
         "\n".join(
             (
                 "Active optional skill: Weather",
-                "- For current weather, forecast, or severe-weather questions, use search_web before stating weather details.",
-                "- Use a precise place and date or time window in the query; if the user was vague, ask briefly or state the assumption you used.",
-                "- Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by search results from this conversation.",
+                "- For current weather or short-forecast questions, use get_weather before stating live weather details.",
+                "- Use a precise place for the lookup. Answer from the returned current conditions and 7-day forecast, and state any assumption if the user was vague.",
+                "- Use search_web only as a fallback for official alerts, longer-range outlooks, or when get_weather cannot resolve the requested place or detail.",
+                "- Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by get_weather or search results from this conversation.",
             )
         ),
     )
