@@ -39,6 +39,7 @@ from unclaw.skills.weather.tool import ground_weather_tool_result
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
 
 _MAX_STEPS_FALLBACK_REPLY = (
     "I reached the maximum number of steps for this request. "
@@ -131,6 +132,11 @@ _OVERWRITE_REFUSED_REPLY_TEMPLATE = (
     '(for example: "overwrite the file" or "replace the file").'
 )
 
+_TERMINAL_FAILURE_REPLY = (
+    "The terminal command failed and did not complete successfully."
+)
+_TERMINAL_NOT_RUNNING_REPLY = "No terminal command is currently running."
+
 
 def _build_overwrite_refusal_reply(tool_results: tuple[ToolResult, ...]) -> str | None:
     """Return a deterministic reply if write_text_file was blocked by overwrite protection.
@@ -149,6 +155,90 @@ def _build_overwrite_refusal_reply(tool_results: tuple[ToolResult, ...]) -> str 
         ):
             return _OVERWRITE_REFUSED_REPLY_TEMPLATE.format(error=result.error)
     return None
+
+
+def _build_terminal_failure_reply(
+    *,
+    tool_calls: Sequence[ToolCall],
+    tool_results: Sequence[ToolResult],
+) -> str | None:
+    """Return a deterministic reply for failed local terminal tool executions."""
+    for tool_call, tool_result in zip(tool_calls, tool_results):
+        if tool_result.tool_name != RUN_TERMINAL_COMMAND_DEFINITION.name:
+            continue
+        if tool_result.success:
+            continue
+
+        lines = [_TERMINAL_FAILURE_REPLY]
+        command = _read_terminal_reply_command(
+            tool_call=tool_call,
+            tool_result=tool_result,
+        )
+        if command is not None:
+            lines.append(f"Command: {command}")
+
+        working_directory = _read_terminal_reply_working_directory(
+            tool_call=tool_call,
+            tool_result=tool_result,
+        )
+        if working_directory is not None:
+            lines.append(f"Working directory: {working_directory}")
+
+        error = tool_result.error.strip() if isinstance(tool_result.error, str) else ""
+        lines.append(
+            f"Error: {error or 'The terminal tool reported a failure.'}"
+        )
+
+        exit_code = _read_terminal_reply_exit_code(tool_result=tool_result)
+        if exit_code is not None:
+            lines.append(f"Exit code: {exit_code}")
+
+        lines.append(_TERMINAL_NOT_RUNNING_REPLY)
+        return "\n".join(lines)
+    return None
+
+
+def _read_terminal_reply_command(
+    *,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+) -> str | None:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    payload_command = payload.get("command")
+    if isinstance(payload_command, str) and payload_command.strip():
+        return payload_command.strip()
+
+    raw_command = tool_call.arguments.get("command")
+    if isinstance(raw_command, str) and raw_command.strip():
+        return raw_command.strip()
+    return None
+
+
+def _read_terminal_reply_working_directory(
+    *,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+) -> str | None:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    payload_working_directory = payload.get("working_directory")
+    if (
+        isinstance(payload_working_directory, str)
+        and payload_working_directory.strip()
+    ):
+        return payload_working_directory.strip()
+
+    raw_working_directory = tool_call.arguments.get("working_directory")
+    if isinstance(raw_working_directory, str) and raw_working_directory.strip():
+        return raw_working_directory.strip()
+    return None
+
+
+def _read_terminal_reply_exit_code(*, tool_result: ToolResult) -> int | None:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    exit_code = payload.get("exit_code")
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        return None
+    return exit_code
 
 
 @dataclass(slots=True)
@@ -348,13 +438,17 @@ def run_user_turn(
                 tool_guard_state=tool_guard_state,
             )
             if assistant_reply is None:
-                _execute_runtime_tool_calls(
+                explicit_tool_results = _execute_runtime_tool_calls(
                     session_manager=session_manager,
                     session_id=session.id,
                     tracer=active_tracer,
                     tool_registry=active_tool_registry,
                     tool_calls=(runtime_explicit_tool_call,),
                     tool_guard_state=tool_guard_state,
+                )
+                assistant_reply = _build_terminal_failure_reply(
+                    tool_calls=(runtime_explicit_tool_call,),
+                    tool_results=explicit_tool_results,
                 )
                 if tool_guard_state.is_cancelled():
                     assistant_reply = _TURN_CANCELLED_REPLY
@@ -726,6 +820,13 @@ def _run_agent_loop(
         overwrite_refusal = _build_overwrite_refusal_reply(tool_results)
         if overwrite_refusal is not None:
             return overwrite_refusal
+
+        terminal_failure_reply = _build_terminal_failure_reply(
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+        )
+        if terminal_failure_reply is not None:
+            return terminal_failure_reply
 
         if tool_guard_state.is_cancelled():
             return _TURN_CANCELLED_REPLY

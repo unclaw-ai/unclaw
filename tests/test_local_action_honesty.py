@@ -19,8 +19,11 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.runtime import _build_overwrite_refusal_reply
-from unclaw.tools.contracts import ToolResult
+from unclaw.core.runtime import (
+    _build_overwrite_refusal_reply,
+    _build_terminal_failure_reply,
+)
+from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.unit
@@ -214,3 +217,52 @@ def test_overwrite_refusal_returns_none_for_other_failures() -> None:
 def test_overwrite_refusal_returns_none_for_empty_results() -> None:
     """Empty result set must not crash or short-circuit."""
     assert _build_overwrite_refusal_reply(()) is None
+
+
+def test_terminal_failure_reply_reports_failure_and_no_running_command() -> None:
+    """Failed terminal actions must be grounded without a second model synthesis step."""
+    reply = _build_terminal_failure_reply(
+        tool_calls=(
+            ToolCall(
+                tool_name="run_terminal_command",
+                arguments={
+                    "command": "sudo apt upgrade",
+                    "working_directory": "/tmp",
+                    "timeout_seconds": 120,
+                },
+            ),
+        ),
+        tool_results=(
+            ToolResult.failure(
+                tool_name="run_terminal_command",
+                error=(
+                    "Argument 'timeout_seconds' exceeds the configured maximum of "
+                    "10 seconds."
+                ),
+            ),
+        ),
+    )
+
+    assert reply is not None
+    assert "failed" in reply.lower()
+    assert "sudo apt upgrade" in reply
+    assert "configured maximum" in reply
+    assert "currently running" in reply.lower()
+
+
+def test_terminal_failure_reply_ignores_successful_terminal_results() -> None:
+    """Successful terminal calls must still go through the normal model reply path."""
+    assert _build_terminal_failure_reply(
+        tool_calls=(
+            ToolCall(
+                tool_name="run_terminal_command",
+                arguments={"command": "pwd"},
+            ),
+        ),
+        tool_results=(
+            ToolResult.ok(
+                tool_name="run_terminal_command",
+                output_text="ok",
+            ),
+        ),
+    ) is None

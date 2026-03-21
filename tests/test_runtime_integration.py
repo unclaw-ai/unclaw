@@ -4563,6 +4563,160 @@ def test_runtime_native_turn_can_invoke_run_terminal_command_and_persist_reply(
         session_manager.close()
 
 
+def test_runtime_native_turn_short_circuits_failed_run_terminal_command_honestly(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    requested_timeout = settings.app.runtime.tool_timeout_seconds + 1
+    expected_error = (
+        "Argument 'timeout_seconds' exceeds the configured maximum of "
+        f"{settings.app.runtime.tool_timeout_seconds:g} seconds."
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, messages
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                assert tools is not None
+                assert any(tool.name == "run_terminal_command" for tool in tools)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-21T12:05:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="run_terminal_command",
+                            arguments={
+                                "command": "sudo apt upgrade",
+                                "working_directory": str(settings.paths.project_root),
+                                "timeout_seconds": requested_timeout,
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "run_terminal_command",
+                                        "arguments": {
+                                            "command": "sudo apt upgrade",
+                                            "working_directory": str(
+                                                settings.paths.project_root
+                                            ),
+                                            "timeout_seconds": requested_timeout,
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The upgrade is in progress and completed successfully.",
+                created_at="2026-03-21T12:05:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(
+        "unclaw.core.router.OllamaProvider",
+        _make_offline_router_provider(),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Run sudo apt upgrade locally.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Run sudo apt upgrade locally.",
+            tracer=tracer,
+        )
+
+        assert call_count == 1
+        assert "failed" in reply.lower()
+        assert "sudo apt upgrade" in reply
+        assert expected_error in reply
+        assert "currently running" in reply.lower()
+        assert "completed successfully" not in reply.lower()
+        assert "in progress" not in reply.lower()
+
+        messages = session_manager.list_messages(session.id)
+        tool_messages = [message for message in messages if message.role is MessageRole.TOOL]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].content.startswith(
+            "Tool: run_terminal_command\nOutcome: error\n"
+        )
+        assert expected_error in tool_messages[0].content
+        assert messages[-1].role is MessageRole.ASSISTANT
+        assert messages[-1].content == reply
+
+        tool_finished_events = [
+            event for event in published_events if event.event_type == "tool.finished"
+        ]
+        assert len(tool_finished_events) == 1
+        assert tool_finished_events[0].payload["success"] is False
+        assert tool_finished_events[0].payload["error"] == expected_error
+
+        model_succeeded_events = [
+            event for event in published_events if event.event_type == "model.succeeded"
+        ]
+        assert len(model_succeeded_events) == 1
+    finally:
+        session_manager.close()
+
+
 @pytest.mark.parametrize("profile_name", ["main", "deep"])
 def test_agentic_profiles_enter_direct_native_responder_runtime_without_router(
     monkeypatch,
