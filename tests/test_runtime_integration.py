@@ -173,11 +173,12 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert all(isinstance(message, LLMMessage) for message in provider_messages)
         assert provider_messages[0].content == settings.system_prompt
         assert provider_messages[1].role is LLMRole.SYSTEM
-        assert "Enabled built-in tools: 20" in provider_messages[1].content
+        assert "Enabled built-in tools: 21" in provider_messages[1].content
         assert "Available built-in tools (compact):" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
         assert "get_weather <location>" in provider_messages[1].content
+        assert "run_terminal_command <command>" in provider_messages[1].content
         assert "delete_file <path>" in provider_messages[1].content
         assert "move_file <source_path> <destination_path>" in provider_messages[1].content
         assert "rename_file <source_path> <destination_path>" in provider_messages[1].content
@@ -727,7 +728,10 @@ def test_capability_context_without_tool_output_forbids_claiming_search_happened
     context = build_runtime_capability_context(summary)
 
     # Rule was broadened (local-action honesty patch) to cover write/create/modify/delete.
-    assert "Do not claim you already searched, fetched, read, wrote, created" in context
+    assert (
+        "Do not claim you already searched, fetched, read, ran a terminal "
+        "command, wrote, created" in context
+    )
     assert "actual tool output" in context
 
 
@@ -4330,6 +4334,7 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
     )
     command_handler.current_model_profile_name = "fast"
     captured_tools: list[object | None] = []
+    captured_messages: list[LLMMessage] = []
 
     class RouterShouldNotRun:
         provider_name = "ollama"
@@ -4364,8 +4369,9 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
             content_callback=None,
             tools=None,
         ):
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            del profile, timeout_seconds, thinking_enabled, content_callback
             captured_tools.append(tools)
+            captured_messages[:] = list(messages)
             return LLMResponse(
                 provider="ollama",
                 model_name="llama3.2:3b",
@@ -4395,9 +4401,164 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
         assert settings.models["fast"].tool_mode == "none"
         assert reply == "Fast plain chat reply."
         assert captured_tools == [None]
+        capability_note = next(
+            message.content
+            for message in captured_messages
+            if message.role is LLMRole.SYSTEM
+            and "Runtime capability status:" in message.content
+        )
+        assert "Enabled built-in tools: 0" in capability_note
+        assert "run_terminal_command <command>" not in capability_note
         event_types = [event.event_type for event in published_events]
         assert "tool.started" not in event_types
         assert "tool.finished" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_runtime_native_turn_can_invoke_run_terminal_command_and_persist_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                assert tools is not None
+                assert any(
+                    tool.name == "run_terminal_command" for tool in tools
+                )
+                capability_note = next(
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.SYSTEM
+                    and "Runtime capability status:" in message.content
+                )
+                assert "run_terminal_command <command>" in capability_note
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-21T12:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="run_terminal_command",
+                            arguments={
+                                "command": "printf 'hello from terminal'",
+                                "working_directory": str(settings.paths.project_root),
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "run_terminal_command",
+                                        "arguments": {
+                                            "command": "printf 'hello from terminal'",
+                                            "working_directory": str(
+                                                settings.paths.project_root
+                                            ),
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            tool_messages = [
+                message for message in messages if message.role is LLMRole.TOOL
+            ]
+            assert len(tool_messages) == 1
+            assert "hello from terminal" in tool_messages[0].content
+            assert "Exit code: 0" in tool_messages[0].content
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Terminal command completed successfully.",
+                created_at="2026-03-21T12:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(
+        "unclaw.core.router.OllamaProvider",
+        _make_offline_router_provider(),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Run a local terminal command that prints hello.",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Run a local terminal command that prints hello.",
+            tracer=tracer,
+        )
+
+        assert reply == "Terminal command completed successfully."
+        assert call_count == 2
+
+        messages = session_manager.list_messages(session.id)
+        tool_messages = [message for message in messages if message.role is MessageRole.TOOL]
+        assert len(tool_messages) == 1
+        assert "hello from terminal" in tool_messages[0].content
+        assert messages[-1].role is MessageRole.ASSISTANT
+        assert messages[-1].content == "Terminal command completed successfully."
+
+        event_types = [event.event_type for event in published_events]
+        assert "tool.started" in event_types
+        assert "tool.finished" in event_types
+        assert event_types.count("model.succeeded") == 2
     finally:
         session_manager.close()
 

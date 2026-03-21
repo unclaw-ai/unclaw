@@ -37,6 +37,10 @@ from unclaw.tools.notes_tools import (
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION, register_session_tools
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
+from unclaw.tools.terminal_tools import (
+    RUN_TERMINAL_COMMAND_DEFINITION,
+    register_terminal_tools,
+)
 from unclaw.tools.web_tools import (
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,
@@ -62,6 +66,7 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     register_web_tools(registry)
     register_weather_tools(registry)
     register_system_tools(registry)
+    register_terminal_tools(registry)
     register_notes_tools(
         registry,
         notes_dir=Path.cwd().resolve() / NOTES_DIRECTORY_NAME,
@@ -91,6 +96,13 @@ def create_default_tool_registry(
         )
         register_weather_tools(registry)
         register_system_tools(registry)
+        register_terminal_tools(
+            registry,
+            project_root=settings.paths.project_root,
+            configured_roots=settings.app.security.tools.files.allowed_roots,
+            default_working_directory=settings.paths.project_root,
+            max_timeout_seconds=settings.app.runtime.tool_timeout_seconds,
+        )
         register_notes_tools(
             registry,
             notes_dir=settings.paths.data_dir / NOTES_DIRECTORY_NAME,
@@ -160,6 +172,7 @@ __all__ = [
     "LIST_NOTES_DEFINITION",
     "READ_NOTE_DEFINITION",
     "REMEMBER_LONG_TERM_MEMORY_DEFINITION",
+    "RUN_TERMINAL_COMMAND_DEFINITION",
     "SEARCH_LONG_TERM_MEMORY_DEFINITION",
     "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",

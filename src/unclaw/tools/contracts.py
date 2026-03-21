@@ -22,6 +22,7 @@ class ToolPermissionLevel(StrEnum):
 
     LOCAL_READ = "local_read"
     LOCAL_WRITE = "local_write"
+    LOCAL_EXECUTE = "local_execute"
     NETWORK = "network"
 
 

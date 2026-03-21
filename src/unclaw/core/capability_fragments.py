@@ -33,6 +33,7 @@ from unclaw.tools.notes_tools import (
 from unclaw.skills.weather.tool import GET_WEATHER_DEFINITION
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 _MODULE_REFERENCE = "unclaw.core.capability_fragments"
@@ -65,6 +66,7 @@ class CapabilitySummaryLike(Protocol):
     url_fetch_available: bool
     web_search_available: bool
     system_info_available: bool
+    shell_command_execution_available: bool
     memory_summary_available: bool
     model_can_call_tools: bool
     notes_available: bool
@@ -106,6 +108,7 @@ class CapabilitySummaryFlag(StrEnum):
     URL_FETCH_AVAILABLE = "url_fetch_available"
     WEB_SEARCH_AVAILABLE = "web_search_available"
     SYSTEM_INFO_AVAILABLE = "system_info_available"
+    SHELL_COMMAND_EXECUTION_AVAILABLE = "shell_command_execution_available"
     MEMORY_SUMMARY_AVAILABLE = "memory_summary_available"
     MODEL_CAN_CALL_TOOLS = "model_can_call_tools"
     NOTES_AVAILABLE = "notes_available"
@@ -456,6 +459,13 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "including local date/time, day, OS, CPU core count, total RAM, "
             "hostname, and locale.",
         ),
+        "available.shell_command_execution": _static_prompt(
+            "available.shell_command_execution",
+            "run_terminal_command <command>: execute one bounded local shell command "
+            "in a validated working directory. Use it for local inspections, scripts, "
+            "and stepwise automation. Captures stdout/stderr, enforces a timeout, "
+            "and does not provide an interactive terminal.",
+        ),
         "available.notes": _static_prompt(
             "available.notes",
             "create_note / read_note / list_notes / update_note: "
@@ -542,6 +552,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "unavailable.system_info",
             "Local machine and runtime information via system_info.",
         ),
+        "unavailable.shell_command_execution": _static_prompt(
+            "unavailable.shell_command_execution",
+            "Local shell or terminal command execution via run_terminal_command.",
+        ),
         "unavailable.notes": _static_prompt(
             "unavailable.notes",
             "Local notes (create_note, read_note, list_notes, update_note).",
@@ -557,10 +571,6 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         "unavailable.local_file_actions_summary": _dynamic_prompt(
             "_render_unavailable_local_file_actions_summary",
             _render_unavailable_local_file_actions_summary,
-        ),
-        "unavailable.shell_command_execution": _static_prompt(
-            "unavailable.shell_command_execution",
-            "Shell command execution.",
         ),
         "unavailable.any_non_listed_capability": _static_prompt(
             "unavailable.any_non_listed_capability",
@@ -641,6 +651,15 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Use system_info for current local machine facts and runtime facts such "
             "as local date/time, day, OS, CPU, RAM, hostname, and locale.",
         ),
+        "guidance.model_callable.shell_command_execution": _static_prompt(
+            "guidance.model_callable.shell_command_execution",
+            "Use run_terminal_command for local shell inspections, scripts, and "
+            "stepwise automation when direct terminal execution is genuinely needed.",
+            "Never invent terminal output, exit codes, or side effects. If the "
+            "command did not run successfully, say so clearly.",
+            "After execution, summarize the important result instead of dumping raw "
+            "stdout/stderr unless the user asks for the exact output.",
+        ),
         "guidance.model_callable.long_term_memory": _static_prompt(
             "guidance.model_callable.long_term_memory",
             "Long-term memory tools are for previously stored persistent "
@@ -661,9 +680,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "guidance.shared_tool_output_honesty": _static_prompt(
             "guidance.shared_tool_output_honesty",
-            "Do not claim you already searched, fetched, read, wrote, created, "
-            "modified, or deleted anything unless actual tool output for that "
-            "action is present in this conversation.",
+            "Do not claim you already searched, fetched, read, ran a terminal "
+            "command, wrote, created, modified, or deleted anything unless actual "
+            "tool output for that action is present in this conversation.",
             "If tool output is already present in the conversation, treat it as "
             "retrieved context that you may summarize, compare, extract, or "
             "analyze. Do not say you cannot access it, and do not ask the user "
@@ -793,6 +812,23 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         ),
         related_builtin_tool_names=(SYSTEM_INFO_DEFINITION.name,),
         related_summary_flags=(CapabilitySummaryFlag.SYSTEM_INFO_AVAILABLE,),
+    ),
+    _fragment(
+        fragment_id="available.shell_command_execution",
+        capability_id="shell_command_execution",
+        name="Available run_terminal_command tool line",
+        kind=CapabilityFragmentKind.AVAILABLE_TOOL,
+        prompt_symbol="_build_available_tool_lines",
+        prompt_detail="shell_command_execution",
+        availability=CapabilityAvailability(
+            required_summary_flags=(
+                CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
+            ),
+        ),
+        related_builtin_tool_names=(RUN_TERMINAL_COMMAND_DEFINITION.name,),
+        related_summary_flags=(
+            CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
+        ),
     ),
     _fragment(
         fragment_id="available.notes",
@@ -1000,6 +1036,23 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         related_summary_flags=(CapabilitySummaryFlag.SYSTEM_INFO_AVAILABLE,),
     ),
     _fragment(
+        fragment_id="unavailable.shell_command_execution",
+        capability_id="shell_command_execution",
+        name="Shell command execution unavailable line",
+        kind=CapabilityFragmentKind.UNAVAILABLE_CAPABILITY,
+        prompt_symbol="_build_unavailable_lines",
+        prompt_detail="shell_command_execution",
+        availability=CapabilityAvailability(
+            forbidden_summary_flags=(
+                CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
+            ),
+        ),
+        related_builtin_tool_names=(RUN_TERMINAL_COMMAND_DEFINITION.name,),
+        related_summary_flags=(
+            CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
+        ),
+    ),
+    _fragment(
         fragment_id="unavailable.notes",
         capability_id="notes",
         name="Unavailable notes tool family line",
@@ -1052,14 +1105,6 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
             missing_any_builtin_tool_names=_LOCAL_FILE_MUTATION_TOOL_NAMES,
         ),
         related_builtin_tool_names=_LOCAL_FILE_MUTATION_TOOL_NAMES,
-    ),
-    _fragment(
-        fragment_id="unavailable.shell_command_execution",
-        capability_id="unavailable_capabilities",
-        name="Shell command execution unavailable line",
-        kind=CapabilityFragmentKind.UNAVAILABLE_CAPABILITY,
-        prompt_symbol="_build_unavailable_lines",
-        prompt_detail="shell_command_execution",
     ),
     _fragment(
         fragment_id="unavailable.any_non_listed_capability",
@@ -1321,6 +1366,26 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         related_summary_flags=(
             CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
             CapabilitySummaryFlag.SYSTEM_INFO_AVAILABLE,
+        ),
+    ),
+    _fragment(
+        fragment_id="guidance.model_callable.shell_command_execution",
+        capability_id="shell_command_execution",
+        name="Model-callable terminal command guidance block",
+        kind=CapabilityFragmentKind.GUIDANCE,
+        prompt_symbol="build_runtime_capability_context",
+        prompt_detail="shell_command_execution_guidance",
+        availability=CapabilityAvailability(
+            required_summary_flags=(
+                CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
+                CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
+            ),
+        ),
+        tool_mode_relevance=CapabilityToolModeRelevance.MODEL_CALLABLE_ONLY,
+        related_builtin_tool_names=(RUN_TERMINAL_COMMAND_DEFINITION.name,),
+        related_summary_flags=(
+            CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
+            CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
         ),
     ),
     _fragment(

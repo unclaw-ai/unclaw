@@ -22,6 +22,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.settings import load_settings
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
 from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
@@ -42,6 +43,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "web_search",
         "weather_lookup",
         "system_info",
+        "shell_command_execution",
         "notes",
         "local_file_write",
         "local_file_delete",
@@ -63,6 +65,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "available.web_search",
         "available.weather_lookup",
         "available.system_info",
+        "available.shell_command_execution",
         "available.notes",
         "available.local_file_write",
         "available.local_file_delete",
@@ -78,11 +81,11 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "unavailable.web_search",
         "unavailable.weather_lookup",
         "unavailable.system_info",
+        "unavailable.shell_command_execution",
         "unavailable.notes",
         "unavailable.local_file_write",
         "unavailable.session_memory_summary",
         "unavailable.local_file_actions_summary",
-        "unavailable.shell_command_execution",
         "unavailable.any_non_listed_capability",
         "tool_mode.model_callable",
         "tool_mode.user_initiated",
@@ -97,6 +100,7 @@ def test_builtin_capability_fragment_registry_has_stable_fragment_and_capability
         "guidance.model_callable.web_choice.fetch_only",
         "guidance.model_callable.session_history",
         "guidance.model_callable.system_info",
+        "guidance.model_callable.shell_command_execution",
         "guidance.model_callable.long_term_memory",
         "guidance.shared_tool_output_honesty",
         "guidance.unavailable_local_file_actions_warning",
@@ -156,6 +160,13 @@ def test_builtin_capability_fragment_registry_maps_current_tool_concepts_to_frag
         "available.weather_lookup",
         "unavailable.weather_lookup",
     )
+    assert _fragment_ids(
+        registry.get_fragments_for_tool_name(RUN_TERMINAL_COMMAND_DEFINITION.name)
+    ) == (
+        "available.shell_command_execution",
+        "unavailable.shell_command_execution",
+        "guidance.model_callable.shell_command_execution",
+    )
 
     assert _fragment_ids(
         registry.get_fragments_for_summary_flag(
@@ -174,6 +185,7 @@ def test_builtin_capability_fragment_registry_maps_current_tool_concepts_to_frag
         "guidance.model_callable.web_choice.fetch_only",
         "guidance.model_callable.session_history",
         "guidance.model_callable.system_info",
+        "guidance.model_callable.shell_command_execution",
         "guidance.model_callable.long_term_memory",
     )
 
@@ -265,11 +277,11 @@ def test_resolve_builtin_capability_fragments_for_empty_non_native_runtime() -> 
         "unavailable.web_search",
         "unavailable.weather_lookup",
         "unavailable.system_info",
+        "unavailable.shell_command_execution",
         "unavailable.notes",
         "unavailable.local_file_write",
         "unavailable.session_memory_summary",
         "unavailable.local_file_actions_summary",
-        "unavailable.shell_command_execution",
         "unavailable.any_non_listed_capability",
         "tool_mode.user_initiated",
         "guidance.shared_core_rules",
@@ -306,6 +318,7 @@ def test_resolve_builtin_capability_fragments_tracks_native_and_non_native_defau
             "available.web_search",
             "available.weather_lookup",
             "available.system_info",
+            "available.shell_command_execution",
             "available.notes",
             "available.local_file_write",
             "available.local_file_delete",
@@ -321,6 +334,7 @@ def test_resolve_builtin_capability_fragments_tracks_native_and_non_native_defau
             "guidance.model_callable.web_choice.full",
             "guidance.model_callable.session_history",
             "guidance.model_callable.system_info",
+            "guidance.model_callable.shell_command_execution",
             "guidance.model_callable.long_term_memory",
         } <= native_ids
         assert "tool_mode.user_initiated" not in native_ids
@@ -345,6 +359,7 @@ def test_resolve_builtin_capability_fragments_tracks_native_and_non_native_defau
             "available.web_search",
             "available.weather_lookup",
             "available.system_info",
+            "available.shell_command_execution",
             "available.notes",
             "available.local_file_write",
             "available.local_file_delete",

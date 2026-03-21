@@ -30,6 +30,7 @@ from unclaw.tools.notes_tools import CREATE_NOTE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 _LONG_TERM_MEMORY_TOOL_NAMES: frozenset[str] = frozenset(
@@ -77,6 +78,7 @@ class RuntimeCapabilitySummary:
     local_file_write_available: bool = False
     session_history_recall_available: bool = False
     long_term_memory_available: bool = False
+    shell_command_execution_available: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -108,6 +110,9 @@ def build_runtime_capability_summary(
         url_fetch_available=FETCH_URL_TEXT_DEFINITION.name in available_tool_name_set,
         web_search_available=SEARCH_WEB_DEFINITION.name in available_tool_name_set,
         system_info_available=SYSTEM_INFO_DEFINITION.name in available_tool_name_set,
+        shell_command_execution_available=(
+            RUN_TERMINAL_COMMAND_DEFINITION.name in available_tool_name_set
+        ),
         memory_summary_available=memory_summary_available,
         model_can_call_tools=model_can_call_tools,
         notes_available=CREATE_NOTE_DEFINITION.name in available_tool_name_set,
