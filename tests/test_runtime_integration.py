@@ -173,18 +173,21 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert provider_messages[0].content == settings.system_prompt
         assert provider_messages[1].role is LLMRole.SYSTEM
         assert "Enabled built-in tools: 19" in provider_messages[1].content
+        assert "Available built-in tools (compact):" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
         assert "delete_file <path>" in provider_messages[1].content
         assert "move_file <source_path> <destination_path>" in provider_messages[1].content
         assert "rename_file <source_path> <destination_path>" in provider_messages[1].content
         assert "copy_file <source_path> <destination_path>" in provider_messages[1].content
+        assert "/search <query>" in provider_messages[1].content
         assert (
             "/search <query>: search the public web, read a few relevant pages, "
             "and answer naturally from grounded web context with compact sources."
-            in provider_messages[1].content
+            not in provider_messages[1].content
         )
         assert "Session memory and summary access." in provider_messages[1].content
+        assert "Unavailable capabilities:" not in provider_messages[1].content
         assert "no tools available" not in provider_messages[1].content.lower()
         assert provider_messages[-1].content == "Summarize this test run."
         assert captured["profile_name"] == settings.app.default_model_profile

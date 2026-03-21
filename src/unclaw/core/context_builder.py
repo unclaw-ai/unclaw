@@ -14,6 +14,10 @@ from unclaw.core.capabilities import (
     RuntimeCapabilitySummary,
     build_runtime_capability_context,
 )
+from unclaw.core.capability_budget import (
+    CapabilityBudgetPolicy,
+    resolve_capability_budget_policy,
+)
 from unclaw.core.search_grounding import (
     build_search_answer_contract,
     parse_search_tool_history,
@@ -117,10 +121,17 @@ def build_context_messages(
         LLMMessage(role=LLMRole.SYSTEM, content=session_manager.settings.system_prompt)
     ]
     if capability_summary is not None:
+        capability_budget_policy = _resolve_capability_budget_policy_for_context(
+            session_manager=session_manager,
+            model_profile_name=model_profile_name,
+        )
         context_messages.append(
             LLMMessage(
                 role=LLMRole.SYSTEM,
-                content=build_runtime_capability_context(capability_summary),
+                content=build_runtime_capability_context(
+                    capability_summary,
+                    budget_policy=capability_budget_policy,
+                ),
             )
         )
     if system_context_notes:
@@ -144,6 +155,25 @@ def build_context_messages(
         )
 
     return context_messages
+
+
+def _resolve_capability_budget_policy_for_context(
+    *,
+    session_manager: SessionManager,
+    model_profile_name: str | None,
+) -> CapabilityBudgetPolicy | None:
+    if model_profile_name is None:
+        return None
+
+    settings = getattr(session_manager, "settings", None)
+    model_pack = getattr(settings, "model_pack", None)
+    if not isinstance(model_pack, str):
+        return None
+
+    return resolve_capability_budget_policy(
+        model_pack=model_pack,
+        model_profile_name=model_profile_name,
+    )
 
 
 def _limit_history(
