@@ -159,7 +159,6 @@ class RouterSettings:
 class RuntimePaths:
     project_root: Path
     config_dir: Path
-    prompts_dir: Path
     app_config_path: Path
     models_config_path: Path
     system_prompt_path: Path
@@ -583,6 +582,9 @@ def _build_runtime_paths(
     app_settings: AppSettings,
 ) -> RuntimePaths:
     prompts_dir = config_dir / PROMPTS_DIRECTORY_NAME
+    # Phase 6 prompt ownership: only the stable base system prompt remains
+    # config-backed here. Built-in capability wording lives in
+    # unclaw.core.capability_fragments, and skill wording lives in skill manifests.
     data_dir = _resolve_path(project_root, app_settings.directories.data_dir)
     logs_dir = _resolve_path(data_dir, app_settings.directories.logs_dir)
     sessions_dir = _resolve_path(data_dir, app_settings.directories.sessions_dir)
@@ -594,7 +596,6 @@ def _build_runtime_paths(
     return RuntimePaths(
         project_root=project_root,
         config_dir=config_dir,
-        prompts_dir=prompts_dir,
         app_config_path=app_config_path,
         models_config_path=models_config_path,
         system_prompt_path=prompts_dir / SYSTEM_PROMPT_FILE_NAME,

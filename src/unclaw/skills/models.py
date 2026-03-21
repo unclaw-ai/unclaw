@@ -48,10 +48,9 @@ class SkillPromptFragmentKind(StrEnum):
 
 
 class SkillPromptSourceKind(StrEnum):
-    """Where a skill prompt fragment's text is defined."""
+    """Where a skill prompt fragment's text is authored."""
 
     INLINE = "inline"
-    FILE = "file"
 
 
 class SkillPromptBudgetTier(StrEnum):

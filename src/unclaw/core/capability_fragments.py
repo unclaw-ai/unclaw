@@ -83,10 +83,9 @@ class CapabilityFragmentKind(StrEnum):
 
 
 class CapabilityPromptSourceKind(StrEnum):
-    """Where the current prompt text for a fragment comes from."""
+    """Where the current prompt text for a fragment is authored."""
 
     FUNCTION = "function"
-    FILE = "file"
     INLINE = "inline"
 
 
