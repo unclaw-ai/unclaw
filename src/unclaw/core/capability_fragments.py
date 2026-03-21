@@ -1,12 +1,8 @@
-"""Typed built-in capability fragments for future prompt composition.
-
-Phase 1 keeps runtime behaviour unchanged: the live capability prompt still
-renders from ``unclaw.core.capabilities``. This module introduces the durable
-typed metadata layer that future phases can compose from safely.
-"""
+"""Typed built-in capability fragments for runtime prompt composition."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import lru_cache
@@ -38,7 +34,7 @@ from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
-_CAPABILITIES_MODULE_REFERENCE = "unclaw.core.capabilities"
+_MODULE_REFERENCE = "unclaw.core.capability_fragments"
 _NOTES_TOOL_NAMES = (
     CREATE_NOTE_DEFINITION.name,
     READ_NOTE_DEFINITION.name,
@@ -126,6 +122,34 @@ class CapabilityPromptSource:
     reference: str
 
 
+CapabilityFragmentPromptRenderer = Callable[
+    [CapabilitySummaryLike],
+    tuple[str, ...],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityFragmentPrompt:
+    """Live prompt content for one built-in capability fragment."""
+
+    source: CapabilityPromptSource
+    lines: tuple[str, ...] = ()
+    renderer: CapabilityFragmentPromptRenderer | None = None
+
+    def __post_init__(self) -> None:
+        has_static_lines = bool(self.lines)
+        has_renderer = self.renderer is not None
+        if has_static_lines == has_renderer:
+            raise ValueError(
+                "CapabilityFragmentPrompt must define exactly one of lines or renderer."
+            )
+
+    def render_lines(self, summary: CapabilitySummaryLike) -> tuple[str, ...]:
+        if self.renderer is not None:
+            return self.renderer(summary)
+        return self.lines
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityAvailability:
     """Typed availability semantics for a capability fragment."""
@@ -181,7 +205,7 @@ class CapabilityFragment:
     capability_id: str
     name: str
     kind: CapabilityFragmentKind
-    prompt_source: CapabilityPromptSource
+    prompt: CapabilityFragmentPrompt
     availability: CapabilityAvailability = field(default_factory=CapabilityAvailability)
     tool_mode_relevance: CapabilityToolModeRelevance = (
         CapabilityToolModeRelevance.SHARED
@@ -190,8 +214,23 @@ class CapabilityFragment:
     related_summary_flags: tuple[CapabilitySummaryFlag, ...] = ()
     description: str | None = None
 
+    @property
+    def prompt_source(self) -> CapabilityPromptSource:
+        return self.prompt.source
+
     def matches(self, summary: CapabilitySummaryLike) -> bool:
         return self.availability.matches(summary)
+
+    def render_lines(self, summary: CapabilitySummaryLike) -> tuple[str, ...]:
+        return self.prompt.render_lines(summary)
+
+
+@dataclass(frozen=True, slots=True)
+class RenderedCapabilityFragment:
+    """Resolved built-in capability fragment plus its live rendered lines."""
+
+    fragment: CapabilityFragment
+    rendered_lines: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,14 +342,332 @@ class BuiltinCapabilityFragmentRegistry:
         )
 
 
-def _capabilities_source(
-    symbol_name: str,
-    detail: str,
-) -> CapabilityPromptSource:
+def _inline_source(fragment_id: str) -> CapabilityPromptSource:
+    return CapabilityPromptSource(
+        kind=CapabilityPromptSourceKind.INLINE,
+        reference=f"{_MODULE_REFERENCE}:{fragment_id}",
+    )
+
+
+def _function_source(function_name: str) -> CapabilityPromptSource:
     return CapabilityPromptSource(
         kind=CapabilityPromptSourceKind.FUNCTION,
-        reference=f"{_CAPABILITIES_MODULE_REFERENCE}.{symbol_name}:{detail}",
+        reference=f"{_MODULE_REFERENCE}.{function_name}",
     )
+
+
+def _static_prompt(
+    fragment_id: str,
+    *lines: str,
+) -> CapabilityFragmentPrompt:
+    return CapabilityFragmentPrompt(
+        source=_inline_source(fragment_id),
+        lines=tuple(lines),
+    )
+
+
+def _dynamic_prompt(
+    function_name: str,
+    renderer: CapabilityFragmentPromptRenderer,
+) -> CapabilityFragmentPrompt:
+    return CapabilityFragmentPrompt(
+        source=_function_source(function_name),
+        renderer=renderer,
+    )
+
+
+def _missing_local_file_actions(summary: CapabilitySummaryLike) -> tuple[str, ...]:
+    available_tool_names = frozenset(summary.available_builtin_tool_names)
+    actions: list[str] = []
+
+    if DELETE_FILE_DEFINITION.name not in available_tool_names:
+        actions.append("delete")
+    if MOVE_FILE_DEFINITION.name not in available_tool_names:
+        actions.append("move")
+    if RENAME_FILE_DEFINITION.name not in available_tool_names:
+        actions.append("rename")
+    if COPY_FILE_DEFINITION.name not in available_tool_names:
+        actions.append("copy")
+
+    return tuple(actions)
+
+
+def _format_local_file_action_list(actions: tuple[str, ...]) -> str | None:
+    if not actions:
+        return None
+    if len(actions) == 1:
+        return actions[0]
+    if len(actions) == 2:
+        return f"{actions[0]} or {actions[1]}"
+    return f"{', '.join(actions[:-1])}, or {actions[-1]}"
+
+
+def _render_unavailable_local_file_actions_summary(
+    summary: CapabilitySummaryLike,
+) -> tuple[str, ...]:
+    actions = _format_local_file_action_list(_missing_local_file_actions(summary))
+    if actions is None:
+        return ()
+    return (
+        f"{actions.capitalize()} local files or directories (no such tool is registered).",
+    )
+
+
+def _render_unavailable_local_file_actions_warning(
+    summary: CapabilitySummaryLike,
+) -> tuple[str, ...]:
+    actions = _format_local_file_action_list(_missing_local_file_actions(summary))
+    if actions is None:
+        return ()
+    return (
+        f"If the user asks to {actions} a file or directory, say clearly this "
+        "capability does not exist. Do not suggest it might work after confirmation.",
+    )
+
+
+_BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
+    {
+        "available.local_file_read": _static_prompt(
+            "available.local_file_read",
+            "/read <path>: read local .txt, .md, .json, or .csv files inside "
+            "allowed roots. Other formats (pdf, docx, xlsx, etc.) are not "
+            "supported in V1.",
+        ),
+        "available.local_directory_listing": _static_prompt(
+            "available.local_directory_listing",
+            "/ls [path]: list local directories inside allowed roots.",
+        ),
+        "available.url_fetch": _static_prompt(
+            "available.url_fetch",
+            "/fetch <url>: fetch one public URL and extract text.",
+        ),
+        "available.web_search": _static_prompt(
+            "available.web_search",
+            "/search <query>: search the public web, read a few relevant pages, "
+            "and answer naturally from grounded web context with compact sources.",
+        ),
+        "available.system_info": _static_prompt(
+            "available.system_info",
+            "system_info: return current local machine and runtime facts, "
+            "including local date/time, day, OS, CPU core count, total RAM, "
+            "hostname, and locale.",
+        ),
+        "available.notes": _static_prompt(
+            "available.notes",
+            "create_note / read_note / list_notes / update_note: "
+            "create, read, list, or overwrite local markdown notes.",
+        ),
+        "available.local_file_write": _static_prompt(
+            "available.local_file_write",
+            "write_text_file <path>: write a new local file. "
+            "Relative paths are created inside data/files/ by default. "
+            "Default is overwrite=false — fails if the file already exists. "
+            "Only use overwrite=true when the user explicitly intends to replace an existing file.",
+        ),
+        "available.local_file_delete": _static_prompt(
+            "available.local_file_delete",
+            "delete_file <path>: delete one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Requires confirm=true and only deletes files, not directories.",
+        ),
+        "available.local_file_move": _static_prompt(
+            "available.local_file_move",
+            "move_file <source_path> <destination_path>: move one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only moves files, not directories.",
+        ),
+        "available.local_file_rename": _static_prompt(
+            "available.local_file_rename",
+            "rename_file <source_path> <destination_path>: rename one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only renames files, not directories.",
+        ),
+        "available.local_file_copy": _static_prompt(
+            "available.local_file_copy",
+            "copy_file <source_path> <destination_path>: copy one local file. "
+            "Relative paths resolve inside data/files/ by default. "
+            "Default is overwrite=false — fails if the destination already exists. "
+            "Only copies files, not directories.",
+        ),
+        "available.session_history_recall": _static_prompt(
+            "available.session_history_recall",
+            "inspect_session_history: return an exact, deterministic list of "
+            "persisted messages for the current session. "
+            "Supports filter_role (user/assistant/tool), nth (1-indexed lookup), "
+            "and limit. Use this tool for exact questions about prior prompts, "
+            "their order, or message counts.",
+        ),
+        "available.long_term_memory": _static_prompt(
+            "available.long_term_memory",
+            "remember_long_term_memory / search_long_term_memory / "
+            "list_long_term_memory / forget_long_term_memory: "
+            "store, search, list, or delete persistent cross-session facts "
+            "and preferences. "
+            "Not injected automatically — call tools explicitly. "
+            "Use search_long_term_memory for targeted recall and "
+            "list_long_term_memory for broad recall. "
+            "Not for session message history — use inspect_session_history for that.",
+        ),
+        "available.session_memory_summary": _static_prompt(
+            "available.session_memory_summary",
+            "Session memory and summary access.",
+        ),
+        "unavailable.local_file_read": _static_prompt(
+            "unavailable.local_file_read",
+            "Local file read via /read <path>.",
+        ),
+        "unavailable.local_directory_listing": _static_prompt(
+            "unavailable.local_directory_listing",
+            "Local directory listing via /ls [path].",
+        ),
+        "unavailable.url_fetch": _static_prompt(
+            "unavailable.url_fetch",
+            "Direct URL fetch via /fetch <url>.",
+        ),
+        "unavailable.web_search": _static_prompt(
+            "unavailable.web_search",
+            "Web search via /search <query>.",
+        ),
+        "unavailable.system_info": _static_prompt(
+            "unavailable.system_info",
+            "Local machine and runtime information via system_info.",
+        ),
+        "unavailable.notes": _static_prompt(
+            "unavailable.notes",
+            "Local notes (create_note, read_note, list_notes, update_note).",
+        ),
+        "unavailable.local_file_write": _static_prompt(
+            "unavailable.local_file_write",
+            "Local file write via write_text_file.",
+        ),
+        "unavailable.session_memory_summary": _static_prompt(
+            "unavailable.session_memory_summary",
+            "Session memory and summary access.",
+        ),
+        "unavailable.local_file_actions_summary": _dynamic_prompt(
+            "_render_unavailable_local_file_actions_summary",
+            _render_unavailable_local_file_actions_summary,
+        ),
+        "unavailable.shell_command_execution": _static_prompt(
+            "unavailable.shell_command_execution",
+            "Shell command execution.",
+        ),
+        "unavailable.any_non_listed_capability": _static_prompt(
+            "unavailable.any_non_listed_capability",
+            "Any capability that is not listed as available above.",
+        ),
+        "tool_mode.model_callable": _static_prompt(
+            "tool_mode.model_callable",
+            "Tool invocation mode: model-callable (you may call tools directly this turn).",
+        ),
+        "tool_mode.user_initiated": _static_prompt(
+            "tool_mode.user_initiated",
+            "Tool invocation mode: user-initiated slash commands only "
+            "(you cannot call tools directly this turn).",
+        ),
+        "guidance.shared_core_rules": _static_prompt(
+            "guidance.shared_core_rules",
+            "Do not claim you have no tool access when one or more built-in tools are available.",
+            "You may say you can use Unclaw built-in tools that are listed as available.",
+        ),
+        "guidance.model_callable.core_rules": _static_prompt(
+            "guidance.model_callable.core_rules",
+            "Use only the listed built-in tools and base the final answer on their results.",
+            "If the answer is complete and safe from the conversation alone, reply directly without tools.",
+            "For compound requests, decompose into the minimum useful sub-tasks.",
+            "Use tools only where they add needed runtime or external information.",
+            "Preserve the user's requested order when practical.",
+            "Do not call tools for parts already answerable from the conversation.",
+            "Combine tool results into one coherent final answer.",
+            "Only claim a file was written, created, or modified if write_text_file "
+            "or a notes write tool (create_note, update_note) output is present in "
+            "this conversation. If no such tool ran, say the action has not happened yet.",
+        ),
+        "guidance.user_initiated.core_rules": _static_prompt(
+            "guidance.user_initiated.core_rules",
+            "Tools listed above are available only when the user types the slash "
+            "command. You cannot invoke them yourself in this turn.",
+            "Do not say \"let me search\" or \"I will look that up\" as if you can "
+            "perform the action right now.",
+            "You cannot write, modify, or create any file or note in this turn. If "
+            "the user asks you to do so, say the action was not performed — you have "
+            "not written or changed anything.",
+        ),
+        "guidance.model_callable.local_choice.full": _static_prompt(
+            "guidance.model_callable.local_choice.full",
+            "Use list_directory for local directories and read_text_file for supported local text files.",
+        ),
+        "guidance.model_callable.local_choice.list_only": _static_prompt(
+            "guidance.model_callable.local_choice.list_only",
+            "Use list_directory for local directories.",
+        ),
+        "guidance.model_callable.local_choice.read_only": _static_prompt(
+            "guidance.model_callable.local_choice.read_only",
+            "Use read_text_file for supported local text files.",
+        ),
+        "guidance.model_callable.web_choice.full": _static_prompt(
+            "guidance.model_callable.web_choice.full",
+            "Use search_web for up-to-date external information. Use fetch_url_text "
+            "for a specific public URL.",
+        ),
+        "guidance.model_callable.web_choice.search_only": _static_prompt(
+            "guidance.model_callable.web_choice.search_only",
+            "Use search_web for up-to-date external information.",
+        ),
+        "guidance.model_callable.web_choice.fetch_only": _static_prompt(
+            "guidance.model_callable.web_choice.fetch_only",
+            "Use fetch_url_text for a specific public URL.",
+        ),
+        "guidance.model_callable.session_history": _static_prompt(
+            "guidance.model_callable.session_history",
+            "Use inspect_session_history to answer exact questions about prior "
+            "prompts, message order, or counts. Do not guess from memory — call "
+            "the tool for exact recall. The tool supports filter_role "
+            "(user/assistant/tool), nth (1-indexed lookup), and limit. Reply to "
+            "the user in their language after reading the tool result.",
+        ),
+        "guidance.model_callable.system_info": _static_prompt(
+            "guidance.model_callable.system_info",
+            "Use system_info for current local machine facts and runtime facts such "
+            "as local date/time, day, OS, CPU, RAM, hostname, and locale.",
+        ),
+        "guidance.model_callable.long_term_memory": _static_prompt(
+            "guidance.model_callable.long_term_memory",
+            "Long-term memory tools are for previously stored persistent "
+            "cross-session facts or preferences. They are not injected automatically.",
+            "Use them for stable personal facts, preferences, and hardware or setup information.",
+            "Use search_long_term_memory for targeted recall of a stored fact.",
+            "For search_long_term_memory, pass concise semantic query terms for "
+            "the topic, even if the user asked in another language.",
+            "Use list_long_term_memory for broad recall of stored memories.",
+            "Use remember_long_term_memory only when the user explicitly wants a "
+            "fact saved for later or explicitly corrects a stored fact.",
+            "Use forget_long_term_memory only when the user explicitly wants a "
+            "stored memory removed.",
+            "Use system_info for current local machine facts, not long-term memory.",
+            "Do not use long-term memory tools for current session message history "
+            "or message order; use inspect_session_history for that.",
+            "Do not auto-store facts that were not explicitly requested for storage.",
+        ),
+        "guidance.shared_tool_output_honesty": _static_prompt(
+            "guidance.shared_tool_output_honesty",
+            "Do not claim you already searched, fetched, read, wrote, created, "
+            "modified, or deleted anything unless actual tool output for that "
+            "action is present in this conversation.",
+            "If tool output is already present in the conversation, treat it as "
+            "retrieved context that you may summarize, compare, extract, or "
+            "analyze. Do not say you cannot access it, and do not ask the user "
+            "to paste it again.",
+            "If a capability is unavailable, say so clearly instead of implying it exists.",
+        ),
+        "guidance.unavailable_local_file_actions_warning": _dynamic_prompt(
+            "_render_unavailable_local_file_actions_warning",
+            _render_unavailable_local_file_actions_warning,
+        ),
+    }
+)
 
 
 def _fragment(
@@ -329,12 +686,13 @@ def _fragment(
     related_summary_flags: tuple[CapabilitySummaryFlag, ...] = (),
     description: str | None = None,
 ) -> CapabilityFragment:
+    del prompt_symbol, prompt_detail
     return CapabilityFragment(
         fragment_id=fragment_id,
         capability_id=capability_id,
         name=name,
         kind=kind,
-        prompt_source=_capabilities_source(prompt_symbol, prompt_detail),
+        prompt=_BUILTIN_CAPABILITY_PROMPTS[fragment_id],
         availability=availability or CapabilityAvailability(),
         tool_mode_relevance=tool_mode_relevance,
         related_builtin_tool_names=related_builtin_tool_names,
@@ -994,16 +1352,45 @@ def resolve_builtin_capability_fragments(
     return load_builtin_capability_fragment_registry().resolve_fragments(summary)
 
 
+def render_builtin_capability_fragment(
+    fragment: CapabilityFragment,
+    summary: CapabilitySummaryLike,
+) -> RenderedCapabilityFragment:
+    """Render one resolved built-in capability fragment into prompt lines."""
+    return RenderedCapabilityFragment(
+        fragment=fragment,
+        rendered_lines=fragment.render_lines(summary),
+    )
+
+
+def resolve_rendered_builtin_capability_fragments(
+    summary: CapabilitySummaryLike,
+) -> tuple[RenderedCapabilityFragment, ...]:
+    """Resolve and render built-in capability fragments in registry order."""
+    rendered_fragments: list[RenderedCapabilityFragment] = []
+
+    for fragment in resolve_builtin_capability_fragments(summary):
+        rendered_fragment = render_builtin_capability_fragment(fragment, summary)
+        if rendered_fragment.rendered_lines:
+            rendered_fragments.append(rendered_fragment)
+
+    return tuple(rendered_fragments)
+
+
 __all__ = [
     "BuiltinCapabilityFragmentRegistry",
     "CapabilityAvailability",
     "CapabilityFragment",
+    "CapabilityFragmentPrompt",
     "CapabilityFragmentKind",
     "CapabilityPromptSource",
     "CapabilityPromptSourceKind",
+    "RenderedCapabilityFragment",
     "CapabilitySummaryFlag",
     "CapabilityToolModeRelevance",
     "list_builtin_capability_fragments",
     "load_builtin_capability_fragment_registry",
+    "render_builtin_capability_fragment",
     "resolve_builtin_capability_fragments",
+    "resolve_rendered_builtin_capability_fragments",
 ]

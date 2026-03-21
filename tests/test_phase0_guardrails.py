@@ -33,18 +33,26 @@ def test_phase0_repo_settings_lock_shipped_pack_resolution_contract() -> None:
         (repo_root / "config" / "models.yaml").read_text(encoding="utf-8")
     )
     assert isinstance(shipped_models_payload, dict)
+    shipped_pack_name = shipped_models_payload.get(
+        "active_pack",
+        shipped_models_payload.get("pack"),
+    )
+    assert isinstance(shipped_pack_name, str)
     raw_dev_profiles = shipped_models_payload["dev_profiles"]
     assert isinstance(raw_dev_profiles, dict)
 
-    power_profiles = get_model_pack_profiles("power")
+    shipped_pack_profiles = get_model_pack_profiles(shipped_pack_name)
 
-    assert settings.model_pack == "power"
+    assert settings.model_pack == shipped_pack_name
     assert settings.app.default_model_profile == "main"
-    assert set(settings.models) == set(power_profiles)
+    assert set(settings.models) == set(shipped_pack_profiles)
     assert set(settings.dev_profiles) == set(raw_dev_profiles)
-    assert settings.default_model.model_name == power_profiles["main"].model_name
+    assert (
+        settings.default_model.model_name
+        == shipped_pack_profiles["main"].model_name
+    )
 
-    for profile_name, expected_profile in power_profiles.items():
+    for profile_name, expected_profile in shipped_pack_profiles.items():
         active_profile = settings.models[profile_name]
         assert active_profile.provider == expected_profile.provider
         assert active_profile.model_name == expected_profile.model_name

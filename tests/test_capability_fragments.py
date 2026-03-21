@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import pytest
 
-from unclaw.core.capabilities import build_runtime_capability_summary
+from unclaw.core.capabilities import (
+    build_runtime_capability_context,
+    build_runtime_capability_summary,
+)
 from unclaw.core.capability_fragments import (
     CapabilityFragmentKind,
     CapabilityPromptSourceKind,
     CapabilitySummaryFlag,
     CapabilityToolModeRelevance,
+    RenderedCapabilityFragment,
     load_builtin_capability_fragment_registry,
+    render_builtin_capability_fragment,
+    resolve_rendered_builtin_capability_fragments,
     resolve_builtin_capability_fragments,
 )
 from unclaw.core.executor import create_default_tool_registry
@@ -99,10 +105,10 @@ def test_builtin_capability_fragment_registry_exposes_typed_metadata_and_indexes
     system_info_fragment = registry.get_fragment("available.system_info")
     assert system_info_fragment.capability_id == "system_info"
     assert system_info_fragment.kind is CapabilityFragmentKind.AVAILABLE_TOOL
-    assert system_info_fragment.prompt_source.kind is CapabilityPromptSourceKind.FUNCTION
+    assert system_info_fragment.prompt_source.kind is CapabilityPromptSourceKind.INLINE
     assert (
         system_info_fragment.prompt_source.reference
-        == "unclaw.core.capabilities._build_available_tool_lines:system_info"
+        == "unclaw.core.capability_fragments:available.system_info"
     )
     assert system_info_fragment.related_builtin_tool_names == (
         SYSTEM_INFO_DEFINITION.name,
@@ -160,6 +166,79 @@ def test_builtin_capability_fragment_registry_maps_current_tool_concepts_to_frag
         "guidance.model_callable.system_info",
         "guidance.model_callable.long_term_memory",
     )
+
+
+def test_rendered_builtin_capability_fragments_come_from_fragment_registry_content() -> None:
+    summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+    registry = load_builtin_capability_fragment_registry()
+
+    dynamic_fragment = registry.get_fragment("unavailable.local_file_actions_summary")
+    assert dynamic_fragment.prompt_source.kind is CapabilityPromptSourceKind.FUNCTION
+    assert (
+        dynamic_fragment.prompt_source.reference
+        == "unclaw.core.capability_fragments._render_unavailable_local_file_actions_summary"
+    )
+
+    rendered_dynamic_fragment = render_builtin_capability_fragment(dynamic_fragment, summary)
+    assert rendered_dynamic_fragment.rendered_lines == (
+        "Delete, move, rename, or copy local files or directories (no such tool is registered).",
+    )
+
+    rendered_ids = tuple(
+        rendered.fragment.fragment_id
+        for rendered in resolve_rendered_builtin_capability_fragments(summary)
+    )
+    assert "unavailable.local_file_actions_summary" in rendered_ids
+
+
+def test_build_runtime_capability_context_composes_rendered_fragments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+    registry = load_builtin_capability_fragment_registry()
+
+    monkeypatch.setattr(
+        "unclaw.core.capabilities.resolve_rendered_builtin_capability_fragments",
+        lambda _summary: (
+            render_builtin_capability_fragment(
+                registry.get_fragment("available.url_fetch"),
+                summary,
+            ),
+            render_builtin_capability_fragment(
+                registry.get_fragment("available.session_memory_summary"),
+                summary,
+            ),
+            RenderedCapabilityFragment(
+                fragment=registry.get_fragment("unavailable.web_search"),
+                rendered_lines=("Registry-controlled unavailable line.",),
+            ),
+            RenderedCapabilityFragment(
+                fragment=registry.get_fragment("tool_mode.user_initiated"),
+                rendered_lines=("Registry-controlled tool mode.",),
+            ),
+            RenderedCapabilityFragment(
+                fragment=registry.get_fragment("guidance.shared_core_rules"),
+                rendered_lines=("Registry-controlled rule.",),
+            ),
+        ),
+    )
+
+    context = build_runtime_capability_context(summary)
+
+    assert "/fetch <url>: fetch one public URL and extract text." in context
+    assert "Other available runtime capabilities:" in context
+    assert "Session memory and summary access." in context
+    assert "- Registry-controlled unavailable line." in context
+    assert "Registry-controlled tool mode." in context
+    assert "- Registry-controlled rule." in context
 
 
 def test_resolve_builtin_capability_fragments_for_empty_non_native_runtime() -> None:
