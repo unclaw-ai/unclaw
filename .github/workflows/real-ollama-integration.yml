@@ -35,8 +35,7 @@ jobs:
     timeout-minutes: 45
     env:
       REAL_OLLAMA: "1"
-      # Smallest repo-aligned model that is still credible for native tool calls in CI.
-      REAL_OLLAMA_MODEL: "qwen3.5:4b"
+      REAL_OLLAMA_MODEL: "qwen3:1.7b"
       PYTHONUNBUFFERED: "1"
     steps:
       - name: Check out repository
@@ -69,6 +68,28 @@ jobs:
 
       - name: Pull CI model
         run: ollama pull "${REAL_OLLAMA_MODEL}"
+
+      - name: Warm up CI model
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          req = urllib.request.Request(
+              "http://127.0.0.1:11434/api/generate",
+              data=json.dumps({
+                  "model": os.environ["REAL_OLLAMA_MODEL"],
+                  "prompt": "Reply with exactly: ok",
+                  "stream": False,
+                  "keep_alive": "15m",
+              }).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+          )
+
+          with urllib.request.urlopen(req, timeout=600) as response:
+              print(response.read().decode("utf-8"))
+          PY
 
       - name: Run real Ollama integration subset
         run: >
