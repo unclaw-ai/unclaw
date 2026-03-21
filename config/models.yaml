@@ -1,4 +1,4 @@
-active_pack: power
+active_pack: lite
 dev_profiles:
   fast:
     provider: ollama
