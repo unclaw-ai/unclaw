@@ -1,4 +1,8 @@
-"""Runtime capability summaries for prompt honesty and future CLI UX."""
+"""Runtime capability summaries for prompt honesty and future CLI UX.
+
+Rendered capability text still lives in this module. Typed built-in capability
+fragment metadata now lives alongside it in ``unclaw.core.capability_fragments``.
+"""
 
 from __future__ import annotations
 

@@ -10,8 +10,8 @@ paths:
   files_dir: files
   database_file: memory/app.db
 logging:
-  level: INFO
-  mode: simple
+  level: DEBUG
+  mode: full
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
