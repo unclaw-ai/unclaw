@@ -30,9 +30,9 @@ from unclaw.tools.notes_tools import (
     READ_NOTE_DEFINITION,
     UPDATE_NOTE_DEFINITION,
 )
+from unclaw.skills.weather.tool import GET_WEATHER_DEFINITION
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
-from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 _MODULE_REFERENCE = "unclaw.core.capability_fragments"

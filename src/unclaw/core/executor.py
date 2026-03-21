@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from unclaw.constants import NOTES_DIRECTORY_NAME
 from unclaw.memory.long_term_store import LongTermStore
 from unclaw.settings import Settings
+from unclaw.skills.weather.tool import GET_WEATHER_DEFINITION, register_weather_tools
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
@@ -36,7 +37,6 @@ from unclaw.tools.notes_tools import (
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION, register_session_tools
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION, register_system_tools
-from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION, register_weather_tools
 from unclaw.tools.web_tools import (
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,

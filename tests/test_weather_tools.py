@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolCall
-from unclaw.tools.dispatcher import ToolDispatcher
-from unclaw.tools.weather_tools import (
+from unclaw.skills.weather import tool as weather_tool_module
+from unclaw.skills.weather.tool import (
     GET_WEATHER_DEFINITION,
     WeatherLookupError,
     WeatherLookupRequest,
@@ -16,6 +16,8 @@ from unclaw.tools.weather_tools import (
     get_weather_async,
     lookup_weather,
 )
+from unclaw.tools.contracts import ToolCall
+from unclaw.tools.dispatcher import ToolDispatcher
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +72,7 @@ def test_lookup_weather_returns_typed_payload_from_dedicated_backend(
     )
 
     monkeypatch.setattr(
-        "unclaw.tools.weather_tools._fetch_json_document",
+        "unclaw.skills.weather.tool._fetch_json_document",
         lambda _url: next(responses),
     )
 
@@ -94,7 +96,7 @@ def test_get_weather_formats_result_and_returns_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "unclaw.tools.weather_tools.lookup_weather",
+        "unclaw.skills.weather.tool.lookup_weather",
         lambda request: lookup_weather_result_fixture(request.location),
     )
 
@@ -114,7 +116,7 @@ def test_get_weather_fails_cleanly_for_unknown_location(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "unclaw.tools.weather_tools._fetch_json_document",
+        "unclaw.skills.weather.tool._fetch_json_document",
         lambda _url: {"results": []},
     )
 
@@ -124,6 +126,87 @@ def test_get_weather_fails_cleanly_for_unknown_location(
 
     assert result.success is False
     assert result.error == "Could not resolve weather location 'Atlantis'."
+
+
+def test_location_variants_normalize_long_form_queries() -> None:
+    assert weather_tool_module._iter_location_query_variants(
+        "  Marseille ,  Provence-Alpes-Côte d'Azur ,, France  "
+    ) == (
+        "Marseille, Provence-Alpes-Côte d'Azur, France",
+        "Marseille, Provence-Alpes-Cote d'Azur, France",
+        "Marseille, Provence-Alpes-Côte d'Azur",
+        "Marseille, Provence-Alpes-Cote d'Azur",
+        "Marseille, France",
+        "Marseille",
+    )
+
+
+def test_lookup_weather_retries_progressively_simpler_location_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted_queries: list[str] = []
+
+    def fake_fetch_json_document(url: str) -> dict[str, object]:
+        if url.startswith("https://geocoding-api.open-meteo.com/"):
+            query = parse_qs(urlparse(url).query)["name"][0]
+            attempted_queries.append(query)
+            if query != "Marseille, France":
+                return {"results": []}
+            return {
+                "results": [
+                    {
+                        "name": "Marseille",
+                        "latitude": 43.2965,
+                        "longitude": 5.3698,
+                        "timezone": "Europe/Paris",
+                        "admin1": "Provence-Alpes-Côte d'Azur",
+                        "country": "France",
+                    }
+                ]
+            }
+
+        return {
+            "current": {
+                "time": "2026-03-21T12:00",
+                "temperature_2m": 18.4,
+                "apparent_temperature": 18.0,
+                "precipitation": 0.0,
+                "weather_code": 1,
+                "wind_speed_10m": 11.2,
+                "wind_direction_10m": 160,
+            },
+            "daily": {
+                "time": ["2026-03-21"],
+                "weather_code": [1],
+                "temperature_2m_max": [19.0],
+                "temperature_2m_min": [11.0],
+                "precipitation_probability_max": [10],
+                "precipitation_sum": [0.0],
+                "wind_speed_10m_max": [18.1],
+            },
+        }
+
+    monkeypatch.setattr(
+        "unclaw.skills.weather.tool._fetch_json_document",
+        fake_fetch_json_document,
+    )
+
+    response = lookup_weather(
+        WeatherLookupRequest(
+            location="  Marseille , Provence-Alpes-Côte d'Azur ,, France  "
+        )
+    )
+
+    assert response.resolved_location.display_name() == (
+        "Marseille, Provence-Alpes-Côte d'Azur, France"
+    )
+    assert attempted_queries == [
+        "Marseille, Provence-Alpes-Côte d'Azur, France",
+        "Marseille, Provence-Alpes-Cote d'Azur, France",
+        "Marseille, Provence-Alpes-Côte d'Azur",
+        "Marseille, Provence-Alpes-Cote d'Azur",
+        "Marseille, France",
+    ]
 
 
 def test_get_weather_validates_required_location_argument() -> None:
@@ -151,7 +234,7 @@ def test_get_weather_async_runs_sync_weather_lookup_in_worker_thread(
         observed["call"] = call
         return lookup_weather_tool_result_fixture()
 
-    monkeypatch.setattr("unclaw.tools.weather_tools.get_weather", fake_get_weather)
+    monkeypatch.setattr("unclaw.skills.weather.tool.get_weather", fake_get_weather)
 
     result = asyncio.run(
         get_weather_async(
@@ -182,7 +265,7 @@ def lookup_weather_result_fixture(location: str):
 
 
 def lookup_weather_response_fixture():
-    from unclaw.tools.weather_tools import (
+    from unclaw.skills.weather.tool import (
         WeatherCurrentConditions,
         WeatherDailyForecast,
         WeatherLookupResponse,
