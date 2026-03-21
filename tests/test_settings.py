@@ -164,6 +164,34 @@ def test_load_settings_reads_runtime_guardrail_config(
     assert settings.app.runtime.max_tool_calls_per_turn == 8
 
 
+def test_load_settings_reads_enabled_skill_ids_from_config(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.skills.enabled_skill_ids == ("information.weather",)
+
+
+def test_load_settings_errors_when_enabled_skill_id_is_unknown(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["skills"]["enabled_skill_ids"] = ["ghost.skill"]
+    _write_yaml(app_config_path, app_payload)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(project_root=project_root)
+
+    assert (
+        str(exc_info.value)
+        == "Configuration key 'skills.enabled_skill_ids' contains unknown skill id(s): ghost.skill."
+    )
+
+
 def test_load_settings_errors_when_runtime_tool_budget_is_negative(
     make_temp_project,
 ) -> None:

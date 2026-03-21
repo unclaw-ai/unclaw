@@ -1,4 +1,4 @@
-"""Static internal skill manifests for the Phase 4 skills skeleton."""
+"""Static internal skill manifests for the shipped internal skills package."""
 
 from __future__ import annotations
 
@@ -112,6 +112,67 @@ _FABRICATION_THREE_D_PRINTER_SKILL = SkillManifest(
 )
 
 
+_INFORMATION_WEATHER_SKILL = SkillManifest(
+    skill_id="information.weather",
+    display_name="Weather",
+    version="0.1.0",
+    description=(
+        "Optional workflow skill for live weather, forecasts, and "
+        "weather-sensitive planning questions."
+    ),
+    install_mode=SkillInstallMode.OPT_IN,
+    tags=("information", "weather", "forecast"),
+    prompt_fragments=(
+        _fragment(
+            skill_id="information.weather",
+            fragment_suffix="context.overview",
+            name="Weather overview",
+            kind=SkillPromptFragmentKind.CONTEXT,
+            lines=(
+                "This skill scopes work around current weather, forecasts, and weather-sensitive plans.",
+            ),
+        ),
+        _fragment(
+            skill_id="information.weather",
+            fragment_suffix="guidance.live_lookup",
+            name="Weather live lookup guidance",
+            kind=SkillPromptFragmentKind.GUIDANCE,
+            lines=(
+                "For current weather, forecast, or severe-weather questions, use search_web before stating weather details.",
+                "Use a precise place and date or time window in the query; if the user was vague, ask briefly or state the assumption you used.",
+            ),
+        ),
+        _fragment(
+            skill_id="information.weather",
+            fragment_suffix="safety.grounded_claims",
+            name="Weather grounded-claims safety",
+            kind=SkillPromptFragmentKind.SAFETY,
+            lines=(
+                "Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by search results from this conversation.",
+            ),
+        ),
+    ),
+    tool_bindings=(
+        SkillToolBinding(
+            binding_id="information.weather.search",
+            tool_name="search_web",
+            description="Ground live weather and forecast answers with web search.",
+            required=True,
+        ),
+    ),
+    availability=SkillAvailability(
+        supported_model_profiles=("main", "deep", "codex"),
+        required_builtin_tool_names=("search_web",),
+        requires_model_tool_support=True,
+    ),
+    budget=SkillBudgetMetadata(
+        min_budget_tier=SkillPromptBudgetTier.COMPACT,
+        prompt_priority=70,
+        estimated_prompt_lines=4,
+    ),
+)
+
+
 _MESSAGING_TELEGRAM_SKILL = SkillManifest(
     skill_id="messaging.telegram",
     display_name="Telegram Messaging",
@@ -179,6 +240,7 @@ _MESSAGING_TELEGRAM_SKILL = SkillManifest(
 
 _INTERNAL_SKILL_MANIFESTS = (
     _FABRICATION_THREE_D_PRINTER_SKILL,
+    _INFORMATION_WEATHER_SKILL,
     _MESSAGING_TELEGRAM_SKILL,
 )
 

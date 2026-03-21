@@ -13,6 +13,10 @@ from unclaw.skills.models import (
     SkillToolBinding,
 )
 from unclaw.skills.registry import SkillRegistry, load_skill_registry
+from unclaw.skills.runtime import (
+    build_active_skill_context_notes,
+    resolve_active_skill_manifests,
+)
 
 __all__ = [
     "SkillAvailability",
@@ -26,5 +30,7 @@ __all__ = [
     "SkillPromptSourceKind",
     "SkillRegistry",
     "SkillToolBinding",
+    "build_active_skill_context_notes",
     "load_skill_registry",
+    "resolve_active_skill_manifests",
 ]

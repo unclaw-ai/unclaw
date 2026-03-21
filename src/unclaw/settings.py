@@ -75,6 +75,11 @@ class ThinkingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillSettings:
+    enabled_skill_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeGuardrailSettings:
     tool_timeout_seconds: float
     max_tool_calls_per_turn: int
@@ -187,6 +192,7 @@ class RuntimePaths:
 class Settings:
     app: AppSettings
     model_pack: str
+    skills: SkillSettings
     models: dict[str, ModelProfile]
     dev_profiles: dict[str, ModelProfile]
     router: RouterSettings
@@ -214,6 +220,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         project_root=resolved_project_root,
     )
     model_pack = _resolve_model_pack_name(models_payload)
+    skill_settings = _build_skill_settings(app_payload)
     dev_model_profiles = _build_dev_model_profiles(models_payload)
     model_profiles = _build_active_model_profiles(
         model_pack=model_pack,
@@ -238,10 +245,12 @@ def load_settings(project_root: Path | None = None) -> Settings:
             f"'{app_settings.default_model_profile}' is not defined in "
             f"{models_config_path}."
         )
+    _validate_enabled_skill_ids(skill_settings)
 
     return Settings(
         app=app_settings,
         model_pack=model_pack,
+        skills=skill_settings,
         models=model_profiles,
         dev_profiles=dev_model_profiles,
         router=router_settings,
@@ -412,6 +421,18 @@ def _build_app_settings(
         runtime=runtime_settings,
         security=security_settings,
         providers=provider_settings,
+    )
+
+
+def _build_skill_settings(payload: Mapping[str, Any]) -> SkillSettings:
+    skills_section = _get_mapping(payload, "skills")
+    enabled_skill_ids = _get_str_list(
+        skills_section,
+        "enabled_skill_ids",
+        default=(),
+    )
+    return SkillSettings(
+        enabled_skill_ids=_deduplicate_strings(enabled_skill_ids),
     )
 
 
@@ -594,6 +615,27 @@ def _resolve_path(base_path: Path, raw_value: str) -> Path:
     return path.resolve()
 
 
+def _validate_enabled_skill_ids(skill_settings: SkillSettings) -> None:
+    if not skill_settings.enabled_skill_ids:
+        return
+
+    from unclaw.skills.registry import load_skill_registry
+
+    registry = load_skill_registry()
+    known_skill_ids = frozenset(registry.list_skill_ids())
+    unknown_skill_ids = tuple(
+        skill_id
+        for skill_id in skill_settings.enabled_skill_ids
+        if skill_id not in known_skill_ids
+    )
+    if unknown_skill_ids:
+        unknown_labels = ", ".join(unknown_skill_ids)
+        raise ConfigurationError(
+            "Configuration key 'skills.enabled_skill_ids' contains unknown skill id(s): "
+            f"{unknown_labels}."
+        )
+
+
 def _get_mapping(source: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = source.get(key, {})
     if not isinstance(value, Mapping):
@@ -730,3 +772,7 @@ def _get_str_list(
             )
         values.append(item.strip())
     return tuple(values)
+
+
+def _deduplicate_strings(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(values))

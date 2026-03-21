@@ -7,6 +7,7 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.capability_fragments import load_builtin_capability_fragment_registry
+from unclaw.settings import load_settings
 from unclaw.skills.models import (
     SkillAvailability,
     SkillBudgetMetadata,
@@ -20,7 +21,12 @@ from unclaw.skills.models import (
     SkillToolBinding,
 )
 from unclaw.skills.registry import SkillRegistry, load_skill_registry
+from unclaw.skills.runtime import (
+    build_active_skill_context_notes,
+    resolve_active_skill_manifests,
+)
 from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.unit
 
@@ -115,6 +121,7 @@ def test_skill_registry_has_stable_skill_and_prompt_fragment_order() -> None:
 
     assert registry.list_skill_ids() == (
         "fabrication.three_d_printer",
+        "information.weather",
         "messaging.telegram",
     )
     assert tuple(
@@ -123,6 +130,9 @@ def test_skill_registry_has_stable_skill_and_prompt_fragment_order() -> None:
         "fabrication.three_d_printer.context.overview",
         "fabrication.three_d_printer.guidance.workflow",
         "fabrication.three_d_printer.safety.hardware_state",
+        "information.weather.context.overview",
+        "information.weather.guidance.live_lookup",
+        "information.weather.safety.grounded_claims",
         "messaging.telegram.context.overview",
         "messaging.telegram.guidance.formatting",
         "messaging.telegram.safety.delivery_state",
@@ -149,7 +159,13 @@ def test_skill_registry_exposes_indexes_without_touching_builtin_capabilities() 
     assert tuple(
         skill.skill_id for skill in registry.get_skills_for_tag("Telegram")
     ) == ("messaging.telegram",)
+    weather_skill = registry.get_skill("information.weather")
+    assert weather_skill.display_name == "Weather"
+    assert tuple(binding.tool_name for binding in weather_skill.tool_bindings) == (
+        "search_web",
+    )
     assert builtins.list_capability_ids()[0] == "local_file_read"
+    assert "information.weather" not in builtins.list_capability_ids()
     assert "messaging.telegram" not in builtins.list_capability_ids()
     assert "fabrication.three_d_printer" not in builtins.list_capability_ids()
 
@@ -193,7 +209,7 @@ def test_skill_registry_rejects_duplicate_skill_and_fragment_ids() -> None:
         SkillRegistry(skills=(alpha_skill, alpha_skill))
 
 
-def test_load_skill_registry_is_cached_and_live_runtime_context_ignores_skills() -> None:
+def test_load_skill_registry_is_cached_and_builtin_runtime_context_still_ignores_skills() -> None:
     registry = load_skill_registry()
     assert load_skill_registry() is registry
 
@@ -206,3 +222,96 @@ def test_load_skill_registry_is_cached_and_live_runtime_context_ignores_skills()
 
     assert "Telegram Messaging" not in context
     assert "3D Printer Operations" not in context
+    assert "Weather" not in context
+
+
+def test_weather_skill_resolves_only_for_native_profiles_with_search(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: None,  # pragma: no cover - tool execution is not used here
+    )
+
+    native_summary = build_runtime_capability_summary(
+        tool_registry=tool_registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    codex_summary = build_runtime_capability_summary(
+        tool_registry=tool_registry,
+        memory_summary_available=False,
+        model_can_call_tools=settings.models["codex"].tool_mode == "native",
+    )
+    non_native_summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+
+    assert tuple(
+        skill.skill_id
+        for skill in resolve_active_skill_manifests(
+            settings=settings,
+            capability_summary=native_summary,
+            model_profile_name="main",
+        )
+    ) == ("information.weather",)
+    assert resolve_active_skill_manifests(
+        settings=settings,
+        capability_summary=codex_summary,
+        model_profile_name="codex",
+    ) == ()
+    assert resolve_active_skill_manifests(
+        settings=settings,
+        capability_summary=non_native_summary,
+        model_profile_name="fast",
+    ) == ()
+
+
+def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: None,  # pragma: no cover - tool execution is not used here
+    )
+
+    main_summary = build_runtime_capability_summary(
+        tool_registry=tool_registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+    fast_summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        model_can_call_tools=False,
+    )
+
+    weather_notes = build_active_skill_context_notes(
+        settings=settings,
+        capability_summary=main_summary,
+        model_profile_name="main",
+    )
+
+    assert weather_notes == (
+        "\n".join(
+            (
+                "Active optional skill: Weather",
+                "- For current weather, forecast, or severe-weather questions, use search_web before stating weather details.",
+                "- Use a precise place and date or time window in the query; if the user was vague, ask briefly or state the assumption you used.",
+                "- Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by search results from this conversation.",
+            )
+        ),
+    )
+    assert build_active_skill_context_notes(
+        settings=settings,
+        capability_summary=fast_summary,
+        model_profile_name="fast",
+    ) == ()
