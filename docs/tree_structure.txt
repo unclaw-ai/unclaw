@@ -1,40 +1,47 @@
 Tracked repository structure (`git ls-files | tree --fromfile --noreport`).
 
 Intentionally omitted: ignored or local-only paths such as `.venv/`, `__pycache__/`,
-`.pytest_cache/`, `data/`, `config/secrets.yaml`, local `audit/`, and other untracked
+`.pytest_cache/`, `data/`, local `audit/`, and other untracked
 runtime artifacts.
 
-unclaw/
-├── .github
-│   ├── FUNDING.yml
-│   └── workflows
-│       └── real-ollama-integration.yml
-├── .gitignore
-├── LICENSE
-├── README.md
+.
 ├── config
 │   ├── app.yaml
 │   ├── models.yaml
 │   ├── prompts
 │   │   └── system.txt
+│   ├── router.yaml
 │   └── telegram.yaml
 ├── docs
 │   ├── architecture.md
 │   ├── engineering_guidelines.md
 │   ├── project_brief.md
 │   ├── roadmap.md
+│   ├── skills_design.md
 │   ├── tree_structure.txt
 │   └── vision.md
+├── .github
+│   ├── FUNDING.yml
+│   └── workflows
+│       └── real-ollama-integration.yml
+├── .gitignore
+├── LICENSE
 ├── pyproject.toml
+├── README.md
+├── skills
+│   ├── __init__.py
+│   └── weather
+│       ├── contracts.py
+│       ├── __init__.py
+│       ├── SKILL.md
+│       └── tool.py
 ├── src
 │   └── unclaw
-│       ├── __init__.py
-│       ├── __main__.py
 │       ├── async_utils.py
 │       ├── bootstrap.py
 │       ├── channels
-│       │   ├── __init__.py
 │       │   ├── cli.py
+│       │   ├── __init__.py
 │       │   ├── telegram_api.py
 │       │   ├── telegram_app.py
 │       │   ├── telegram_bot.py
@@ -43,11 +50,13 @@ unclaw/
 │       │   └── telegram_management.py
 │       ├── constants.py
 │       ├── core
-│       │   ├── __init__.py
 │       │   ├── capabilities.py
+│       │   ├── capability_budget.py
+│       │   ├── capability_fragments.py
 │       │   ├── command_handler.py
 │       │   ├── context_builder.py
 │       │   ├── executor.py
+│       │   ├── __init__.py
 │       │   ├── orchestrator.py
 │       │   ├── research_flow.py
 │       │   ├── router.py
@@ -61,48 +70,62 @@ unclaw/
 │       │   ├── repositories.py
 │       │   └── sqlite.py
 │       ├── errors.py
+│       ├── __init__.py
 │       ├── llm
-│       │   ├── __init__.py
 │       │   ├── base.py
+│       │   ├── __init__.py
 │       │   ├── model_profiles.py
 │       │   └── ollama_provider.py
 │       ├── local_secrets.py
 │       ├── logs
-│       │   ├── __init__.py
 │       │   ├── cli.py
 │       │   ├── event_bus.py
+│       │   ├── __init__.py
 │       │   └── tracer.py
+│       ├── __main__.py
 │       ├── main.py
 │       ├── memory
-│       │   ├── __init__.py
 │       │   ├── chat_store.py
 │       │   ├── diagnostics.py
+│       │   ├── __init__.py
 │       │   ├── long_term_store.py
 │       │   ├── manager.py
 │       │   ├── protocols.py
 │       │   └── summarizer.py
-│       ├── onboarding.py
+│       ├── model_packs.py
 │       ├── onboarding_files.py
 │       ├── onboarding_flow.py
+│       ├── onboarding.py
 │       ├── onboarding_types.py
 │       ├── onboarding_ui.py
 │       ├── schemas
-│       │   ├── __init__.py
 │       │   ├── chat.py
 │       │   ├── events.py
+│       │   ├── __init__.py
 │       │   └── session.py
 │       ├── settings.py
+│       ├── skills
+│       │   ├── catalog.py
+│       │   ├── file_loader.py
+│       │   ├── file_models.py
+│       │   ├── __init__.py
+│       │   ├── manifests.py
+│       │   ├── models.py
+│       │   ├── registry.py
+│       │   └── runtime.py
 │       ├── startup.py
 │       ├── terminal_styles.py
 │       ├── tools
-│       │   ├── __init__.py
 │       │   ├── contracts.py
 │       │   ├── dispatcher.py
 │       │   ├── file_tools.py
+│       │   ├── __init__.py
 │       │   ├── long_term_memory_tools.py
 │       │   ├── registry.py
 │       │   ├── session_tools.py
 │       │   ├── system_tools.py
+│       │   ├── terminal_tools.py
+│       │   ├── weather_tools.py
 │       │   ├── web_fetch.py
 │       │   ├── web_html.py
 │       │   ├── web_retrieval.py
@@ -112,15 +135,20 @@ unclaw/
 │       │   ├── web_text.py
 │       │   └── web_tools.py
 │       └── update.py
+├── TEST_PUSH_LAPTOP.txt
 ├── tests
 │   ├── conftest.py
 │   ├── test_async_boundaries.py
 │   ├── test_block4_cleanup.py
+│   ├── test_capability_budget_policy.py
+│   ├── test_capability_fragments.py
 │   ├── test_chat_memory_store.py
 │   ├── test_cli_channel.py
 │   ├── test_command_handler.py
 │   ├── test_context_budget.py
+│   ├── test_copy_file.py
 │   ├── test_db_path_migration.py
+│   ├── test_delete_file.py
 │   ├── test_e2e_flows.py
 │   ├── test_exact_recall.py
 │   ├── test_local_action_honesty.py
@@ -130,23 +158,33 @@ unclaw/
 │   ├── test_memory_architecture.py
 │   ├── test_memory_status.py
 │   ├── test_memory_summary.py
+│   ├── test_move_file.py
 │   ├── test_ollama_provider.py
 │   ├── test_onboarding.py
 │   ├── test_p34_capability_and_routing.py
+│   ├── test_phase0_guardrails.py
+│   ├── test_phase5_weather_skill.py
+│   ├── test_prompt_ownership.py
 │   ├── test_read_text_file.py
 │   ├── test_real_ollama_runtime_integration.py
+│   ├── test_rename_file.py
 │   ├── test_router.py
 │   ├── test_runtime_integration.py
+│   ├── test_search_grounding.py
 │   ├── test_search_payload_schema.py
 │   ├── test_session_history_reliability.py
 │   ├── test_session_history_tool.py
 │   ├── test_settings.py
+│   ├── test_skills_file_loader.py
+│   ├── test_skills_registry.py
 │   ├── test_startup.py
 │   ├── test_system_tools.py
 │   ├── test_telegram_bot.py
+│   ├── test_terminal_tools.py
 │   ├── test_tool_security.py
 │   ├── test_update.py
 │   ├── test_v1_validation.py
+│   ├── test_weather_tools.py
 │   ├── test_web_grounding_caps.py
 │   └── test_write_text_file.py
 └── unclaw-animated.svg

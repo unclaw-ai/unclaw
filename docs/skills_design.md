@@ -1,4 +1,4 @@
-# Skills v2 Design
+# Skills Design
 
 ## Status
 
@@ -27,7 +27,7 @@ At the same time, Unclaw already has a clear native tool boundary:
 - the runtime exposes tools through `ToolDefinition`, `ToolRegistry`, and `ToolDispatcher`
 - prompt honesty is built around compact capability summaries
 
-Skills v2 keeps that strong tool boundary and simplifies optional skills into file-first prompt bundles.
+Skills keeps that strong tool boundary and simplifies optional skills into file-first prompt bundles.
 
 ## Core definitions
 
@@ -113,7 +113,7 @@ Other files are optional.
 The bundle directory is the source of truth for the skill.
 Phase 2 should treat current manifest-based skill modules as transitional and move away from them.
 
-The v2 skill id should be the bundle directory name, using simple slugs such as `weather`.
+The new skill id should be the bundle directory name, using simple slugs such as `weather`.
 Current manifest ids like `information.weather` can be supported as migration aliases temporarily, but they should not remain the long-term source of truth.
 
 ## Discovery and activation
@@ -133,7 +133,7 @@ No Python manifest import should be required for discovery.
 
 ### Activation
 
-For the first v2 implementation, Unclaw should keep the existing config concept of explicitly enabled skills in `config/app.yaml`.
+For the first new implementation, Unclaw should keep the existing config concept of explicitly enabled skills in `config/app.yaml`.
 
 That means:
 
@@ -183,7 +183,7 @@ Default guardrails:
 - only load more than one skill if a later use case proves it is necessary
 - never inline full content for every active skill by default
 
-## Weather in the v2 model
+## Weather in the new model
 
 Weather remains the first migration candidate and stays part of the optional skill model.
 
@@ -253,7 +253,7 @@ Phase 2 should not use this redesign as a reason to:
 
 ## Decision summary
 
-Skills v2 resets Unclaw to a simpler rule set:
+Skills resets Unclaw to a simpler rule set:
 
 - tools are Python
 - skills are files
