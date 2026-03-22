@@ -453,9 +453,13 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Relative paths are created inside data/files/ by default. "
             "Use collision_policy to control collision behaviour: "
             "'fail' (default) — refuse if the file already exists; "
-            "'version' — write to a new timestamped path instead (safe for bulk creation); "
+            "'version' — write to a new timestamped sibling path "
+            "(same directory, same basename, same extension, e.g. note_20260322_185430.txt); "
             "'overwrite' — replace the existing file (only allowed in dev mode). "
-            "Always use the collision_policy that matches the user's real intent. "
+            "When a write is refused, the tool payload contains suggested_version_path: "
+            "a ready-to-use sibling path derived from the same basename. "
+            "If the user wants a safe alternative, retry with that suggested path and "
+            "collision_policy='version' — do not invent a different filename. "
             "Only use 'overwrite' when the user explicitly asked to replace the file "
             "and dev mode is enabled — do not infer overwrite intent from context alone.",
         ),

@@ -139,6 +139,81 @@ def test_write_text_file_fail_policy_returns_structured_outcome(tmp_path: Path) 
     assert result.payload["collision_policy_applied"] == "fail"
 
 
+def test_write_text_file_fail_refusal_includes_suggested_version_policy(tmp_path: Path) -> None:
+    target = tmp_path / "marine_leleu.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "new"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["suggested_collision_policy"] == "version"
+
+
+def test_write_text_file_fail_refusal_suggested_version_path_preserves_basename(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "marine_leleu.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "new"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.payload is not None
+    suggested = Path(result.payload["suggested_version_path"])
+    # Must be in the same directory
+    assert suggested.parent == target.parent
+    # Must keep the same extension
+    assert suggested.suffix == ".txt"
+    # Stem must start with the original stem
+    assert suggested.stem.startswith("marine_leleu_")
+    # Must not be the exact same path
+    assert suggested != target
+
+
+def test_write_text_file_fail_refusal_suggested_version_path_no_extension(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "report"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "new"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.payload is not None
+    suggested = Path(result.payload["suggested_version_path"])
+    assert suggested.parent == target.parent
+    assert suggested.suffix == ""
+    assert suggested.name.startswith("report_")
+
+
+def test_write_text_file_overwrite_refusal_includes_suggested_version_fields(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "new", "collision_policy": "overwrite"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["suggested_collision_policy"] == "version"
+    suggested = Path(result.payload["suggested_version_path"])
+    assert suggested.parent == target.parent
+    assert suggested.suffix == ".txt"
+    assert suggested.stem.startswith("notes_")
+
+
 # ---------------------------------------------------------------------------
 # Collision policy — version
 # ---------------------------------------------------------------------------

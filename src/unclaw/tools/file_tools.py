@@ -68,9 +68,11 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
         "Write plain UTF-8 text content to a local file. "
         "Relative paths are created inside the data/files/ directory by default. "
         "Use collision_policy to control behavior when the target file already exists: "
-        "'fail' (default) — refuse; "
-        "'version' — write to a new timestamped path (e.g. note_20260322_185430.txt); "
+        "'fail' (default) — refuse and return a suggested_version_path in the payload; "
+        "'version' — write to a new timestamped sibling path (e.g. note_20260322_185430.txt); "
         "'overwrite' — replace the existing file (requires dev mode). "
+        "On refusal, the payload always contains suggested_version_path: use that path "
+        "(collision_policy='version') instead of inventing an unrelated filename. "
         "Content is limited to 1 MB. Only writes inside the configured allowed roots."
     ),
     permission_level=ToolPermissionLevel.LOCAL_WRITE,
@@ -81,8 +83,12 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
             description=(
                 "How to handle a collision when the target file already exists. "
                 "Allowed values: 'fail' (default) — refuse if file exists; "
-                "'version' — write to a new timestamped path instead; "
-                "'overwrite' — replace the existing file (dev mode only)."
+                "'version' — write to a new timestamped sibling path "
+                "(same directory, same basename, same extension, timestamp appended); "
+                "'overwrite' — replace the existing file (dev mode only). "
+                "After a 'fail' or blocked 'overwrite' refusal, if the user wants a "
+                "safe alternative, retry with collision_policy='version' and the same "
+                "path — do not invent a different filename."
             ),
         ),
     },
@@ -495,6 +501,8 @@ def write_text_file(
                     "overwrite_applied": False,
                     "file_already_exists": True,
                     "collision_policy_applied": collision_policy,
+                    "suggested_collision_policy": "version",
+                    "suggested_version_path": str(_generate_versioned_path(requested_path)),
                 },
             )
         elif collision_policy == "version":
@@ -517,6 +525,8 @@ def write_text_file(
                         "overwrite_applied": False,
                         "file_already_exists": True,
                         "collision_policy_applied": collision_policy,
+                        "suggested_collision_policy": "version",
+                        "suggested_version_path": str(_generate_versioned_path(requested_path)),
                     },
                 )
             resolved_path = requested_path
