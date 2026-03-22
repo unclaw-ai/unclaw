@@ -73,7 +73,7 @@ def _make_session_manager(
 
 def _minimal_capability_summary() -> RuntimeCapabilitySummary:
     return RuntimeCapabilitySummary(
-        available_builtin_tool_names=("get_weather",),
+        available_builtin_tool_names=("system_info",),
         local_file_read_available=True,
         local_directory_listing_available=False,
         url_fetch_available=False,

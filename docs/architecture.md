@@ -199,30 +199,18 @@ For plain chat turns, the shared runtime flow is:
 
 1. the channel persists the user message
 2. `run_user_turn()` resolves tool availability for the selected model profile
-3. the runtime builds a capability summary and optional session memory context note
-4. `route_request()` uses a lightweight model-assisted classifier to choose:
-   - `chat`
-   - `chat_with_thinking`
-   - `web_search`
-5. `Orchestrator.run_turn()` builds the actual LLM message list from:
+3. the runtime builds a capability summary, optional session memory context note, and optional active-skill catalog
+4. `Orchestrator.run_turn()` builds the actual LLM message list from:
    - the system prompt
    - runtime capability context
-   - optional routing or memory notes
+   - optional active-skill catalog (separate system message when skills are enabled)
    - recent session history
    - grounded-search answer contract when relevant
-6. the Ollama provider is called with or without native tool definitions
-7. the runtime either returns the model text directly or enters the bounded agent loop
-8. the final assistant reply is transformed if needed, persisted, and traced
+5. the Ollama provider is called with built-in tool definitions plus any active skill tool definitions
+6. the runtime either returns the model text directly or enters the bounded agent loop
+7. the final assistant reply is transformed if needed, persisted, and traced
 
-### Routing
-
-The shipped router is intentionally narrow:
-
-- it only distinguishes normal chat from web-backed search
-- it is model-assisted rather than keyword-driven
-- it falls back to normal chat when classification fails or web search is unavailable
-
-This keeps the current routing logic honest, but it is still much narrower than the long-term capability-routing vision.
+There is no separate routing model or classifier step. The main model decides directly whether to answer, call a tool, or invoke a skill.
 
 ---
 
@@ -246,7 +234,7 @@ This is a real observation-action loop, not a simulated slash-command wrapper.
 
 Important limit:
 
-- because the default `main` profile is still `json_plan`, the broader native-tool path is available but not yet the default everyday experience
+- the default `main` profile uses `native` tool mode, so the agent loop is the default everyday experience
 
 ---
 
