@@ -124,7 +124,6 @@ def test_skill_registry_has_stable_skill_and_prompt_fragment_order() -> None:
 
     assert registry.list_skill_ids() == (
         "fabrication.three_d_printer",
-        "information.weather",
         "messaging.telegram",
     )
     assert tuple(
@@ -133,9 +132,6 @@ def test_skill_registry_has_stable_skill_and_prompt_fragment_order() -> None:
         "fabrication.three_d_printer.context.overview",
         "fabrication.three_d_printer.guidance.workflow",
         "fabrication.three_d_printer.safety.hardware_state",
-        "information.weather.context.overview",
-        "information.weather.guidance.live_lookup",
-        "information.weather.safety.grounded_claims",
         "messaging.telegram.context.overview",
         "messaging.telegram.guidance.formatting",
         "messaging.telegram.safety.delivery_state",
@@ -162,12 +158,6 @@ def test_skill_registry_exposes_indexes_without_touching_builtin_capabilities() 
     assert tuple(
         skill.skill_id for skill in registry.get_skills_for_tag("Telegram")
     ) == ("messaging.telegram",)
-    weather_skill = registry.get_skill("information.weather")
-    assert weather_skill.display_name == "Weather"
-    assert tuple(binding.tool_name for binding in weather_skill.tool_bindings) == (
-        "get_weather",
-        "search_web",
-    )
     assert builtins.list_capability_ids()[0] == "local_file_read"
     assert "information.weather" not in builtins.list_capability_ids()
     assert "messaging.telegram" not in builtins.list_capability_ids()
@@ -229,9 +219,15 @@ def test_load_skill_registry_is_cached_and_builtin_runtime_context_still_ignores
     assert "Weather" not in context
 
 
-def test_weather_skill_resolves_only_for_native_profiles_with_dedicated_weather_tool(
+def test_legacy_manifest_registry_no_longer_owns_weather(
     make_temp_project,
 ) -> None:
+    """Weather was removed from the legacy manifest registry.
+
+    Prompt ownership for weather now lives exclusively in the file-first
+    skills/weather/SKILL.md bundle (compact catalog + on-demand full load).
+    The legacy runtime produces no manifests for weather regardless of profile.
+    """
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     tool_registry = ToolRegistry()
@@ -245,29 +241,17 @@ def test_weather_skill_resolves_only_for_native_profiles_with_dedicated_weather_
         memory_summary_available=False,
         model_can_call_tools=True,
     )
-    codex_summary = build_runtime_capability_summary(
-        tool_registry=tool_registry,
-        memory_summary_available=False,
-        model_can_call_tools=settings.models["codex"].tool_mode == "native",
-    )
     non_native_summary = build_runtime_capability_summary(
         tool_registry=ToolRegistry(),
         memory_summary_available=False,
         model_can_call_tools=False,
     )
 
-    assert tuple(
-        skill.skill_id
-        for skill in resolve_active_skill_manifests(
-            settings=settings,
-            capability_summary=native_summary,
-            model_profile_name="main",
-        )
-    ) == ("information.weather",)
+    # Legacy manifest registry must produce no weather manifests.
     assert resolve_active_skill_manifests(
         settings=settings,
-        capability_summary=codex_summary,
-        model_profile_name="codex",
+        capability_summary=native_summary,
+        model_profile_name="main",
     ) == ()
     assert resolve_active_skill_manifests(
         settings=settings,
@@ -276,9 +260,10 @@ def test_weather_skill_resolves_only_for_native_profiles_with_dedicated_weather_
     ) == ()
 
 
-def test_weather_skill_still_resolves_through_legacy_runtime_when_file_first_id_is_configured(
+def test_legacy_manifest_registry_produces_no_weather_when_file_first_id_is_configured(
     make_temp_project,
 ) -> None:
+    """File-first skill ID 'weather' no longer maps to a legacy manifest entry."""
     project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
@@ -297,19 +282,23 @@ def test_weather_skill_still_resolves_through_legacy_runtime_when_file_first_id_
         model_can_call_tools=True,
     )
 
-    assert tuple(
-        skill.skill_id
-        for skill in resolve_active_skill_manifests(
-            settings=settings,
-            capability_summary=native_summary,
-            model_profile_name="main",
-        )
-    ) == ("information.weather",)
+    # The legacy registry no longer owns weather; result must be empty.
+    assert resolve_active_skill_manifests(
+        settings=settings,
+        capability_summary=native_summary,
+        model_profile_name="main",
+    ) == ()
 
 
-def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
+def test_legacy_skill_context_notes_produce_no_weather_notes(
     make_temp_project,
 ) -> None:
+    """Weather was removed from the legacy manifest registry.
+
+    build_active_skill_context_notes must now return no weather notes for any
+    profile. Weather guidance comes exclusively from the file-first SKILL.md
+    (compact catalog + on-demand full load).
+    """
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
     tool_registry = ToolRegistry()
@@ -329,24 +318,11 @@ def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
         model_can_call_tools=False,
     )
 
-    weather_notes = build_active_skill_context_notes(
+    assert build_active_skill_context_notes(
         settings=settings,
         capability_summary=main_summary,
         model_profile_name="main",
-    )
-
-    assert weather_notes == (
-        "\n".join(
-            (
-                "Active optional skill: Weather",
-                "- For current weather or short-forecast questions, use get_weather before stating live weather details.",
-                "- Use a precise place for the lookup. Answer from the returned current conditions and 7-day forecast, and state any assumption if the user was vague.",
-                "- When get_weather returns a selected forecast day or relative-day anchor like today or tomorrow, answer from that explicit day instead of remapping dates yourself.",
-                "- Use search_web only as a fallback for official alerts, longer-range outlooks, or when get_weather cannot resolve the requested place or detail.",
-                "- Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by get_weather or search results from this conversation.",
-            )
-        ),
-    )
+    ) == ()
     assert build_active_skill_context_notes(
         settings=settings,
         capability_summary=fast_summary,

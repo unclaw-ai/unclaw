@@ -21,9 +21,11 @@ pytestmark = pytest.mark.integration
 @pytest.mark.parametrize(
     ("profile_name", "expect_weather_skill", "expect_tools"),
     (
+        # Weather catalog is always injected when skills are enabled (file-first
+        # catalog has no profile gating). Tools remain profile-gated.
         ("main", True, True),
         ("deep", True, True),
-        ("fast", False, False),
+        ("fast", True, False),
     ),
 )
 def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
@@ -140,15 +142,17 @@ def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
             for message in captured_messages[0]
             if message.role is LLMRole.SYSTEM
         ]
-        weather_notes = [
-            message for message in system_messages if "Active optional skill: Weather" in message
+        # Weather prompt ownership is now in the file-first skill bundle.
+        # The compact catalog is injected as a system message when skills are enabled.
+        catalog_msgs = [
+            message for message in system_messages if "Active optional skills:" in message
         ]
-
-        assert bool(weather_notes) is expect_weather_skill
         if expect_weather_skill:
-            assert "use get_weather before stating live weather details" in weather_notes[0]
+            assert len(catalog_msgs) == 1
+            assert "weather" in catalog_msgs[0]
+            assert "get_weather" in catalog_msgs[0]
         else:
-            assert not weather_notes
+            assert not catalog_msgs
 
         if expect_tools:
             assert captured_tools[0] is not None

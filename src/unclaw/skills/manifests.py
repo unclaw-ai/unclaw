@@ -112,74 +112,6 @@ _FABRICATION_THREE_D_PRINTER_SKILL = SkillManifest(
 )
 
 
-_INFORMATION_WEATHER_SKILL = SkillManifest(
-    skill_id="information.weather",
-    display_name="Weather",
-    version="0.1.0",
-    description=(
-        "Optional workflow skill for live weather, forecasts, and "
-        "weather-sensitive planning questions."
-    ),
-    install_mode=SkillInstallMode.OPT_IN,
-    tags=("information", "weather", "forecast"),
-    prompt_fragments=(
-        _fragment(
-            skill_id="information.weather",
-            fragment_suffix="context.overview",
-            name="Weather overview",
-            kind=SkillPromptFragmentKind.CONTEXT,
-            lines=(
-                "This skill scopes work around current weather, forecasts, and weather-sensitive plans.",
-            ),
-        ),
-        _fragment(
-            skill_id="information.weather",
-            fragment_suffix="guidance.live_lookup",
-            name="Weather live lookup guidance",
-            kind=SkillPromptFragmentKind.GUIDANCE,
-            lines=(
-                "For current weather or short-forecast questions, use get_weather before stating live weather details.",
-                "Use a precise place for the lookup. Answer from the returned current conditions and 7-day forecast, and state any assumption if the user was vague.",
-                "When get_weather returns a selected forecast day or relative-day anchor like today or tomorrow, answer from that explicit day instead of remapping dates yourself.",
-                "Use search_web only as a fallback for official alerts, longer-range outlooks, or when get_weather cannot resolve the requested place or detail.",
-            ),
-        ),
-        _fragment(
-            skill_id="information.weather",
-            fragment_suffix="safety.grounded_claims",
-            name="Weather grounded-claims safety",
-            kind=SkillPromptFragmentKind.SAFETY,
-            lines=(
-                "Do not present temperature, precipitation, alerts, or forecast details as certain unless they are grounded by get_weather or search results from this conversation.",
-            ),
-        ),
-    ),
-    tool_bindings=(
-        SkillToolBinding(
-            binding_id="information.weather.lookup",
-            tool_name="get_weather",
-            description="Ground live weather and short forecasts with the dedicated weather backend.",
-            required=True,
-        ),
-        SkillToolBinding(
-            binding_id="information.weather.search_fallback",
-            tool_name="search_web",
-            description="Fallback for official alerts or weather details outside the dedicated weather tool.",
-        ),
-    ),
-    availability=SkillAvailability(
-        supported_model_profiles=("main", "deep", "codex"),
-        required_builtin_tool_names=("get_weather",),
-        requires_model_tool_support=True,
-    ),
-    budget=SkillBudgetMetadata(
-        min_budget_tier=SkillPromptBudgetTier.COMPACT,
-        prompt_priority=70,
-        estimated_prompt_lines=4,
-    ),
-)
-
-
 _MESSAGING_TELEGRAM_SKILL = SkillManifest(
     skill_id="messaging.telegram",
     display_name="Telegram Messaging",
@@ -247,7 +179,6 @@ _MESSAGING_TELEGRAM_SKILL = SkillManifest(
 
 _INTERNAL_SKILL_MANIFESTS = (
     _FABRICATION_THREE_D_PRINTER_SKILL,
-    _INFORMATION_WEATHER_SKILL,
     _MESSAGING_TELEGRAM_SKILL,
 )
 

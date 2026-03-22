@@ -230,7 +230,13 @@ def test_unknown_skill_id_silently_produces_no_catalog(monkeypatch) -> None:
 
 
 def test_catalog_coexists_with_legacy_skill_notes(monkeypatch) -> None:
-    """Compact catalog and legacy manifest notes both appear — weather preserved."""
+    """Context builder pipeline: compact catalog and legacy manifest notes can coexist.
+
+    This tests the plumbing (context_builder routes both sources into separate
+    system messages). In practice, weather no longer produces legacy manifest
+    notes — but other skills (e.g. fabrication.three_d_printer) may still do
+    so until they are migrated to file-first bundles.
+    """
     catalog_text = "Active optional skills:\n- weather: Live weather."
     legacy_note = "Active optional skill: Weather\n- Prefer get_weather for conditions."
     monkeypatch.setattr(
