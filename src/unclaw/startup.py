@@ -345,16 +345,13 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
     any_failed = False
     for bundle in active_bundles:
         error = probe_results.get(bundle.skill_id)
-        has_tool_py = (bundle.bundle_dir / "tool.py").is_file()
-        if not has_tool_py:
-            skill_parts.append(f"{bundle.skill_id} (prompt-only)")
-        elif error is None:
-            skill_parts.append(f"{bundle.skill_id} (tools ok)")
+        if error is None:
+            skill_parts.append(bundle.skill_id)
         else:
-            skill_parts.append(f"{bundle.skill_id} (tool load failed: {error})")
+            skill_parts.append(f"{bundle.skill_id} (load failed: {error})")
             any_failed = True
 
-    detail = "; ".join(skill_parts)
+    detail = ", ".join(skill_parts)
     return StartupCheck(
         status=CheckStatus.WARN if any_failed else CheckStatus.OK,
         label="Skills",

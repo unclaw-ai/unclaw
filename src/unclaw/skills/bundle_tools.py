@@ -21,13 +21,31 @@ from __future__ import annotations
 import importlib
 import sys
 from collections.abc import Collection
+from dataclasses import dataclass
 
 from unclaw.skills.file_loader import load_active_skill_bundles
 from unclaw.skills.file_models import SkillBundle, UnknownSkillIdError
+from unclaw.tools.contracts import ToolDefinition, ToolHandler
 from unclaw.tools.registry import ToolRegistry
 
 # The name of the registration hook that a skill bundle's tool.py may expose.
 _SKILL_TOOL_REGISTRAR = "register_skill_tools"
+
+
+@dataclass(slots=True)
+class _SkillOwnedRegistryProxy:
+    """Thin proxy that injects skill_id ownership on every register() call.
+
+    Passed to a skill bundle's ``register_skill_tools(registry)`` hook so that
+    all tools registered by the bundle are automatically tagged with the
+    bundle's skill_id.  The skill's tool.py needs no changes.
+    """
+
+    _registry: ToolRegistry
+    _skill_id: str
+
+    def register(self, definition: ToolDefinition, handler: ToolHandler) -> None:
+        self._registry.register(definition, handler, skill_id=self._skill_id)
 
 
 def register_active_skill_tools(
@@ -114,7 +132,8 @@ def _register_bundle_tools(registry: ToolRegistry, bundle: SkillBundle) -> bool:
     if not callable(registrar):
         return False
 
-    registrar(registry)
+    proxy = _SkillOwnedRegistryProxy(_registry=registry, _skill_id=bundle.skill_id)
+    registrar(proxy)
     return True
 
 

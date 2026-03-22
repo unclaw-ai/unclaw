@@ -235,7 +235,12 @@ def run_cli(
                         stream_output_func=assistant_stream.write,
                         tool_registry=tool_executor.registry,
                         tool_call_callback=lambda tool_call: assistant_stream.render_status(
-                            _build_tool_call_visibility_line(tool_call)
+                            _build_tool_call_visibility_line(
+                                tool_call,
+                                skill_id=tool_executor.registry.get_owner_skill_id(
+                                    tool_call.tool_name
+                                ),
+                            )
                         ),
                     ).assistant_reply
                     assistant_stream.finish(assistant_reply)
@@ -246,10 +251,14 @@ def run_cli(
                     continue
 
                 session = session_manager.ensure_current_session()
+                _tool_skill_id = tool_executor.registry.get_owner_skill_id(
+                    result.tool_call.tool_name
+                )
                 tracer.trace_tool_started(
                     session_id=session.id,
                     tool_name=result.tool_call.tool_name,
                     arguments=result.tool_call.arguments,
+                    skill_id=_tool_skill_id,
                 )
                 tool_started_at = perf_counter()
                 tool_result = tool_executor.execute(result.tool_call)
@@ -260,6 +269,7 @@ def run_cli(
                     output_length=len(tool_result.output_text),
                     error=tool_result.error,
                     tool_duration_ms=elapsed_ms(tool_started_at),
+                    skill_id=_tool_skill_id,
                 )
                 persist_tool_result(
                     session_manager=session_manager,
@@ -289,7 +299,12 @@ def run_cli(
             stream_output_func=assistant_stream.write,
             on_search_route=assistant_stream.suppress_live_output,
             tool_call_callback=lambda tool_call: assistant_stream.render_status(
-                _build_tool_call_visibility_line(tool_call)
+                _build_tool_call_visibility_line(
+                    tool_call,
+                    skill_id=tool_executor.registry.get_owner_skill_id(
+                        tool_call.tool_name
+                    ),
+                )
             ),
         )
         assistant_stream.finish(assistant_reply)
@@ -414,9 +429,14 @@ def _render_assistant_reply(reply_text: str) -> None:
     print(f"Unclaw> {reply_text}")
 
 
-def _build_tool_call_visibility_line(tool_call: ToolCall) -> str:
+def _build_tool_call_visibility_line(
+    tool_call: ToolCall,
+    *,
+    skill_id: str | None = None,
+) -> str:
     rendered_arguments = _format_tool_call_arguments(tool_call.arguments)
-    return f"[tool] {tool_call.tool_name} {rendered_arguments}"
+    prefix = f"skill:{skill_id}" if skill_id else "tool"
+    return f"[{prefix}] {tool_call.tool_name} {rendered_arguments}"
 
 
 def _format_tool_call_arguments(arguments: object) -> str:

@@ -276,16 +276,21 @@ class Tracer:
         session_id: str | None,
         tool_name: str,
         arguments: dict[str, Any],
+        skill_id: str | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "tool_owner_kind": "skill" if skill_id else "builtin",
+        }
+        if skill_id is not None:
+            payload["skill_id"] = skill_id
         self._emit(
             session_id=session_id,
             event_type="tool.started",
             level=EventLevel.INFO,
             message="Tool command started.",
-            payload={
-                "tool_name": tool_name,
-                "arguments": arguments,
-            },
+            payload=payload,
         )
 
     def trace_tool_finished(
@@ -297,13 +302,17 @@ class Tracer:
         output_length: int,
         error: str | None = None,
         tool_duration_ms: int | None = None,
+        skill_id: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "tool_name": tool_name,
             "success": success,
             "output_length": output_length,
             "error": error,
+            "tool_owner_kind": "skill" if skill_id else "builtin",
         }
+        if skill_id is not None:
+            payload["skill_id"] = skill_id
         if tool_duration_ms is not None:
             payload["tool_duration_ms"] = tool_duration_ms
 

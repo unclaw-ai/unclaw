@@ -916,6 +916,7 @@ def _execute_runtime_tool_calls(
                 0,
                 round((finished_at - pending_call.started_at) * 1000),
             ),
+            skill_id=tool_registry.get_owner_skill_id(pending_call.tool_call.tool_name),
         )
         tool_results.append(grounded_tool_result)
 
@@ -943,6 +944,7 @@ def _start_pending_tool_executions(
             session_id=session_id,
             tool_name=tool_call.tool_name,
             arguments=tool_call.arguments,
+            skill_id=tool_registry.get_owner_skill_id(tool_call.tool_name),
         )
         done_event = threading.Event()
         pending_call = _PendingToolExecution(
@@ -1348,6 +1350,7 @@ def _finalize_runtime_tool_call(
     tool_call: ToolCall,
     tool_result: ToolResult,
     tool_duration_ms: int,
+    skill_id: str | None = None,
 ) -> None:
     from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
 
@@ -1358,6 +1361,7 @@ def _finalize_runtime_tool_call(
         output_length=len(tool_result.output_text),
         error=tool_result.error,
         tool_duration_ms=tool_duration_ms,
+        skill_id=skill_id,
     )
     persist_tool_result(
         session_manager=session_manager,
