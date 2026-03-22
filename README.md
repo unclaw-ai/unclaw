@@ -46,7 +46,6 @@ Unclaw takes the opposite path:
 - `search_web` integrated into the shared runtime path: non-native profiles use a runtime pre-executed search step, while native profiles can call `search_web` inside the normal agent loop
 - Ollama tool-call parsing plus a bounded observation-action loop for native-tool profiles
 - `system_info` built-in tool: read-only local machine snapshot (OS, Python version, CPU cores, RAM, hostname, date/time, locale)
-- Notes tool family: `create_note`, `read_note`, `list_notes`, `update_note` — local markdown notes in `data/notes/`, path-traversal-safe, 0o600 permissions
 - `write_text_file` for permissioned writes inside allowed roots; relative paths redirect to `data/files/` by default; fails on existing files unless `overwrite=true` is explicitly set
 - `inspect_session_history` for exact recall of the current session's persisted messages (supports role filter, nth-message lookup, limit)
 - Long-term cross-session memory: `remember_long_term_memory`, `search_long_term_memory`, `list_long_term_memory`, `forget_long_term_memory` — local SQLite at `data/memory/long_term.db`; not injected automatically; model retrieves on explicit request
@@ -64,6 +63,7 @@ Unclaw takes the opposite path:
 - Search is bounded and synchronous: DuckDuckGo HTML plus a small set of fetched public pages. Search quality depends on DuckDuckGo HTML stability and readable page text.
 - Private and local network fetches are blocked by default.
 - File reading supports only `.txt`, `.md`, `.json`, and `.csv`; binary formats (pdf, docx, xlsx) are not supported in V1.
+- There is intentionally no shipped built-in notes or document-creation tool right now.
 - Long-term memory is not injected automatically — the model must call the recall tools explicitly; it is not yet a passive always-available context.
 - Session summaries are deterministic (no LLM call): reliable and fast but limited in depth for complex multi-turn sessions.
 - Small local models (`fast`, `main`) are less reliable on long multi-step tool chains than larger models; `deep` (9B) is more capable for complex agentic tasks.

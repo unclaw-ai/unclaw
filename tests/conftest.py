@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -13,6 +14,13 @@ from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+# Ensure the project root is on sys.path so that skill bundles under ./skills/
+# are importable as top-level packages (e.g. skills.weather.tool).
+_repo_root_str = str(_repo_root())
+if _repo_root_str not in sys.path:
+    sys.path.insert(0, _repo_root_str)
 
 
 _REAL_OLLAMA_TOOL_CAPABLE_MODEL_PREFIXES = (

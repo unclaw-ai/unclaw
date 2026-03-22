@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, TypedDict
 
-from unclaw.skills.weather.contracts import (
+from skills.weather.contracts import (
     WeatherCurrentConditionsPayload,
     WeatherDailyForecastPayload,
     WeatherLookupPayload,

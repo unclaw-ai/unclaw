@@ -7,20 +7,22 @@ import pytest
 from unclaw.skills.catalog import build_active_skill_catalog
 from unclaw.skills.file_loader import (
     discover_skill_bundles,
-    internal_skill_bundle_root,
     load_active_skill_bundles,
     load_skill_bundle,
+    shipped_skill_bundle_root,
 )
 from unclaw.skills.file_models import UnknownSkillIdError
 
 pytestmark = pytest.mark.unit
 
 
-def test_internal_skill_bundle_root_points_at_canonical_skills_package() -> None:
-    skills_root = internal_skill_bundle_root()
+def test_shipped_skill_bundle_root_points_at_top_level_skills_directory() -> None:
+    skills_root = shipped_skill_bundle_root()
+    project_root = skills_root.parent
 
     assert skills_root.name == "skills"
     assert (skills_root / "weather" / "SKILL.md").is_file()
+    assert not (project_root / "src" / "unclaw" / "skills" / "weather" / "SKILL.md").exists()
 
 
 def test_discover_skill_bundles_only_includes_directories_with_skill_md_in_stable_order(

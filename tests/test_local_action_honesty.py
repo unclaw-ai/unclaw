@@ -71,7 +71,7 @@ def test_capability_context_prohibits_claiming_write_in_slash_command_mode() -> 
     context = _capability_context(model_can_call_tools=False)
 
     # Must say the action was not performed / nothing was written or changed.
-    assert "You cannot write, modify, or create any file or note in this turn" in context
+    assert "You cannot write, modify, or create any file in this turn" in context
     # Must instruct model to say so honestly.
     assert "say the action was not performed" in context or "you have not written" in context
 
@@ -113,7 +113,6 @@ def test_capability_context_requires_tool_output_before_claiming_write_in_native
     assert "Only claim a file was written, created, or modified" in context
     # Must mention the relevant tools.
     assert "write_text_file" in context
-    assert "create_note" in context or "update_note" in context
     # Must instruct model to say action has not happened if tool did not run.
     assert "has not happened yet" in context
 

@@ -28,10 +28,11 @@ dev = [
 unclaw = "unclaw.main:main"
 
 [tool.setuptools]
-package-dir = { "" = "src" }
+package-dir = { "" = "src", "skills" = "skills" }
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["unclaw*", "skills*"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"

@@ -87,7 +87,6 @@ Current built-in tools include:
 - `list_directory`
 - `write_text_file` (permissioned; fails on existing files unless `overwrite=true`; relative paths go to `data/files/`)
 - `system_info` (read-only local machine snapshot)
-- `create_note`, `read_note`, `list_notes`, `update_note` (notes in `data/notes/`)
 - `inspect_session_history` (exact recall of persisted session messages)
 - `remember_long_term_memory`, `search_long_term_memory`, `list_long_term_memory`, `forget_long_term_memory`
 

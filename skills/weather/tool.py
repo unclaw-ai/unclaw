@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from unclaw.async_utils import run_blocking
-from unclaw.skills.weather.contracts import (
+from skills.weather.contracts import (
     WeatherCurrentConditionsPayload,
     WeatherDailyForecastPayload,
     WeatherLookupPayload,
@@ -38,7 +38,7 @@ _DEFAULT_FORECAST_DAYS = 7
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _WEATHER_TEMPORAL_PATTERNS: tuple[tuple[str, bool, re.Pattern[str]], ...] = (
     ("today", True, re.compile(r"\btoday\b", flags=re.IGNORECASE)),
-    ("today", True, re.compile(r"\baujourd['’]hui\b", flags=re.IGNORECASE)),
+    ("today", True, re.compile(r"\baujourd['']hui\b", flags=re.IGNORECASE)),
     ("tomorrow", True, re.compile(r"\btomorrow\b", flags=re.IGNORECASE)),
     ("tomorrow", True, re.compile(r"\bdemain\b", flags=re.IGNORECASE)),
     (

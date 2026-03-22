@@ -35,7 +35,7 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
-from unclaw.skills.weather.tool import ground_weather_tool_result
+from skills.weather.tool import ground_weather_tool_result
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry

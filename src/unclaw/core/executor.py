@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from unclaw.constants import NOTES_DIRECTORY_NAME
 from unclaw.memory.long_term_store import LongTermStore
 from unclaw.settings import Settings
-from unclaw.skills.weather.tool import GET_WEATHER_DEFINITION, register_weather_tools
+from skills.weather.tool import GET_WEATHER_DEFINITION, register_weather_tools
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
@@ -26,13 +24,6 @@ from unclaw.tools.long_term_memory_tools import (
     REMEMBER_LONG_TERM_MEMORY_DEFINITION,
     SEARCH_LONG_TERM_MEMORY_DEFINITION,
     register_long_term_memory_tools,
-)
-from unclaw.tools.notes_tools import (
-    CREATE_NOTE_DEFINITION,
-    LIST_NOTES_DEFINITION,
-    READ_NOTE_DEFINITION,
-    UPDATE_NOTE_DEFINITION,
-    register_notes_tools,
 )
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION, register_session_tools
@@ -67,10 +58,6 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     register_weather_tools(registry)
     register_system_tools(registry)
     register_terminal_tools(registry)
-    register_notes_tools(
-        registry,
-        notes_dir=Path.cwd().resolve() / NOTES_DIRECTORY_NAME,
-    )
     return registry
 
 
@@ -102,10 +89,6 @@ def create_default_tool_registry(
             configured_roots=settings.app.security.tools.files.allowed_roots,
             default_working_directory=settings.paths.project_root,
             max_timeout_seconds=settings.app.runtime.tool_timeout_seconds,
-        )
-        register_notes_tools(
-            registry,
-            notes_dir=settings.paths.data_dir / NOTES_DIRECTORY_NAME,
         )
 
     if session_manager is not None:
@@ -163,20 +146,16 @@ def execute_tool_call(
 
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
-    "CREATE_NOTE_DEFINITION",
     "DELETE_FILE_DEFINITION",
     "FORGET_LONG_TERM_MEMORY_DEFINITION",
     "GET_WEATHER_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_LONG_TERM_MEMORY_DEFINITION",
-    "LIST_NOTES_DEFINITION",
-    "READ_NOTE_DEFINITION",
     "REMEMBER_LONG_TERM_MEMORY_DEFINITION",
     "RUN_TERMINAL_COMMAND_DEFINITION",
     "SEARCH_LONG_TERM_MEMORY_DEFINITION",
     "SYSTEM_INFO_DEFINITION",
     "ToolExecutor",
-    "UPDATE_NOTE_DEFINITION",
     "WRITE_TEXT_FILE_DEFINITION",
     "create_default_tool_registry",
     "execute_tool_call",

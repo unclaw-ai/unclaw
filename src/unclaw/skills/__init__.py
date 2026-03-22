@@ -33,10 +33,6 @@ _EXPORTED_MEMBERS = {
     ),
     "discover_skill_bundles": ("unclaw.skills.file_loader", "discover_skill_bundles"),
     "get_skill_bundle_roots": ("unclaw.skills.file_loader", "get_skill_bundle_roots"),
-    "internal_skill_bundle_root": (
-        "unclaw.skills.file_loader",
-        "internal_skill_bundle_root",
-    ),
     "list_known_skill_ids": ("unclaw.skills.file_loader", "list_known_skill_ids"),
     "load_active_skill_bundles": (
         "unclaw.skills.file_loader",
@@ -55,6 +51,10 @@ _EXPORTED_MEMBERS = {
     "resolve_legacy_manifest_skill_id": (
         "unclaw.skills.file_loader",
         "resolve_legacy_manifest_skill_id",
+    ),
+    "shipped_skill_bundle_root": (
+        "unclaw.skills.file_loader",
+        "shipped_skill_bundle_root",
     ),
 }
 

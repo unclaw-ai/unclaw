@@ -29,7 +29,7 @@ Current reality contributors must keep in mind:
 - the `fast` and `codex` profiles remain `tool_mode: json_plan` and do not activate the agent loop,
 - grounded search is the most integrated model-driven tool path today,
 - `/read`, `/ls`, and `/fetch` are still mainly slash-command-driven in normal use,
-- local tools (system_info, notes, write_text_file, LTM memory) are now shipped but the agent loop's reliability scales with model size,
+- local tools (system_info, write_text_file, session history, long-term memory) are now shipped but the agent loop's reliability scales with model size,
 - and the product is still moving toward a more broadly autonomous default experience — the foundation is in place but task complexity limits remain for small models.
 
 Assume technical users on consumer hardware and keep claims honest about those current limits.

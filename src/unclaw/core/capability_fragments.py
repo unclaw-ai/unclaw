@@ -24,25 +24,13 @@ from unclaw.tools.long_term_memory_tools import (
     REMEMBER_LONG_TERM_MEMORY_DEFINITION,
     SEARCH_LONG_TERM_MEMORY_DEFINITION,
 )
-from unclaw.tools.notes_tools import (
-    CREATE_NOTE_DEFINITION,
-    LIST_NOTES_DEFINITION,
-    READ_NOTE_DEFINITION,
-    UPDATE_NOTE_DEFINITION,
-)
-from unclaw.skills.weather.tool import GET_WEATHER_DEFINITION
+from skills.weather.tool import GET_WEATHER_DEFINITION
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
 
 _MODULE_REFERENCE = "unclaw.core.capability_fragments"
-_NOTES_TOOL_NAMES = (
-    CREATE_NOTE_DEFINITION.name,
-    READ_NOTE_DEFINITION.name,
-    LIST_NOTES_DEFINITION.name,
-    UPDATE_NOTE_DEFINITION.name,
-)
 _LONG_TERM_MEMORY_TOOL_NAMES = (
     REMEMBER_LONG_TERM_MEMORY_DEFINITION.name,
     SEARCH_LONG_TERM_MEMORY_DEFINITION.name,
@@ -69,7 +57,6 @@ class CapabilitySummaryLike(Protocol):
     shell_command_execution_available: bool
     memory_summary_available: bool
     model_can_call_tools: bool
-    notes_available: bool
     local_file_write_available: bool
     session_history_recall_available: bool
     long_term_memory_available: bool
@@ -111,7 +98,6 @@ class CapabilitySummaryFlag(StrEnum):
     SHELL_COMMAND_EXECUTION_AVAILABLE = "shell_command_execution_available"
     MEMORY_SUMMARY_AVAILABLE = "memory_summary_available"
     MODEL_CAN_CALL_TOOLS = "model_can_call_tools"
-    NOTES_AVAILABLE = "notes_available"
     LOCAL_FILE_WRITE_AVAILABLE = "local_file_write_available"
     SESSION_HISTORY_RECALL_AVAILABLE = "session_history_recall_available"
     LONG_TERM_MEMORY_AVAILABLE = "long_term_memory_available"
@@ -466,11 +452,6 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "and stepwise automation. Captures stdout/stderr, enforces a timeout, "
             "and does not provide an interactive terminal.",
         ),
-        "available.notes": _static_prompt(
-            "available.notes",
-            "create_note / read_note / list_notes / update_note: "
-            "create, read, list, or overwrite local markdown notes.",
-        ),
         "available.local_file_write": _static_prompt(
             "available.local_file_write",
             "write_text_file <path>: write a new local file. "
@@ -556,10 +537,6 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "unavailable.shell_command_execution",
             "Local shell or terminal command execution via run_terminal_command.",
         ),
-        "unavailable.notes": _static_prompt(
-            "unavailable.notes",
-            "Local notes (create_note, read_note, list_notes, update_note).",
-        ),
         "unavailable.local_file_write": _static_prompt(
             "unavailable.local_file_write",
             "Local file write via write_text_file.",
@@ -600,8 +577,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Do not call tools for parts already answerable from the conversation.",
             "Combine tool results into one coherent final answer.",
             "Only claim a file was written, created, or modified if write_text_file "
-            "or a notes write tool (create_note, update_note) output is present in "
-            "this conversation. If no such tool ran, say the action has not happened yet.",
+            "output is present in this conversation. If no such tool ran, say the "
+            "action has not happened yet.",
         ),
         "guidance.user_initiated.core_rules": _static_prompt(
             "guidance.user_initiated.core_rules",
@@ -609,7 +586,7 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "command. You cannot invoke them yourself in this turn.",
             "Do not say \"let me search\" or \"I will look that up\" as if you can "
             "perform the action right now.",
-            "You cannot write, modify, or create any file or note in this turn. If "
+            "You cannot write, modify, or create any file in this turn. If "
             "the user asks you to do so, say the action was not performed — you have "
             "not written or changed anything.",
         ),
@@ -831,19 +808,6 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         ),
     ),
     _fragment(
-        fragment_id="available.notes",
-        capability_id="notes",
-        name="Available notes tool family line",
-        kind=CapabilityFragmentKind.AVAILABLE_TOOL,
-        prompt_symbol="_build_available_tool_lines",
-        prompt_detail="notes",
-        availability=CapabilityAvailability(
-            required_summary_flags=(CapabilitySummaryFlag.NOTES_AVAILABLE,),
-        ),
-        related_builtin_tool_names=_NOTES_TOOL_NAMES,
-        related_summary_flags=(CapabilitySummaryFlag.NOTES_AVAILABLE,),
-    ),
-    _fragment(
         fragment_id="available.local_file_write",
         capability_id="local_file_write",
         name="Available local file write tool line",
@@ -1051,19 +1015,6 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         related_summary_flags=(
             CapabilitySummaryFlag.SHELL_COMMAND_EXECUTION_AVAILABLE,
         ),
-    ),
-    _fragment(
-        fragment_id="unavailable.notes",
-        capability_id="notes",
-        name="Unavailable notes tool family line",
-        kind=CapabilityFragmentKind.UNAVAILABLE_CAPABILITY,
-        prompt_symbol="_build_unavailable_lines",
-        prompt_detail="notes",
-        availability=CapabilityAvailability(
-            forbidden_summary_flags=(CapabilitySummaryFlag.NOTES_AVAILABLE,),
-        ),
-        related_builtin_tool_names=_NOTES_TOOL_NAMES,
-        related_summary_flags=(CapabilitySummaryFlag.NOTES_AVAILABLE,),
     ),
     _fragment(
         fragment_id="unavailable.local_file_write",

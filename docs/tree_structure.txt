@@ -100,7 +100,6 @@ unclaw/
 │       │   ├── dispatcher.py
 │       │   ├── file_tools.py
 │       │   ├── long_term_memory_tools.py
-│       │   ├── notes_tools.py
 │       │   ├── registry.py
 │       │   ├── session_tools.py
 │       │   ├── system_tools.py
@@ -131,7 +130,6 @@ unclaw/
 │   ├── test_memory_architecture.py
 │   ├── test_memory_status.py
 │   ├── test_memory_summary.py
-│   ├── test_notes_tools.py
 │   ├── test_ollama_provider.py
 │   ├── test_onboarding.py
 │   ├── test_p34_capability_and_routing.py

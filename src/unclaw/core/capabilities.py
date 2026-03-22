@@ -26,7 +26,6 @@ from unclaw.tools.long_term_memory_tools import (
     REMEMBER_LONG_TERM_MEMORY_DEFINITION,
     SEARCH_LONG_TERM_MEMORY_DEFINITION,
 )
-from unclaw.tools.notes_tools import CREATE_NOTE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
@@ -74,7 +73,6 @@ class RuntimeCapabilitySummary:
     system_info_available: bool
     memory_summary_available: bool
     model_can_call_tools: bool = False
-    notes_available: bool = False
     local_file_write_available: bool = False
     session_history_recall_available: bool = False
     long_term_memory_available: bool = False
@@ -115,7 +113,6 @@ def build_runtime_capability_summary(
         ),
         memory_summary_available=memory_summary_available,
         model_can_call_tools=model_can_call_tools,
-        notes_available=CREATE_NOTE_DEFINITION.name in available_tool_name_set,
         local_file_write_available=WRITE_TEXT_FILE_DEFINITION.name in available_tool_name_set,
         session_history_recall_available=(
             INSPECT_SESSION_HISTORY_DEFINITION.name in available_tool_name_set

@@ -35,7 +35,7 @@ The remaining work is to make that agent/runtime behavior broader, more default,
 - committed Telegram config is now deny-by-default with `allowed_chat_ids: []`
 - local secret files and the SQLite database are hardened to owner-only permissions on POSIX
 - tool and search output is wrapped as untrusted content before being fed back to the model
-- `system_info` tool, notes tool family (`create_note`, `read_note`, `list_notes`, `update_note`), `write_text_file`, `inspect_session_history`, and long-term memory tools are now registered and active
+- `system_info`, `write_text_file`, `inspect_session_history`, and long-term memory tools are now registered and active
 
 ### Still remaining
 
@@ -132,7 +132,7 @@ In progress.
 - model-assisted routing between chat and web-backed search
 - shared `/search` handling through the same runtime path as normal turns
 - native `search_web` calls inside the normal agent loop when a native profile is selected
-- `system_info`, notes family, `write_text_file`, `inspect_session_history`, and long-term memory tools are now shipped
+- `system_info`, `write_text_file`, `inspect_session_history`, and long-term memory tools are now shipped
 
 ### Still missing before this phase can be called complete
 
@@ -226,7 +226,6 @@ Partially landed; most scope is still future work.
 ### Already landed
 
 - `system_info` (read-only local machine info: OS, hostname, date/time, locale)
-- notes tool family (`create_note`, `read_note`, `list_notes`, `update_note` in `data/notes/`)
 - `write_text_file` (permissioned writes inside allowed roots; relative paths go to `data/files/`)
 
 ### Remaining scope

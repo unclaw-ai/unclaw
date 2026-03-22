@@ -192,7 +192,6 @@ def _make_full_summary(*, read_available: bool = True) -> RuntimeCapabilitySumma
         system_info_available=False,
         memory_summary_available=False,
         model_can_call_tools=False,
-        notes_available=False,
         local_file_write_available=False,
     )
 

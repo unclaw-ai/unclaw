@@ -46,7 +46,6 @@ Properties:
 Examples in the current repo:
 
 - file tools in `src/unclaw/tools/file_tools.py`
-- notes tools in `src/unclaw/tools/notes_tools.py`
 - terminal execution in `src/unclaw/tools/terminal_tools.py`
 - system info in `src/unclaw/tools/system_tools.py`
 - memory tools in `src/unclaw/tools/long_term_memory_tools.py`
@@ -96,12 +95,12 @@ Rule of thumb:
 
 ## Proposed skill bundle shape
 
-Shipped optional skills should move to simple directories under `src/unclaw/skills/`.
+Shipped optional skills should move to simple directories under the repo-root `skills/`.
 
 Example:
 
 ```text
-src/unclaw/skills/
+skills/
   weather/
     SKILL.md
     references/
@@ -121,7 +120,7 @@ Current manifest ids like `information.weather` can be supported as migration al
 
 ### Discovery
 
-Phase 2 should discover shipped skills by scanning `src/unclaw/skills/` for directories that contain `SKILL.md`.
+Phase 2 should discover shipped skills by scanning `skills/` for directories that contain `SKILL.md`.
 
 Discovery should be:
 
@@ -215,16 +214,18 @@ Sticky notes are explicitly paused for this redesign.
 
 Reason:
 
-- Unclaw already has built-in notes tools with a clear storage boundary in `data/notes/`
+- Unclaw intentionally has no shipped built-in notes subsystem right now
+- future document creation and sticky/post-it behavior are separate product surfaces
 - "sticky notes" or desktop post-it behavior is a product-surface question, not just a skill-format question
-- the boundary between built-in notes, desktop UI behavior, and any future skill wrapper is not clear enough yet
+- the boundary between document creation, desktop UI behavior, and any future skill wrapper is not clear enough yet
 - the current repo does not have a stable checked-in sticky-notes implementation to preserve
 
 Therefore:
 
 - do not continue sticky-notes work in the current skill architecture
 - do not use sticky notes to justify new runtime plumbing
-- revisit this only after the product boundary with built-in notes is redesigned clearly
+- do not reintroduce the removed legacy notes subsystem through a skill wrapper
+- revisit this only after the product boundary is redesigned clearly
 
 ## Migration path from the current repo
 
@@ -233,7 +234,7 @@ Phase 2 should implement this in small steps:
 1. Add a file-first skill loader that discovers `SKILL.md` bundles and can build a compact active-skill catalog.
 2. Keep `skills.enabled_skill_ids` as the activation switch initially, with temporary alias support for current dotted ids if needed.
 3. Add on-demand full-skill loading for a selected skill without changing the core tool loop or memory architecture.
-4. Migrate the weather skill text out of manifest fragments into `src/unclaw/skills/weather/SKILL.md`.
+4. Migrate the weather skill text out of manifest fragments into `skills/weather/SKILL.md`.
 5. Normalize weather execution ownership so `get_weather` is clearly a built-in Python tool, not a skill-owned runtime subsystem.
 6. Once the weather path works, migrate other optional skills away from Python manifests.
 7. Remove the old manifest/registry/prompt-fragment skill machinery after parity is reached.

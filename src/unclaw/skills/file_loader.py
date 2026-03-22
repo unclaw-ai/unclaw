@@ -1,4 +1,4 @@
-"""Filesystem discovery and activation for file-first skill bundles."""
+"""Filesystem discovery and activation for file-first optional skill bundles."""
 
 from __future__ import annotations
 
@@ -28,17 +28,25 @@ _ASTERISK_EMPHASIS_PATTERN = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _LIST_PREFIX_PATTERN = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)")
 
 
-def internal_skill_bundle_root() -> Path:
-    return Path(__file__).resolve().parent
+def shipped_skill_bundle_root(project_root: Path | None = None) -> Path:
+    if project_root is not None:
+        return project_root.expanduser().resolve() / "skills"
+
+    module_path = Path(__file__).resolve()
+    for candidate in module_path.parents:
+        if _looks_like_repo_root(candidate):
+            return (candidate / "skills").resolve()
+
+    return (module_path.parents[3] / "skills").resolve()
 
 
-def get_skill_bundle_roots() -> tuple[Path, ...]:
-    return (internal_skill_bundle_root(),)
+def get_skill_bundle_roots(project_root: Path | None = None) -> tuple[Path, ...]:
+    return (shipped_skill_bundle_root(project_root),)
 
 
 @lru_cache(maxsize=1)
 def discover_internal_skill_bundles() -> tuple[SkillBundle, ...]:
-    return discover_skill_bundles(skills_root=internal_skill_bundle_root())
+    return discover_skill_bundles(skills_root=shipped_skill_bundle_root())
 
 
 def discover_skill_bundles(*, skills_root: Path | None = None) -> tuple[SkillBundle, ...]:
@@ -169,7 +177,11 @@ def _resolve_discovered_bundles(
 
 
 def _resolve_skills_root(skills_root: Path | None) -> Path:
-    return (skills_root or internal_skill_bundle_root()).expanduser().resolve()
+    return (skills_root or shipped_skill_bundle_root()).expanduser().resolve()
+
+
+def _looks_like_repo_root(path: Path) -> bool:
+    return (path / "pyproject.toml").is_file() and (path / "src" / "unclaw").is_dir()
 
 
 def _extract_display_name(raw_content: str, *, bundle_name: str) -> str:
@@ -280,10 +292,10 @@ __all__ = [
     "discover_internal_skill_bundles",
     "discover_skill_bundles",
     "get_skill_bundle_roots",
-    "internal_skill_bundle_root",
     "list_known_skill_ids",
     "load_active_skill_bundles",
     "load_skill_bundle",
     "resolve_file_first_skill_id",
     "resolve_legacy_manifest_skill_id",
+    "shipped_skill_bundle_root",
 ]

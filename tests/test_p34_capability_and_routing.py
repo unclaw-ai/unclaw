@@ -1,13 +1,13 @@
 """Targeted tests for P3-4 — capability context and routing for local actions.
 
 Proves:
-- notes tools appear in the capability context when they are registered
+- removed notes tools stay absent from the runtime capability context
 - write_text_file appears in the capability context when it is registered
 - write_text_file description explicitly states overwrite=false as the default
 - system_info appears in the capability context (regression guard)
 - Router system prompt covers local actions via the chat route
 - Existing web_search routing behavior is not broken
-- build_runtime_capability_summary populates notes_available and local_file_write_available
+- build_runtime_capability_summary populates local_file_write_available
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ pytestmark = pytest.mark.unit
 
 
 def _full_capability_summary(*, model_can_call_tools: bool = False) -> RuntimeCapabilitySummary:
-    """Build a summary using the default tool registry (all 10 tools registered)."""
+    """Build a summary using the default tool registry."""
     registry = create_default_tool_registry()
     return build_runtime_capability_summary(
         tool_registry=registry,
@@ -56,23 +56,13 @@ def _empty_capability_summary() -> RuntimeCapabilitySummary:
 
 
 # ---------------------------------------------------------------------------
-# P3-4: notes_available and local_file_write_available flags
+# P3-4: local_file_write_available flag and removed notes runtime surface
 # ---------------------------------------------------------------------------
-
-
-def test_notes_available_true_when_notes_tools_registered() -> None:
-    summary = _full_capability_summary()
-    assert summary.notes_available is True
 
 
 def test_local_file_write_available_true_when_write_tool_registered() -> None:
     summary = _full_capability_summary()
     assert summary.local_file_write_available is True
-
-
-def test_notes_available_false_when_no_tools_registered() -> None:
-    summary = _empty_capability_summary()
-    assert summary.notes_available is False
 
 
 def test_local_file_write_available_false_when_no_tools_registered() -> None:
@@ -81,25 +71,24 @@ def test_local_file_write_available_false_when_no_tools_registered() -> None:
 
 
 # ---------------------------------------------------------------------------
-# P3-4: capability context includes notes tools when available
+# P3-4: removed notes tools are no longer exposed
 # ---------------------------------------------------------------------------
 
 
-def test_capability_context_includes_notes_tools_when_available() -> None:
-    summary = _full_capability_summary()
-    context = build_runtime_capability_context(summary)
-    assert "create_note" in context
-    assert "read_note" in context
-    assert "list_notes" in context
-    assert "update_note" in context
+def test_default_registry_does_not_register_removed_notes_tools() -> None:
+    registry = create_default_tool_registry()
+    for name in ("create_note", "read_note", "list_notes", "update_note"):
+        assert registry.get(name) is None
 
 
-def test_capability_context_omits_notes_when_unavailable() -> None:
-    summary = _empty_capability_summary()
-    context = build_runtime_capability_context(summary)
-    # notes tools should appear in the unavailable section, not as callable
-    assert "create_note" in context  # listed as unavailable
-    assert "Local notes" in context
+def test_capability_context_does_not_advertise_removed_notes_tools() -> None:
+    for summary in (_full_capability_summary(), _empty_capability_summary()):
+        context = build_runtime_capability_context(summary)
+        assert "create_note" not in context
+        assert "read_note" not in context
+        assert "list_notes" not in context
+        assert "update_note" not in context
+        assert "Local notes" not in context
 
 
 # ---------------------------------------------------------------------------
@@ -154,14 +143,14 @@ def test_capability_context_includes_system_info_when_available() -> None:
 def test_router_system_prompt_mentions_local_actions() -> None:
     """The router prompt must explicitly guide local actions to the chat route.
 
-    This prevents the model from mistakenly routing system info, notes,
-    or file-write requests to web_search.
+    This prevents the model from mistakenly routing system info or file-write
+    requests to web_search.
     """
     assert "local actions" in _ROUTER_SYSTEM_PROMPT
     # Must include at least one concrete local action category
     assert any(
         term in _ROUTER_SYSTEM_PROMPT
-        for term in ("system information", "notes", "file operations")
+        for term in ("system information", "file operations")
     )
 
 
@@ -232,8 +221,8 @@ def test_router_routes_system_info_request_to_chat(monkeypatch) -> None:
     assert route.search_query is None
 
 
-def test_router_routes_notes_request_to_chat(monkeypatch) -> None:
-    """A notes creation request must stay on the chat route, not web_search."""
+def test_router_routes_sticky_note_style_request_to_chat(monkeypatch) -> None:
+    """A sticky-note-style local action request must stay on chat, not web_search."""
     settings = _load_repo_settings()
     registry = create_default_tool_registry(settings)
     capability_summary = build_runtime_capability_summary(
@@ -248,7 +237,7 @@ def test_router_routes_notes_request_to_chat(monkeypatch) -> None:
     route = route_request(
         settings=settings,
         model_profile_name="main",
-        user_input="Create a note titled 'todo' with my task list.",
+        user_input="Create a sticky note on my desktop saying buy milk.",
         thinking_enabled=False,
         capability_summary=capability_summary,
     )

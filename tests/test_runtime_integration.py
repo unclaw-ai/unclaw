@@ -17,6 +17,7 @@ from unclaw.core.capabilities import (
 )
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.context_builder import build_untrusted_tool_message_content
+from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
 from unclaw.core.router import RouteKind
 from unclaw.core.runtime import (
@@ -169,11 +170,20 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert messages[-1].content == "Local reply"
 
         provider_messages = captured["messages"]
+        expected_builtin_tool_count = len(
+            create_default_tool_registry(
+                settings,
+                session_manager=session_manager,
+            ).list_tools()
+        )
         assert isinstance(provider_messages, list)
         assert all(isinstance(message, LLMMessage) for message in provider_messages)
         assert provider_messages[0].content == settings.system_prompt
         assert provider_messages[1].role is LLMRole.SYSTEM
-        assert "Enabled built-in tools: 21" in provider_messages[1].content
+        assert (
+            f"Enabled built-in tools: {expected_builtin_tool_count}"
+            in provider_messages[1].content
+        )
         assert "Available built-in tools (compact):" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
@@ -7535,7 +7545,7 @@ def _freeze_weather_grounding_date(monkeypatch) -> None:
         def today(cls) -> FixedDate:
             return cls(2026, 3, 21)
 
-    monkeypatch.setattr("unclaw.skills.weather.tool.date", FixedDate)
+    monkeypatch.setattr("skills.weather.tool.date", FixedDate)
 
 
 # ---------------------------------------------------------------------------

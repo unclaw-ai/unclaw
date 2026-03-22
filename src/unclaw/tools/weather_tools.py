@@ -1,6 +1,6 @@
 """Compatibility layer for the skill-owned weather backend."""
 
-from unclaw.skills.weather.tool import (
+from skills.weather.tool import (
     GET_WEATHER_DEFINITION,
     WeatherCurrentConditions,
     WeatherDailyForecast,

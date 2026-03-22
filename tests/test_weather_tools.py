@@ -8,8 +8,8 @@ import pytest
 
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.settings import load_settings
-from unclaw.skills.weather import tool as weather_tool_module
-from unclaw.skills.weather.tool import (
+from skills.weather import tool as weather_tool_module
+from skills.weather.tool import (
     GET_WEATHER_DEFINITION,
     WeatherLookupError,
     WeatherLookupRequest,
@@ -75,7 +75,7 @@ def test_lookup_weather_returns_typed_payload_from_dedicated_backend(
     )
 
     monkeypatch.setattr(
-        "unclaw.skills.weather.tool._fetch_json_document",
+        "skills.weather.tool._fetch_json_document",
         lambda _url: next(responses),
     )
 
@@ -110,7 +110,7 @@ def test_get_weather_formats_result_and_returns_payload(
 ) -> None:
     _freeze_weather_today(monkeypatch, 2026, 3, 21)
     monkeypatch.setattr(
-        "unclaw.skills.weather.tool.lookup_weather",
+        "skills.weather.tool.lookup_weather",
         lambda request: lookup_weather_result_fixture(request.location),
     )
 
@@ -134,7 +134,7 @@ def test_get_weather_fails_cleanly_for_unknown_location(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "unclaw.skills.weather.tool._fetch_json_document",
+        "skills.weather.tool._fetch_json_document",
         lambda _url: {"results": []},
     )
 
@@ -221,7 +221,7 @@ def test_lookup_weather_retries_progressively_simpler_location_variants(
         }
 
     monkeypatch.setattr(
-        "unclaw.skills.weather.tool._fetch_json_document",
+        "skills.weather.tool._fetch_json_document",
         fake_fetch_json_document,
     )
 
@@ -288,7 +288,7 @@ def test_lookup_weather_selects_requested_relative_day_from_location_argument(
         )
     )
     monkeypatch.setattr(
-        "unclaw.skills.weather.tool._fetch_json_document",
+        "skills.weather.tool._fetch_json_document",
         lambda _url: next(responses),
     )
 
@@ -364,7 +364,7 @@ def test_get_weather_async_runs_sync_weather_lookup_in_worker_thread(
         observed["call"] = call
         return lookup_weather_tool_result_fixture()
 
-    monkeypatch.setattr("unclaw.skills.weather.tool.get_weather", fake_get_weather)
+    monkeypatch.setattr("skills.weather.tool.get_weather", fake_get_weather)
 
     result = asyncio.run(
         get_weather_async(
@@ -395,7 +395,7 @@ def lookup_weather_result_fixture(location: str):
 
 
 def lookup_weather_response_fixture():
-    from unclaw.skills.weather.tool import (
+    from skills.weather.tool import (
         WeatherCurrentConditions,
         WeatherDailyForecast,
         WeatherLookupResponse,
@@ -503,4 +503,4 @@ def _freeze_weather_today(
         def today(cls) -> FixedDate:
             return cls(year, month, day)
 
-    monkeypatch.setattr("unclaw.skills.weather.tool.date", FixedDate)
+    monkeypatch.setattr("skills.weather.tool.date", FixedDate)
