@@ -1,13 +1,12 @@
-"""Tests for Phase 4: on-demand full skill loading.
+"""Tests for active skill content injection into context messages.
 
 Success criteria:
-- select_skill_for_turn returns None with no bundles, empty message, or no match
-- select_skill_for_turn returns a bundle when the user message matches key terms
-- only the first matching bundle is returned
-- _resolve_full_skill_content_for_turn returns "" when no match
-- full SKILL.md is injected as a dedicated SYSTEM message when relevant
+- select_skill_for_turn (utility) works as a standalone keyword matcher
+- _resolve_full_skill_content_for_turn injects SKILL.md for ALL active skills
+  unconditionally — keyword matching is not used to gate injection
+- full SKILL.md is injected as a dedicated SYSTEM message for every active skill
 - compact catalog is still present alongside full-skill injection
-- at most one full skill is injected per turn
+- _resolve_full_skill_content_for_turn is called exactly once per turn
 - unknown skill id produces no injection and no crash
 """
 
@@ -162,7 +161,8 @@ class TestFullSkillInjectionInContext:
         )
         assert not any("# Weather" in m.content for m in messages)
 
-    def test_no_full_skill_when_message_does_not_match(self, monkeypatch) -> None:
+    def test_no_full_skill_when_resolver_returns_empty(self, monkeypatch) -> None:
+        """When the resolver returns empty string, no full-skill message is added."""
         self._base_patches(
             monkeypatch,
             catalog="Active optional skills:\n- weather: Live weather.",
@@ -326,3 +326,28 @@ class TestOnDemandIntegration:
         content = result.load_raw_content()
         assert content.strip()
         assert "# Weather" in content
+
+    def test_full_skill_md_injected_for_unrelated_message(self, monkeypatch) -> None:
+        """Full SKILL.md is injected unconditionally — no keyword matching gate.
+
+        This validates the fix: even a message with no weather-related keywords
+        still receives the full weather SKILL.md so the model can choose
+        skill-owned tools regardless of message language or phrasing.
+        """
+        monkeypatch.setattr(
+            "unclaw.core.context_builder.build_active_skill_catalog",
+            lambda **kwargs: "Active optional skills:\n- weather: Live weather.",
+        )
+        session_manager = _make_session_manager(enabled_skill_ids=("weather",))
+        messages = build_context_messages(
+            session_manager=session_manager,
+            session_id="s1",
+            user_message="Tell me a joke.",  # no 'weather' keyword
+            capability_summary=_minimal_capability_summary(),
+            model_profile_name="native",
+        )
+        system_msgs = [m for m in messages if m.role is LLMRole.SYSTEM]
+        full_skill_msgs = [m for m in system_msgs if "# Weather" in m.content]
+        assert len(full_skill_msgs) == 1, (
+            "Full SKILL.md must be injected even when user message contains no skill keywords"
+        )
