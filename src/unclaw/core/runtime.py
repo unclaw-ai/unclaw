@@ -20,7 +20,6 @@ from unclaw.core.orchestrator import (
     OrchestratorError,
     OrchestratorTurnResult,
 )
-from unclaw.core.router import RouteKind, route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
 from unclaw.constants import (
@@ -35,7 +34,6 @@ from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
-from skills.weather.tool import ground_weather_tool_result
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry
@@ -299,7 +297,6 @@ def run_user_turn(
     tool_call_callback: Callable[[ToolCall], None] | None = None,
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: RuntimeTurnCancellation | None = None,
-    on_search_route: Callable[[], None] | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -323,12 +320,8 @@ def run_user_turn(
         session_manager.settings,
         session_manager=session_manager,
     )
-    router_exempt_profile = _is_router_exempt_chat_profile(
-        selected_model_profile_name,
-        selected_model,
-    )
     capability_tool_registry = (
-        ToolRegistry() if router_exempt_profile else active_tool_registry
+        ToolRegistry() if _is_tool_mode_none_profile(selected_model) else active_tool_registry
     )
     tool_guard_state = _RuntimeToolGuardState(
         tool_timeout_seconds=(
@@ -340,8 +333,6 @@ def run_user_turn(
         cancellation=turn_cancellation,
     )
 
-    # Determine the responder-native tool path up front so routing and the
-    # responder share the same native-tool runtime after route selection.
     legacy_tool_definitions = _resolve_tool_definitions(
         tool_registry=active_tool_registry,
         model_profile=selected_model,
@@ -389,50 +380,10 @@ def run_user_turn(
         if memory_context_note is not None:
             system_context_notes = (memory_context_note,)
 
-        route = route_request(
-            settings=session_manager.settings,
-            model_profile_name=selected_model_profile_name,
-            user_input=user_input,
-            thinking_enabled=thinking_enabled,
-            capability_summary=capability_summary,
-            allow_web_search_routing=False,
-        )
-        route_planner_profile_name = _read_route_planner_profile_name(route)
-        route_planner_available = _read_route_planner_available(route)
-        route_planner_fallback_reason = _read_route_planner_fallback_reason(route)
-        active_tracer.trace_route_selected(
-            session_id=session.id,
-            route_kind=route.kind.value,
-            model_profile_name=route.model_profile_name,
-            planner_profile_name=route_planner_profile_name,
-            planner_available=route_planner_available,
-            planner_fallback_reason=route_planner_fallback_reason,
-        )
         responder_tool_definitions = legacy_tool_definitions
         responder_capability_summary = capability_summary
 
-        if route.kind is RouteKind.WEB_SEARCH:
-            if on_search_route is not None:
-                on_search_route()
-            (
-                route_context_notes,
-                active_assistant_reply_transform,
-                runtime_explicit_tool_call,
-            ) = _prepare_web_search_route(
-                session_manager=session_manager,
-                session_id=session.id,
-                user_input=user_input,
-                route=route,
-                assistant_reply_transform=assistant_reply_transform,
-            )
-            system_context_notes = (*system_context_notes, *route_context_notes)
-            # Keep the shared native responder loop available after the forced
-            # initial search. Non-native / chat-only profiles already have
-            # responder_tool_definitions=None from _resolve_tool_definitions().
-
-        if runtime_explicit_tool_call is not None and (
-            route.kind is RouteKind.WEB_SEARCH or responder_tool_definitions is None
-        ):
+        if runtime_explicit_tool_call is not None and responder_tool_definitions is None:
             assistant_reply = _preflight_runtime_tool_batch(
                 tool_calls=(runtime_explicit_tool_call,),
                 tool_guard_state=tool_guard_state,
@@ -466,7 +417,7 @@ def run_user_turn(
                 response = orchestrator.run_turn(
                     session_id=session.id,
                     user_message=user_input,
-                    model_profile_name=route.model_profile_name,
+                    model_profile_name=selected_model_profile_name,
                     capability_summary=responder_capability_summary,
                     system_context_notes=system_context_notes,
                     thinking_enabled=thinking_enabled,
@@ -521,7 +472,7 @@ def run_user_turn(
                         tracer=active_tracer,
                         tool_registry=active_tool_registry,
                         tool_definitions=responder_tool_definitions,
-                        model_profile_name=route.model_profile_name,
+                        model_profile_name=selected_model_profile_name,
                         thinking_enabled=thinking_enabled,
                         content_callback=stream_output_func,
                         max_steps=max_agent_steps,
@@ -600,114 +551,12 @@ def _build_session_memory_context_note(
     return normalized_note or None
 
 
-def _read_route_planner_profile_name(
-    route: Any,
-) -> str | None:
-    value = getattr(route, "planner_profile_name", None)
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _read_route_planner_available(route: Any) -> bool | None:
-    if _read_route_planner_profile_name(route) is None:
-        return None
-    return getattr(route, "planner_available", False) is True
-
-
-def _read_route_planner_fallback_reason(route: Any) -> str | None:
-    value = getattr(route, "planner_fallback_reason", None)
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _is_router_exempt_chat_profile(
-    model_profile_name: str,
-    model_profile: Any,
-) -> bool:
-    """Fast stays pure chat even though the runtime has a default tool registry."""
+def _is_tool_mode_none_profile(model_profile: Any) -> bool:
+    """Return True when the profile has tool_mode=none (e.g. fast)."""
     tool_mode = getattr(model_profile, "tool_mode", None)
     if not isinstance(tool_mode, str):
         return False
-    return (
-        tool_mode.strip().lower() == "none"
-        and model_profile_name.strip().lower() == "fast"
-    )
-
-
-def _prepare_web_search_route(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    user_input: str,
-    route: Any,
-    assistant_reply_transform: Callable[[str], str] | None,
-) -> tuple[tuple[str, ...], Callable[[str], str] | None, ToolCall | None]:
-    # ---------------------------------------------------------------------------
-    # P5-2: guarantee one initial search_web execution on every WEB_SEARCH route,
-    # regardless of whether the model profile uses native tool calling.
-    # Previously, explicit_search_call was only created when search_results_ready=True
-    # (i.e. json_plan / non-native profiles).  Native profiles received no initial
-    # forced search — the model was expected to call search_web itself, which caused
-    # entity drift and weather-query refusals.
-    # This function now always creates the explicit ToolCall.  The caller's condition
-    #   `runtime_explicit_tool_call is not None and route.kind is WEB_SEARCH`
-    # already handles both native and non-native execution paths identically.
-    # Complies with mandatory_rules.md rule 5 allowed exception (explicitly required
-    # by mission P5-2, scoped to the WEB_SEARCH execution path only, not routing
-    # architecture) and rule 10 (explicitly justified, visibly scoped, easy to remove).
-    # ---------------------------------------------------------------------------
-    from unclaw.core.research_flow import (
-        apply_search_grounding_from_history,
-        build_web_search_route_note,
-    )
-
-    search_query = (
-        route.search_query.strip()
-        if isinstance(route.search_query, str) and route.search_query.strip()
-        else user_input.strip()
-    )
-    system_context_notes = (
-        build_web_search_route_note(
-            query=search_query,
-            search_results_ready=True,  # P5-2: search is always forced before model call
-        ),
-    )
-
-    # Capture the session message count before any search tool executes for
-    # this turn.  The grounding transform uses this floor so it only scans
-    # messages added during the current turn, preventing stale display_sources
-    # from an earlier turn from contaminating a new grounded reply.
-    _list_messages = getattr(session_manager, "list_messages", None)
-    _turn_start_count = (
-        len(_list_messages(session_id)) if callable(_list_messages) else 0
-    )
-
-    def _grounding_transform(reply: str) -> str:
-        return apply_search_grounding_from_history(
-            reply,
-            query=search_query,
-            session_manager=session_manager,
-            session_id=session_id,
-            turn_start_message_count=_turn_start_count,
-            model_profile_name=route.model_profile_name,
-        )
-
-    # P5-2: always create the explicit search call — native and non-native paths both
-    # need a guaranteed initial search_web execution with the routed query.
-    explicit_search_call = ToolCall(
-        tool_name="search_web",
-        arguments={"query": search_query},
-    )
-
-    return (
-        system_context_notes,
-        _compose_reply_transforms(_grounding_transform, assistant_reply_transform),
-        explicit_search_call,
-    )
+    return tool_mode.strip().lower() == "none"
 
 
 def _compose_reply_transforms(
@@ -902,23 +751,19 @@ def _execute_runtime_tool_calls(
     )
     tool_results: list[ToolResult] = []
     for pending_call, tool_result, finished_at in resolved_results:
-        grounded_tool_result = ground_weather_tool_result(
-            tool_result,
-            user_input=user_input,
-        )
         _finalize_runtime_tool_call(
             session_manager=session_manager,
             session_id=session_id,
             tracer=tracer,
             tool_call=pending_call.tool_call,
-            tool_result=grounded_tool_result,
+            tool_result=tool_result,
             tool_duration_ms=max(
                 0,
                 round((finished_at - pending_call.started_at) * 1000),
             ),
             skill_id=tool_registry.get_owner_skill_id(pending_call.tool_call.tool_name),
         )
-        tool_results.append(grounded_tool_result)
+        tool_results.append(tool_result)
 
     return tuple(tool_results)
 

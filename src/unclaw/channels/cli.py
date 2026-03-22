@@ -297,7 +297,6 @@ def run_cli(
             user_input=stripped_input,
             tracer=tracer,
             stream_output_func=assistant_stream.write,
-            on_search_route=assistant_stream.suppress_live_output,
             tool_call_callback=lambda tool_call: assistant_stream.render_status(
                 _build_tool_call_visibility_line(
                     tool_call,

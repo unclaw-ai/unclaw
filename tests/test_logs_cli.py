@@ -64,15 +64,6 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
                     session_id="sess-1",
                 ),
                 _runtime_event_line(
-                    event_type="route.selected",
-                    message="Runtime route selected.",
-                    payload={
-                        "route_kind": "chat",
-                        "model_profile_name": "main",
-                    },
-                    session_id="sess-1",
-                ),
-                _runtime_event_line(
                     event_type="model.called",
                     message="Model call started.",
                     payload={"model_profile_name": "main"},
@@ -121,7 +112,6 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
         in line
         for line in outputs
     )
-    assert any("route selected | chat | profile=main" in line for line in outputs)
     assert any(
         "model reply | model=ollama/qwen3.5:4b | chars=84 | duration=842 ms | reasoning=19 chars"
         in line

@@ -52,13 +52,6 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
     settings = _patch_ready_ollama(monkeypatch, project_root)
     scripted_inputs = iter(["Hello from the terminal."])
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default CLI chat turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -92,7 +85,6 @@ def test_cli_plain_chat_turn_runs_through_start_path_and_persists_reply(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("builtins.input", lambda _prompt: _next_input(scripted_inputs))
 
@@ -139,13 +131,6 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
             "Summarize that more briefly.",
         ]
     )
-
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default non-native CLI flow should not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -264,7 +249,6 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
         "unclaw.core.runtime.create_default_tool_registry",
         lambda _settings=None, session_manager=None: search_registry,
     )
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr("builtins.input", lambda _prompt: _next_input(scripted_inputs))
 

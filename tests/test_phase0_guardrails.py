@@ -209,17 +209,6 @@ def test_phase0_direct_runtime_profiles_keep_expected_tool_guidance(
     captured_capability_messages: list[str] = []
     captured_tools: list[object | None] = []
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-            raise AssertionError("default direct runtime turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -261,7 +250,6 @@ def test_phase0_direct_runtime_profiles_keep_expected_tool_guidance(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     expected_native_runtime = settings.models[profile_name].tool_mode == "native"
@@ -298,9 +286,5 @@ def test_phase0_direct_runtime_profiles_keep_expected_tool_guidance(
             assert "you cannot call tools directly this turn" in capability_message
             assert "you may call tools directly this turn" not in capability_message
 
-        route_event = next(
-            event for event in published_events if event.event_type == "route.selected"
-        )
-        assert route_event.payload["route_kind"] == "chat"
     finally:
         session_manager.close()

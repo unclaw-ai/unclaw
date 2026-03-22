@@ -272,22 +272,6 @@ def test_run_user_turn_keeps_prior_search_grounding_when_semantic_follow_up_says
     semantic_query_calls = 0
     main_model_messages: list[LLMMessage] = []
 
-    class RouterProvider:
-        provider_name = "ollama"
-
-        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):  # type: ignore[no-untyped-def]
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-18T10:00:00Z",
-                finish_reason="stop",
-            )
-
     class AppProvider:
         provider_name = "ollama"
 
@@ -327,7 +311,6 @@ def test_run_user_turn_keeps_prior_search_grounding_when_semantic_follow_up_says
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", AppProvider)
 
     try:
@@ -385,22 +368,6 @@ def test_run_user_turn_drops_prior_search_grounding_when_semantic_query_says_no(
     semantic_query_calls = 0
     main_model_messages: list[LLMMessage] = []
 
-    class RouterProvider:
-        provider_name = "ollama"
-
-        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
-            del base_url, default_timeout_seconds
-
-        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):  # type: ignore[no-untyped-def]
-            del profile, messages, timeout_seconds, thinking_enabled, content_callback, tools
-            return LLMResponse(
-                provider="ollama",
-                model_name="qwen3.5:4b",
-                content='{"route":"chat","search_query":""}',
-                created_at="2026-03-18T10:00:00Z",
-                finish_reason="stop",
-            )
-
     class AppProvider:
         provider_name = "ollama"
 
@@ -440,7 +407,6 @@ def test_run_user_turn_drops_prior_search_grounding_when_semantic_query_says_no(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterProvider)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", AppProvider)
 
     try:

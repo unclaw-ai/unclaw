@@ -80,13 +80,6 @@ def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default direct runtime turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -120,7 +113,6 @@ def test_phase5_weather_skill_reaches_live_runtime_without_giving_fast_tools(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:

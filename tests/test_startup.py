@@ -27,7 +27,6 @@ def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
             is_running=True,
             model_names=(
                 settings.default_model.model_name,
-                settings.router.model_name,
             ),
         ),
     )
@@ -116,30 +115,6 @@ def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> No
     )
 
 
-def test_startup_report_ignores_missing_router_model_in_default_preflight(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
-
-    monkeypatch.setattr(
-        "unclaw.startup.inspect_ollama",
-        lambda timeout_seconds=1.5: OllamaStatus(
-            cli_path="/usr/bin/ollama",
-            is_installed=True,
-            is_running=True,
-            model_names=(settings.default_model.model_name,),
-        ),
-    )
-
-    report = build_startup_report(
-        settings,
-        channel_name="terminal",
-        channel_enabled=True,
-        required_profile_names=(settings.app.default_model_profile,),
-    )
-
-    assert report.has_errors is False
-    assert all(check.label != "Router" for check in report.checks)
-
-
 def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> None:
     settings = load_settings(project_root=_repo_root())
     captured: dict[str, object] = {}
@@ -152,7 +127,6 @@ def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> 
             is_running=True,
             model_names=(
                 settings.default_model.model_name,
-                settings.router.model_name,
             ),
         ),
     )

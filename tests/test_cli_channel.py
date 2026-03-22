@@ -935,13 +935,6 @@ def test_cli_native_search_can_continue_into_native_write_tool_loop(
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default CLI turns must not instantiate the router")
-
     class FakeOrchestratorProvider:
         provider_name = "ollama"
 
@@ -1041,7 +1034,6 @@ def test_cli_native_search_can_continue_into_native_write_tool_loop(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         FakeOrchestratorProvider,

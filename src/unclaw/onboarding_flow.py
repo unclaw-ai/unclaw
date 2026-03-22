@@ -36,7 +36,6 @@ from unclaw.startup import (
     OllamaStatus,
     build_banner,
     find_missing_model_profiles,
-    find_missing_router_model,
     inspect_ollama,
     ollama_install_guidance,
     start_ollama_server,
@@ -415,18 +414,10 @@ def post_configure_ollama(
             prompt_ui.info("Start Ollama later with `ollama serve`.")
             return None
 
-    missing_profiles = find_missing_model_profiles(
+    missing_targets = find_missing_model_profiles(
         settings,
         installed_model_names=ollama_status.model_names,
         profile_names=tuple(plan.model_profiles),
-    )
-    missing_router = find_missing_router_model(
-        settings,
-        installed_model_names=ollama_status.model_names,
-    )
-    missing_targets = _combine_missing_targets(
-        missing_profiles,
-        missing_router,
     )
     if not missing_targets:
         prompt_ui.info("All selected models are already available in Ollama.")
@@ -609,15 +600,6 @@ def _unique_model_names(missing_profiles: tuple[tuple[str, str], ...]) -> tuple[
     return tuple(
         dict.fromkeys(model_name for _profile_name, model_name in missing_profiles)
     )
-
-
-def _combine_missing_targets(
-    missing_profiles: tuple[tuple[str, str], ...],
-    missing_router: tuple[str, str] | None,
-) -> tuple[tuple[str, str], ...]:
-    if missing_router is None:
-        return missing_profiles
-    return (*missing_profiles, missing_router)
 
 
 def _resolve_installed_model_default(

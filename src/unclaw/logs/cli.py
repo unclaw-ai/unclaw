@@ -289,11 +289,6 @@ def render_simple_log_line(raw_line: str) -> str | None:
                 details.append(f"model={provider_model}")
             details.append(f"thinking={thinking_label}")
             return f"[{timestamp}] assistant turn started | {' | '.join(details)}"
-        case "route.selected":
-            return (
-                f"[{timestamp}] route selected | "
-                f"{payload.get('route_kind', '?')} | profile={payload.get('model_profile_name', '?')}"
-            )
         case "model.succeeded":
             details = [
                 f"model={_format_provider_model(payload) or '?'}",

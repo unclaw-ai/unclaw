@@ -7,7 +7,7 @@ import yaml
 
 from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
-from unclaw.llm.model_profiles import resolve_model_profile, resolve_router_profile
+from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
 from unclaw.settings import load_settings
 
@@ -413,27 +413,6 @@ def test_resolve_model_profile_marks_shipped_deep_profile_as_native_tool_capable
     assert profile.capabilities.supports_native_tool_calling is True
     assert profile.num_ctx == 8192
     assert profile.keep_alive == "10m"
-
-
-def test_load_settings_reads_dedicated_router_defaults(
-    make_temp_project,
-    write_models_config,
-) -> None:
-    project_root = make_temp_project()
-    write_models_config(project_root, active_pack=DEV_MODEL_PACK_NAME)
-    settings = load_settings(project_root=project_root)
-    router_profile = resolve_router_profile(settings)
-
-    assert settings.models["fast"].tool_mode == "none"
-    assert settings.models["main"].planner_profile is None
-    assert settings.models["deep"].planner_profile is None
-    assert settings.models["codex"].planner_profile is None
-    assert settings.models["codex"].tool_mode == "none"
-    assert settings.router.enabled is True
-    assert settings.router.model_name == "qwen3:1.7b"
-    assert settings.router.timeout_seconds == 15.0
-    assert router_profile.name == "router"
-    assert router_profile.model_name == "qwen3:1.7b"
 
 
 def test_recommend_model_pack_uses_ram_thresholds() -> None:

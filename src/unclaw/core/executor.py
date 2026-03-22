@@ -52,15 +52,14 @@ BUILTIN_TOOL_COMMANDS = MappingProxyType(
 
 
 def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
-    """Register the built-in local tools on the provided registry.
+    """Register the built-in tools on the provided registry.
 
-    Used when no Settings object is available (e.g. test helpers).  Defaults
-    to loading the shipped weather skill bundle so the registry has the same
-    tools as a fully-configured runtime with weather enabled.
+    Used when no Settings object is available (e.g. test helpers).
+    Skills are not loaded here — use create_default_tool_registry(settings) for
+    a fully-configured runtime with active skills enabled.
     """
     register_file_tools(registry)
     register_web_tools(registry)
-    register_active_skill_tools(registry, enabled_skill_ids=("weather",))
     register_system_tools(registry)
     register_terminal_tools(registry)
     return registry

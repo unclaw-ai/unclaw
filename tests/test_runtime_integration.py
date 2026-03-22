@@ -19,10 +19,8 @@ from unclaw.core.command_handler import CommandHandler
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
-from unclaw.core.router import RouteKind
 from unclaw.core.runtime import (
     RuntimeTurnCancellation,
-    _prepare_web_search_route,
     run_user_turn,
 )
 from unclaw.core.session_manager import SessionManager
@@ -52,31 +50,8 @@ from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
-from skills.weather.tool import GET_WEATHER_DEFINITION
-
 pytestmark = pytest.mark.integration
 
-
-def _make_offline_router_provider():
-    """Return a fake OllamaProvider class that raises LLMProviderError on every chat call.
-
-    Used to make the router unable to contact Ollama during tests that verify
-    non-routing behaviour (subscriber resilience, adversarial tool wrapping).
-    Raising LLMProviderError makes the route classifier fall back cleanly
-    without depending on whether a real Ollama process is running on the
-    test machine.
-    """
-
-    class _OfflineRouterProvider:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            pass
-
-        def chat(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            raise LLMProviderError("router offline in test")
-
-    return _OfflineRouterProvider
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
@@ -187,7 +162,6 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert "Available built-in tools (compact):" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
-        assert "get_weather <location>" in provider_messages[1].content
         assert "run_terminal_command <command>" in provider_messages[1].content
         assert "delete_file <path>" in provider_messages[1].content
         assert "move_file <source_path> <destination_path>" in provider_messages[1].content
@@ -209,7 +183,6 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
@@ -289,9 +262,6 @@ def test_run_user_turn_continues_when_event_bus_subscriber_raises(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    # Keep the route classifier offline so this test stays focused on subscriber
-    # resilience without depending on local Ollama availability.
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
         session = session_manager.ensure_current_session()
@@ -312,7 +282,6 @@ def test_run_user_turn_continues_when_event_bus_subscriber_raises(
         assert assistant_reply == "Local reply"
         assert [event.event_type for event in published_events] == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
@@ -915,9 +884,6 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    # Keep the route classifier offline so the test captures only the responder
-    # turn and does not depend on local Ollama availability.
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
 
     try:
         session = session_manager.ensure_current_session()
@@ -962,208 +928,6 @@ def test_run_user_turn_wraps_adversarial_tool_history_as_untrusted_data(
         )
         assert "Release note: prompt injection defenses were added." in tool_messages[0]
         assert tool_messages[0].endswith("--- END UNTRUSTED TOOL OUTPUT ---")
-    finally:
-        session_manager.close()
-
-
-def test_run_user_turn_surfaces_selected_weather_day_for_relative_request(
-    monkeypatch,
-    make_temp_project,
-) -> None:
-    _freeze_weather_grounding_date(monkeypatch)
-    project_root = make_temp_project()
-    settings = load_settings(project_root=project_root)
-    session_manager = SessionManager.from_settings(settings)
-    tracer = Tracer(
-        event_bus=EventBus(),
-        event_repository=session_manager.event_repository,
-    )
-    command_handler = CommandHandler(
-        settings=settings,
-        session_manager=session_manager,
-        memory_manager=SimpleNamespace(),
-    )
-
-    turn_call_count = 0
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback
-            nonlocal turn_call_count
-            turn_call_count += 1
-            assert profile.name == settings.app.default_model_profile
-            if turn_call_count == 1:
-                assert tools is not None
-                assert any(tool.name == "get_weather" for tool in tools)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="",
-                    created_at="2026-03-21T10:00:00Z",
-                    finish_reason="stop",
-                    tool_calls=(
-                        ToolCall(
-                            tool_name="get_weather",
-                            arguments={"location": "Lille"},
-                        ),
-                    ),
-                    raw_payload={
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "get_weather",
-                                        "arguments": {"location": "Lille"},
-                                    }
-                                }
-                            ],
-                        }
-                    },
-                )
-
-            tool_messages = [
-                message.content for message in messages if message.role is LLMRole.TOOL
-            ]
-            assert len(tool_messages) == 1
-            assert "Local current date: 2026-03-21" in tool_messages[0]
-            assert "Requested temporal phrase: demain" in tool_messages[0]
-            assert "Resolved target date: 2026-03-22" in tool_messages[0]
-            assert "Selected forecast day:" in tool_messages[0]
-            assert "- 2026-03-22 (tomorrow): partly cloudy;" in tool_messages[0]
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="Forecast reply grounded to tomorrow.",
-                created_at="2026-03-21T10:00:01Z",
-                finish_reason="stop",
-            )
-
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        GET_WEATHER_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text=(
-                "Provider: open-meteo\n"
-                "Location: Lille, Hauts-de-France, France\n"
-                "Coordinates: 50.6330, 3.0586\n"
-                "Timezone: Europe/Paris\n"
-                "Local current date: 2026-03-21\n"
-                "\n"
-                "Relative forecast anchors:\n"
-                "- 2026-03-21 (today): overcast; low 3.7 C, high 14.7 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
-                "- 2026-03-22 (tomorrow): partly cloudy; low 3.5 C, high 15.5 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
-                "\n"
-                "7-day forecast:\n"
-                "- 2026-03-21 (today): overcast; low 3.7 C, high 14.7 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h\n"
-                "- 2026-03-22 (tomorrow): partly cloudy; low 3.5 C, high 15.5 C; 0% precip probability, 0.0 mm precip; wind up to 14.4 km/h"
-            ),
-            payload={
-                "provider": "open-meteo",
-                "location_query": call.arguments["location"],
-                "forecast_days": 7,
-                "local_current_date": "2026-03-21",
-                "resolved_location": {
-                    "name": "Lille",
-                    "latitude": 50.6330,
-                    "longitude": 3.0586,
-                    "timezone": "Europe/Paris",
-                    "admin1": "Hauts-de-France",
-                    "country": "France",
-                },
-                "current": None,
-                "relative_day_anchors": [
-                    {
-                        "label": "today",
-                        "date": "2026-03-21",
-                        "forecast": {
-                            "date": "2026-03-21",
-                            "weather_code": 3,
-                            "weather_description": "overcast",
-                            "temperature_min_c": 3.7,
-                            "temperature_max_c": 14.7,
-                            "precipitation_probability_max_pct": 0,
-                            "precipitation_sum_mm": 0.0,
-                            "wind_speed_max_kph": 14.4,
-                        },
-                    },
-                    {
-                        "label": "tomorrow",
-                        "date": "2026-03-22",
-                        "forecast": {
-                            "date": "2026-03-22",
-                            "weather_code": 2,
-                            "weather_description": "partly cloudy",
-                            "temperature_min_c": 3.5,
-                            "temperature_max_c": 15.5,
-                            "precipitation_probability_max_pct": 0,
-                            "precipitation_sum_mm": 0.0,
-                            "wind_speed_max_kph": 14.4,
-                        },
-                    },
-                ],
-                "temporal_request": None,
-                "selected_forecast": None,
-                "daily_forecast": [
-                    {
-                        "date": "2026-03-21",
-                        "weather_code": 3,
-                        "weather_description": "overcast",
-                        "temperature_min_c": 3.7,
-                        "temperature_max_c": 14.7,
-                        "precipitation_probability_max_pct": 0,
-                        "precipitation_sum_mm": 0.0,
-                        "wind_speed_max_kph": 14.4,
-                    },
-                    {
-                        "date": "2026-03-22",
-                        "weather_code": 2,
-                        "weather_description": "partly cloudy",
-                        "temperature_min_c": 3.5,
-                        "temperature_max_c": 15.5,
-                        "precipitation_probability_max_pct": 0,
-                        "precipitation_sum_mm": 0.0,
-                        "wind_speed_max_kph": 14.4,
-                    },
-                ],
-            },
-        ),
-    )
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", _make_offline_router_provider())
-
-    try:
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input="quelle est la météo pour demain à Lille ?",
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert reply == "Forecast reply grounded to tomorrow."
-        assert turn_call_count == 2
     finally:
         session_manager.close()
 
@@ -1228,12 +992,6 @@ def test_run_user_turn_non_native_profile_stays_direct_and_does_not_preexecute_s
 
     captured_messages: list[list[LLMMessage]] = []
     captured_tools: list[object | None] = []
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default non-native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1267,7 +1025,6 @@ def test_run_user_turn_non_native_profile_stays_direct_and_does_not_preexecute_s
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -1305,15 +1062,10 @@ def test_run_user_turn_non_native_profile_stays_direct_and_does_not_preexecute_s
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
         ]
-        route_event = next(
-            event for event in published_events if event.event_type == "route.selected"
-        )
-        assert route_event.payload["route_kind"] == "chat"
     finally:
         session_manager.close()
 
@@ -1378,13 +1130,6 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
     captured_turn_messages: list[list[LLMMessage]] = []
     captured_turn_tools: list[object | None] = []
     turn_call_count = 0
-
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -1461,7 +1206,6 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -1502,7 +1246,6 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "tool.started",
@@ -1594,13 +1337,6 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
 
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
-
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default native turns must not instantiate the router")
 
     class FakeOrchestratorProvider:
         provider_name = "ollama"
@@ -1715,7 +1451,6 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr(
         "unclaw.core.orchestrator.OllamaProvider",
         FakeOrchestratorProvider,
@@ -1773,7 +1508,6 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
         event_types = [event.event_type for event in published_events]
         assert event_types == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "tool.started",
@@ -2252,7 +1986,6 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
         first_turn_event_types = [event.event_type for event in published_events]
         assert first_turn_event_types == [
             "runtime.started",
-            "route.selected",
             "tool.started",
             "tool.finished",
             "model.called",
@@ -3240,37 +2973,6 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_native_direct_search
         session_manager.close()
 
 
-def test_prepare_web_search_route_falls_back_to_user_input_without_reformulated_query() -> None:
-    user_input = "Quelle est la météo à Paris aujourd'hui ?"
-
-    route_context_notes, assistant_reply_transform, explicit_tool_call = (
-        _prepare_web_search_route(
-            session_manager=SimpleNamespace(),
-            session_id="session-1",
-            user_input=user_input,
-            route=SimpleNamespace(search_query=None),
-            assistant_reply_transform=None,
-        )
-    )
-
-    assert route_context_notes == (
-        "\n".join(
-            (
-                "Route requirement: this turn needs web-backed grounding.",
-                f"Ground this request: {user_input}",
-                "Grounded search results should already be present in this conversation. "
-                "Do not answer from unsupported memory.",
-                "Answer from retrieved evidence and include compact sources.",
-            )
-        ),
-    )
-    assert assistant_reply_transform is not None
-    assert explicit_tool_call == ToolCall(
-        tool_name="search_web",
-        arguments={"query": user_input},
-    )
-
-
 def test_run_user_turn_uses_configured_ollama_timeout(
     monkeypatch,
     make_temp_project,
@@ -3331,14 +3033,6 @@ def test_run_user_turn_uses_configured_ollama_timeout(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr(
-        "unclaw.core.runtime.route_request",
-        lambda **kwargs: SimpleNamespace(
-            kind=RouteKind.CHAT,
-            model_profile_name="main",
-            search_query=None,
-        ),
-    )
 
     try:
         session = session_manager.ensure_current_session()
@@ -3478,14 +3172,6 @@ def test_main_and_deep_native_chat_turns_can_use_system_info_for_current_machine
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr(
-        "unclaw.core.runtime.route_request",
-        lambda **kwargs: SimpleNamespace(
-            kind=RouteKind.CHAT,
-            model_profile_name=profile_name,
-            search_query=None,
-        ),
-    )
 
     try:
         session = session_manager.ensure_current_session()
@@ -3661,14 +3347,6 @@ def test_main_and_deep_native_chat_turns_can_use_long_term_memory_for_remembered
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr(
-        "unclaw.core.runtime.route_request",
-        lambda **kwargs: SimpleNamespace(
-            kind=RouteKind.CHAT,
-            model_profile_name=profile_name,
-            search_query=None,
-        ),
-    )
 
     try:
         session = session_manager.ensure_current_session()
@@ -3844,14 +3522,6 @@ def test_main_and_deep_native_chat_turns_can_use_long_term_memory_listing_for_br
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr(
-        "unclaw.core.runtime.route_request",
-        lambda **kwargs: SimpleNamespace(
-            kind=RouteKind.CHAT,
-            model_profile_name=profile_name,
-            search_query=None,
-        ),
-    )
 
     try:
         session = session_manager.ensure_current_session()
@@ -4197,14 +3867,6 @@ def test_run_user_turn_raises_unclaw_error_when_agent_loop_returns_no_reply(
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr(
-        "unclaw.core.runtime.route_request",
-        lambda **kwargs: SimpleNamespace(
-            kind=RouteKind.CHAT,
-            model_profile_name="main",
-            search_query=None,
-        ),
-    )
-    monkeypatch.setattr(
         "unclaw.core.runtime._run_agent_loop",
         lambda **kwargs: None,
     )
@@ -4346,18 +4008,6 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
     captured_tools: list[object | None] = []
     captured_messages: list[LLMMessage] = []
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-            raise AssertionError("fast should not instantiate the router model")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -4390,7 +4040,6 @@ def test_fast_profile_is_chat_only_and_never_calls_the_router_model(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4534,10 +4183,6 @@ def test_runtime_native_turn_can_invoke_run_terminal_command_and_persist_reply(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr(
-        "unclaw.core.router.OllamaProvider",
-        _make_offline_router_provider(),
-    )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4673,10 +4318,6 @@ def test_runtime_native_turn_short_circuits_failed_run_terminal_command_honestly
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr(
-        "unclaw.core.router.OllamaProvider",
-        _make_offline_router_provider(),
-    )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4767,13 +4408,6 @@ def test_agentic_profiles_enter_direct_native_responder_runtime_without_router(
     tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(FETCH_URL_TEXT_DEFINITION, _fetch_tool)
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default native turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -4842,7 +4476,6 @@ def test_agentic_profiles_enter_direct_native_responder_runtime_without_router(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -4911,13 +4544,6 @@ def test_chat_turn_calls_native_responder_directly_without_tool_work_or_router(
         ),
     )
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default chat turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -4950,7 +4576,6 @@ def test_chat_turn_calls_native_responder_directly_without_tool_work_or_router(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -5012,13 +4637,6 @@ def test_lite_codex_responds_directly_without_native_tools_or_router(
         ),
     )
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default codex turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -5051,7 +4669,6 @@ def test_lite_codex_responds_directly_without_native_tools_or_router(
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -5116,13 +4733,6 @@ def test_default_direct_native_turn_uses_shared_native_responder_loop_without_ro
         ),
     )
 
-    class RouterShouldNotRun:
-        provider_name = "ollama"
-
-        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
-            del kwargs
-            raise AssertionError("default native turns must not instantiate the router")
-
     class FakeOllamaProvider:
         provider_name = "ollama"
 
@@ -5185,7 +4795,6 @@ def test_default_direct_native_turn_uses_shared_native_responder_loop_without_ro
                 finish_reason="stop",
             )
 
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", RouterShouldNotRun)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     try:
@@ -5213,13 +4822,6 @@ def test_default_direct_native_turn_uses_shared_native_responder_loop_without_ro
             for tools in responder_tools
             if tools is not None
         )
-        route_event = next(
-            event for event in published_events if event.event_type == "route.selected"
-        )
-        assert route_event.payload["route_kind"] == "chat"
-        assert "planner_profile_name" not in route_event.payload
-        assert "planner_available" not in route_event.payload
-        assert "planner_fallback_reason" not in route_event.payload
     finally:
         session_manager.close()
 
@@ -7324,21 +6926,6 @@ def test_run_user_turn_streaming_native_tool_call_enters_agent_loop(
 
     def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
         nonlocal call_count
-        payload = json.loads(request.data.decode("utf-8"))
-
-        # Router classifier call (non-streaming).
-        if not payload.get("stream", False):
-            return _RuntimeFakeStreamNonStreamResponse(
-                json.dumps(
-                    {
-                        "model": "qwen3.5:4b",
-                        "created_at": "2026-03-16T10:00:00Z",
-                        "done_reason": "stop",
-                        "message": {"content": '{"route":"chat","search_query":""}'},
-                    }
-                )
-            )
-
         call_count += 1
         if call_count == 1:
             # First streaming call: model returns tool_calls.
@@ -7439,18 +7026,6 @@ def test_run_user_turn_streaming_plain_text_still_works(
     )
 
     def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
-        payload = json.loads(request.data.decode("utf-8"))
-        if not payload.get("stream", False):
-            return _RuntimeFakeStreamNonStreamResponse(
-                json.dumps(
-                    {
-                        "model": "qwen3.5:4b",
-                        "created_at": "2026-03-16T10:00:00Z",
-                        "done_reason": "stop",
-                        "message": {"content": '{"route":"chat","search_query":""}'},
-                    }
-                )
-            )
         return _RuntimeFakeStreamResponse(
             (
                 {
@@ -7495,22 +7070,6 @@ def test_run_user_turn_streaming_plain_text_still_works(
         session_manager.close()
 
 
-class _RuntimeFakeStreamNonStreamResponse:
-    """Fake non-streaming response for router classifier calls during streaming tests."""
-
-    def __init__(self, body: str) -> None:
-        self._body = body
-
-    def __enter__(self) -> _RuntimeFakeStreamNonStreamResponse:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
-        return False
-
-    def read(self) -> bytes:
-        return self._body.encode("utf-8")
-
-
 class _RuntimeFakeStreamResponse:
     def __init__(self, payloads: tuple[dict[str, object], ...]) -> None:
         self._lines = [
@@ -7537,15 +7096,6 @@ def _freeze_search_grounding_date(monkeypatch) -> None:
     monkeypatch.setattr("unclaw.core.context_builder.date", FixedDate)
     monkeypatch.setattr("unclaw.core.research_flow.date", FixedDate)
     monkeypatch.setattr("unclaw.core.search_grounding.date", FixedDate)
-
-
-def _freeze_weather_grounding_date(monkeypatch) -> None:
-    class FixedDate(real_date):
-        @classmethod
-        def today(cls) -> FixedDate:
-            return cls(2026, 3, 21)
-
-    monkeypatch.setattr("skills.weather.tool.date", FixedDate)
 
 
 # ---------------------------------------------------------------------------
@@ -7845,116 +7395,5 @@ def test_second_explicit_search_turn_does_not_inherit_sources_from_first_json_pl
         # Stale Turn 1 sources must NOT appear.
         assert "charlemagne.example.com" not in reply
         assert "medieval.example.com" not in reply
-    finally:
-        session_manager.close()
-
-
-def test_second_grounded_turn_no_new_search_produces_no_stale_sources_native(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    """Native-mode WEB_SEARCH turn where model does not call search_web must not
-    inherit sources from an older search turn.
-
-    Scenario:
-    - Turn 1 (pre-populated): Charlemagne search → charlemagne.example.com sources
-    - Turn 2: router says WEB_SEARCH but model replies directly (no search_web call)
-    - Expected: reply is the raw model text with NO sources appended at all.
-    """
-    project_root = make_temp_project()
-    settings = load_settings(project_root=project_root)
-    set_profile_tool_mode(settings, "main", tool_mode="native")
-    session_manager = SessionManager.from_settings(settings)
-    tracer = Tracer(
-        event_bus=EventBus(),
-        event_repository=session_manager.event_repository,
-    )
-    command_handler = CommandHandler(
-        settings=settings,
-        session_manager=session_manager,
-        memory_manager=SimpleNamespace(),
-    )
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
-            pass
-
-        def chat(self, profile, messages, *, timeout_seconds=None,  # type: ignore[no-untyped-def]
-                 thinking_enabled=False, content_callback=None, tools=None):
-            del timeout_seconds, thinking_enabled, tools
-            first_message = messages[0]
-            if (
-                first_message.role is LLMRole.SYSTEM
-                and "Return JSON only with keys route and search_query"
-                in first_message.content
-            ):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content='{"route":"web_search","search_query":"France key numeric facts"}',
-                    created_at="2026-03-18T10:00:00Z",
-                    finish_reason="stop",
-                )
-            # Model answers directly — does NOT call search_web.
-            if content_callback is not None:
-                content_callback("France has about 68 million people.")
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="France has about 68 million people.",
-                created_at="2026-03-18T10:00:00Z",
-                finish_reason="stop",
-            )
-
-    monkeypatch.setattr("unclaw.core.router.OllamaProvider", FakeOllamaProvider)
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-
-        # Simulate Turn 1 result already in session history.
-        session_manager.add_message(
-            MessageRole.USER,
-            "Tell me about Charlemagne.",
-            session_id=session.id,
-        )
-        session_manager.add_message(
-            MessageRole.TOOL,
-            _CHARLEMAGNE_TOOL_HISTORY,
-            session_id=session.id,
-        )
-        session_manager.add_message(
-            MessageRole.ASSISTANT,
-            "Charlemagne was King of the Franks.\n\nSources:\n"
-            "- Charlemagne Encyclopaedia: https://charlemagne.example.com/bio",
-            session_id=session.id,
-        )
-
-        # Turn 2: new France query, model does NOT call search.
-        france_input = "What are the current key numeric facts about France?"
-        session_manager.add_message(
-            MessageRole.USER,
-            france_input,
-            session_id=session.id,
-        )
-
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=france_input,
-            tracer=tracer,
-            tool_registry=ToolRegistry(),
-        )
-
-        # Model's raw answer must come through unchanged.
-        assert "France has about 68 million people." in reply
-        # Stale Turn 1 sources must NOT appear.
-        assert "charlemagne.example.com" not in reply
-        assert "medieval.example.com" not in reply
-        # No Sources: block from stale grounding.
-        assert "charlemagne" not in reply.lower()
     finally:
         session_manager.close()
