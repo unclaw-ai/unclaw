@@ -26,6 +26,8 @@ from unclaw.core.search_grounding import (
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.schemas.chat import ChatMessage, MessageRole
+from unclaw.skills.catalog import build_active_skill_catalog
+from unclaw.skills.file_models import UnknownSkillIdError
 from unclaw.skills.runtime import build_active_skill_context_notes
 
 _UNTRUSTED_TOOL_OUTPUT_NOTE = (
@@ -135,6 +137,13 @@ def build_context_messages(
                 ),
             )
         )
+        file_first_catalog = _resolve_file_first_skill_catalog_for_context(
+            session_manager=session_manager,
+        )
+        if file_first_catalog:
+            context_messages.append(
+                LLMMessage(role=LLMRole.SYSTEM, content=file_first_catalog)
+            )
         context_messages.extend(
             LLMMessage(role=LLMRole.SYSTEM, content=note)
             for note in _resolve_skill_context_notes_for_context(
@@ -184,6 +193,26 @@ def _resolve_capability_budget_policy_for_context(
         model_pack=model_pack,
         model_profile_name=model_profile_name,
     )
+
+
+def _resolve_file_first_skill_catalog_for_context(
+    *,
+    session_manager: SessionManager,
+) -> str:
+    settings = getattr(session_manager, "settings", None)
+    if settings is None:
+        return ""
+
+    skills = getattr(settings, "skills", None)
+    if skills is None or not getattr(skills, "enabled_skill_ids", ()):
+        return ""
+
+    try:
+        return build_active_skill_catalog(
+            enabled_skill_ids=settings.skills.enabled_skill_ids,
+        )
+    except UnknownSkillIdError:
+        return ""
 
 
 def _resolve_skill_context_notes_for_context(
