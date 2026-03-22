@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from unclaw.skills.file_loader import load_active_skill_bundles
@@ -80,6 +80,7 @@ def register_active_skill_tools(
 def probe_skill_tool_loading(
     *,
     enabled_skill_ids: Collection[str],
+    discovered_skill_bundles: Sequence[SkillBundle] | None = None,
 ) -> dict[str, str | None]:
     """Probe tool-loading for active skill bundles without side effects.
 
@@ -87,10 +88,17 @@ def probe_skill_tool_loading(
     A ``None`` value means the bundle registered successfully (or has no
     tool.py, which is also fine).  A string value is the failure reason.
 
+    Pass ``discovered_skill_bundles`` when bundles have already been discovered
+    by the caller (e.g. ``_build_skills_check``) to avoid a redundant directory
+    scan.
+
     Intended for use in startup diagnostics only.
     """
     try:
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=enabled_skill_ids,
+            discovered_skill_bundles=discovered_skill_bundles,
+        )
     except UnknownSkillIdError as exc:
         return {sid: f"unknown skill id: {sid}" for sid in exc.unknown_skill_ids}
 

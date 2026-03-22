@@ -98,10 +98,9 @@ def load_active_skill_bundles(
         discovered_skill_bundles=discovered_skill_bundles,
     )
     bundles_by_id = {bundle.skill_id: bundle for bundle in bundles}
-    known_skill_ids = list_known_skill_ids(
-        skills_root=skills_root,
-        discovered_skill_bundles=bundles,
-    )
+    # Derive known IDs directly from the dict we already built — avoids a
+    # second iteration through _resolve_discovered_bundles via list_known_skill_ids.
+    known_skill_ids = tuple(bundles_by_id.keys())
 
     active_bundles: list[SkillBundle] = []
     seen_bundle_ids: set[str] = set()

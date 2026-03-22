@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from functools import lru_cache
 
 from unclaw.skills.file_models import SkillBundle
 
@@ -30,8 +31,14 @@ def select_skill_for_turn(
     return None
 
 
+@lru_cache(maxsize=128)
 def _key_terms(bundle: SkillBundle) -> tuple[str, ...]:
-    """Return lowercase match terms derived from the bundle's id and display name."""
+    """Return lowercase match terms derived from the bundle's id and display name.
+
+    Cached per bundle instance: SkillBundle is frozen (immutable + hashable) so
+    the result never changes for a given bundle. Avoids repeated string work on
+    every turn when the same set of active bundles is used across requests.
+    """
     seen: set[str] = set()
     terms: list[str] = []
     for raw in (bundle.skill_id, bundle.display_name):

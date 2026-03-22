@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
+import logging
 import re
+
+_log = logging.getLogger(__name__)
 
 from unclaw.constants import (
     DEFAULT_CONTEXT_HISTORY_CHAR_BUDGET,
@@ -28,7 +31,7 @@ from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.skills.catalog import build_active_skill_catalog
 from unclaw.skills.file_loader import load_active_skill_bundles
-from unclaw.skills.file_models import UnknownSkillIdError
+from unclaw.skills.file_models import SkillBundle, UnknownSkillIdError
 from unclaw.skills.selector import select_skill_for_turn
 
 _UNTRUSTED_TOOL_OUTPUT_NOTE = (
@@ -138,16 +141,25 @@ def build_context_messages(
                 ),
             )
         )
-        file_first_catalog = _resolve_file_first_skill_catalog_for_context(
+        # Load active bundles ONCE per turn and reuse for both catalog injection
+        # and on-demand full-skill loading — avoids a second load_active_skill_bundles
+        # call in the full-skill path.
+        active_bundles = _load_active_skill_bundles_for_context(
             session_manager=session_manager,
         )
+        file_first_catalog = _resolve_file_first_skill_catalog_for_context(
+            session_manager=session_manager,
+            active_bundles=active_bundles,
+        )
         if file_first_catalog:
+            _log.debug("skill catalog injected: chars=%d", len(file_first_catalog))
             context_messages.append(
                 LLMMessage(role=LLMRole.SYSTEM, content=file_first_catalog)
             )
         full_skill_content = _resolve_full_skill_content_for_turn(
             session_manager=session_manager,
             user_message=normalized_user_message,
+            active_bundles=active_bundles,
         )
         if full_skill_content:
             context_messages.append(
@@ -176,32 +188,70 @@ def build_context_messages(
     return context_messages
 
 
+def _load_active_skill_bundles_for_context(
+    *,
+    session_manager: object,
+) -> tuple[SkillBundle, ...] | None:
+    """Pre-load active skill bundles once per turn.
+
+    Returns the active bundles when skills are configured and all IDs are valid,
+    or ``None`` when skills are not configured or an error occurs.  Callers pass
+    the result to both the catalog and full-skill helpers so the
+    ``load_active_skill_bundles`` call happens only once per turn.
+    """
+    settings = getattr(session_manager, "settings", None)
+    if settings is None:
+        return None
+    skills = getattr(settings, "skills", None)
+    if skills is None or not getattr(skills, "enabled_skill_ids", ()):
+        return None
+    try:
+        return load_active_skill_bundles(
+            enabled_skill_ids=settings.skills.enabled_skill_ids,
+        )
+    except UnknownSkillIdError:
+        return None
+
+
 def _resolve_full_skill_content_for_turn(
     *,
     session_manager: object,
     user_message: str,
+    active_bundles: tuple[SkillBundle, ...] | None = None,
 ) -> str:
-    """Load and return the full SKILL.md for the one selected skill, or empty string."""
-    settings = getattr(session_manager, "settings", None)
-    if settings is None:
-        return ""
+    """Load and return the full SKILL.md for the one selected skill, or empty string.
 
-    skills = getattr(settings, "skills", None)
-    if skills is None or not getattr(skills, "enabled_skill_ids", ()):
-        return ""
+    When ``active_bundles`` is provided (pre-loaded by the caller) the function
+    skips the ``load_active_skill_bundles`` call entirely — the bundles are used
+    directly for selection.  The raw content is returned from the per-path cache
+    in ``file_models`` so disk I/O only happens on the first selection of a skill.
+    """
+    bundles: tuple[SkillBundle, ...] | None = active_bundles
+    if bundles is None:
+        settings = getattr(session_manager, "settings", None)
+        if settings is None:
+            return ""
+        skills = getattr(settings, "skills", None)
+        if skills is None or not getattr(skills, "enabled_skill_ids", ()):
+            return ""
+        try:
+            bundles = load_active_skill_bundles(
+                enabled_skill_ids=settings.skills.enabled_skill_ids,
+            )
+        except UnknownSkillIdError:
+            return ""
 
-    try:
-        active_bundles = load_active_skill_bundles(
-            enabled_skill_ids=settings.skills.enabled_skill_ids,
-        )
-    except UnknownSkillIdError:
-        return ""
-
-    selected = select_skill_for_turn(user_message, active_bundles)
+    selected = select_skill_for_turn(user_message, bundles)
     if selected is None:
         return ""
 
-    return selected.load_raw_content()
+    raw = selected.load_raw_content()
+    _log.debug(
+        "skill full-md injected: skill_id=%s chars=%d",
+        selected.skill_id,
+        len(raw),
+    )
+    return raw
 
 
 def _resolve_capability_budget_policy_for_context(
@@ -226,6 +276,7 @@ def _resolve_capability_budget_policy_for_context(
 def _resolve_file_first_skill_catalog_for_context(
     *,
     session_manager: SessionManager,
+    active_bundles: tuple[SkillBundle, ...] | None = None,
 ) -> str:
     settings = getattr(session_manager, "settings", None)
     if settings is None:
@@ -236,8 +287,12 @@ def _resolve_file_first_skill_catalog_for_context(
         return ""
 
     try:
+        # Pass pre-loaded bundles as discovered_skill_bundles so the catalog
+        # builder skips the internal re-discovery step (uses provided bundles
+        # instead of calling discover_internal_skill_bundles again).
         return build_active_skill_catalog(
             enabled_skill_ids=settings.skills.enabled_skill_ids,
+            discovered_skill_bundles=active_bundles,
         )
     except UnknownSkillIdError:
         return ""

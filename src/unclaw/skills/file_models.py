@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# Process-lifetime cache for SKILL.md raw content.  Keys are resolved absolute
+# paths (set by SkillBundle.__post_init__).  Skills are configured at startup
+# and their files do not change at runtime, so a plain dict is safe and avoids
+# the per-call disk read on every turn a skill is selected.
+_raw_content_cache: dict[Path, str] = {}
+
 
 def _require_non_empty(value: str, *, field_name: str) -> str:
     normalized_value = value.strip()
@@ -72,7 +78,19 @@ class SkillBundle:
         )
 
     def load_raw_content(self) -> str:
-        return self.skill_md_path.read_text(encoding="utf-8")
+        """Return the raw text of SKILL.md, reading from disk only on first call.
+
+        The result is cached in ``_raw_content_cache`` keyed by the resolved
+        absolute path.  Subsequent calls for the same path are free (no I/O).
+        Each test that writes to a unique ``tmp_path`` gets its own cache entry,
+        so there are no cross-test collisions.
+        """
+        cached = _raw_content_cache.get(self.skill_md_path)
+        if cached is not None:
+            return cached
+        content = self.skill_md_path.read_text(encoding="utf-8")
+        _raw_content_cache[self.skill_md_path] = content
+        return content
 
 
 class UnknownSkillIdError(ValueError):
