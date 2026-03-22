@@ -449,12 +449,15 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "available.local_file_write": _static_prompt(
             "available.local_file_write",
-            "write_text_file <path>: write a new local file. "
+            "write_text_file <path>: write a local file. "
             "Relative paths are created inside data/files/ by default. "
-            "Default is overwrite=false — fails if the file already exists. "
-            "Only use overwrite=true when the user explicitly asked to replace or "
-            "overwrite an existing file (e.g. with words like 'overwrite', 'replace', "
-            "'update the file'). Do not infer overwrite intent from context alone.",
+            "Use collision_policy to control collision behaviour: "
+            "'fail' (default) — refuse if the file already exists; "
+            "'version' — write to a new timestamped path instead (safe for bulk creation); "
+            "'overwrite' — replace the existing file (only allowed in dev mode). "
+            "Always use the collision_policy that matches the user's real intent. "
+            "Only use 'overwrite' when the user explicitly asked to replace the file "
+            "and dev mode is enabled — do not infer overwrite intent from context alone.",
         ),
         "available.local_file_delete": _static_prompt(
             "available.local_file_delete",

@@ -80,6 +80,9 @@ def create_default_tool_registry(
             configured_roots=settings.app.security.tools.files.allowed_roots,
             default_write_dir=settings.paths.files_dir,
             default_read_dir=settings.paths.files_dir,
+            allow_destructive_file_overwrite=(
+                settings.app.security.tools.files.allow_destructive_file_overwrite
+            ),
         )
         register_web_tools(
             registry,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -66,21 +67,23 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
     description=(
         "Write plain UTF-8 text content to a local file. "
         "Relative paths are created inside the data/files/ directory by default. "
-        "Fails if the file already exists unless overwrite is set to true. "
+        "Use collision_policy to control behavior when the target file already exists: "
+        "'fail' (default) — refuse; "
+        "'version' — write to a new timestamped path (e.g. note_20260322_185430.txt); "
+        "'overwrite' — replace the existing file (requires dev mode). "
         "Content is limited to 1 MB. Only writes inside the configured allowed roots."
     ),
     permission_level=ToolPermissionLevel.LOCAL_WRITE,
     arguments={
         "path": ToolArgumentSpec(description="Path to the file to write."),
         "content": ToolArgumentSpec(description="UTF-8 text content to write."),
-        "overwrite": ToolArgumentSpec(
+        "collision_policy": ToolArgumentSpec(
             description=(
-                "Set to true only when the user explicitly asked to replace or "
-                "overwrite an existing file. "
-                "Default: false — write fails if the file already exists. "
-                "Do not set to true unless the user's replacement intent is explicit."
+                "How to handle a collision when the target file already exists. "
+                "Allowed values: 'fail' (default) — refuse if file exists; "
+                "'version' — write to a new timestamped path instead; "
+                "'overwrite' — replace the existing file (dev mode only)."
             ),
-            value_type="boolean",
         ),
     },
 )
@@ -186,6 +189,7 @@ def register_file_tools(
     configured_roots: tuple[str, ...] = (),
     default_write_dir: Path | None = None,
     default_read_dir: Path | None = None,
+    allow_destructive_file_overwrite: bool = False,
 ) -> None:
     """Register the built-in local file tools."""
     allowed_roots = resolve_allowed_roots(
@@ -205,6 +209,7 @@ def register_file_tools(
             call,
             allowed_roots=allowed_roots,
             default_write_dir=default_write_dir,
+            allow_destructive_file_overwrite=allow_destructive_file_overwrite,
         )
 
     def move_handler(call: ToolCall) -> ToolResult:
@@ -411,8 +416,9 @@ def write_text_file(
     *,
     allowed_roots: tuple[Path, ...] | None = None,
     default_write_dir: Path | None = None,
+    allow_destructive_file_overwrite: bool = False,
 ) -> ToolResult:
-    """Write plain UTF-8 text to a local file, bounded and permissioned."""
+    """Write plain UTF-8 text to a local file with structured collision handling."""
     tool_name = WRITE_TEXT_FILE_DEFINITION.name
 
     path_value = call.arguments.get("path")
@@ -429,11 +435,20 @@ def write_text_file(
             error="Argument 'content' must be a string.",
         )
 
-    overwrite = call.arguments.get("overwrite", False)
-    if not isinstance(overwrite, bool):
+    collision_policy_raw = call.arguments.get("collision_policy", "fail")
+    if not isinstance(collision_policy_raw, str):
         return ToolResult.failure(
             tool_name=tool_name,
-            error="Argument 'overwrite' must be a boolean.",
+            error="Argument 'collision_policy' must be a string.",
+        )
+    collision_policy = collision_policy_raw.strip().lower()
+    if collision_policy not in ("fail", "version", "overwrite"):
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"Argument 'collision_policy' must be 'fail', 'version', or 'overwrite'. "
+                f"Got: '{collision_policy_raw}'."
+            ),
         )
 
     if len(content) > _MAX_WRITE_FILE_CHARS:
@@ -447,7 +462,7 @@ def write_text_file(
 
     path_str = path_value.strip()
     normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
-    path = _resolve_file_tool_path(
+    requested_path = _resolve_file_tool_path(
         path_str,
         default_dir=default_write_dir,
         allowed_roots=normalized_allowed_roots,
@@ -455,46 +470,114 @@ def write_text_file(
 
     access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
-        path=path,
+        path=requested_path,
         allowed_roots=normalized_allowed_roots,
     )
     if access_error is not None:
         return access_error
 
-    if path.exists() and not overwrite:
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=(
-                f"File already exists: {path}. "
-                "Pass overwrite=true to replace it."
-            ),
-        )
+    file_already_exists = requested_path.exists()
 
-    if path.exists() and not path.is_file():
+    if file_already_exists:
+        if collision_policy == "fail":
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error=(
+                    f"File already exists: {requested_path}. "
+                    "Use collision_policy='version' to create a versioned copy, "
+                    "or collision_policy='overwrite' if dev mode is enabled."
+                ),
+                payload={
+                    "requested_path": str(requested_path),
+                    "resolved_path": str(requested_path),
+                    "created_new_file": False,
+                    "created_versioned_file": False,
+                    "overwrite_applied": False,
+                    "file_already_exists": True,
+                    "collision_policy_applied": collision_policy,
+                },
+            )
+        elif collision_policy == "version":
+            resolved_path = _generate_versioned_path(requested_path)
+            created_versioned_file = True
+            overwrite_applied = False
+        else:  # overwrite
+            if not allow_destructive_file_overwrite:
+                return ToolResult.failure(
+                    tool_name=tool_name,
+                    error=(
+                        f"File already exists: {requested_path}. "
+                        "collision_policy='overwrite' requires dev mode to be enabled."
+                    ),
+                    payload={
+                        "requested_path": str(requested_path),
+                        "resolved_path": str(requested_path),
+                        "created_new_file": False,
+                        "created_versioned_file": False,
+                        "overwrite_applied": False,
+                        "file_already_exists": True,
+                        "collision_policy_applied": collision_policy,
+                    },
+                )
+            resolved_path = requested_path
+            created_versioned_file = False
+            overwrite_applied = True
+    else:
+        resolved_path = requested_path
+        created_versioned_file = False
+        overwrite_applied = False
+
+    if resolved_path.exists() and not resolved_path.is_file():
         return ToolResult.failure(
             tool_name=tool_name,
-            error=f"Path exists but is not a file: {path}",
+            error=f"Path exists but is not a file: {resolved_path}",
         )
 
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        os.chmod(path, 0o600)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path.write_text(content, encoding="utf-8")
+        os.chmod(resolved_path, 0o600)
     except OSError as exc:
         return ToolResult.failure(
             tool_name=tool_name,
-            error=f"Could not write file '{path}': {exc}",
+            error=f"Could not write file '{resolved_path}': {exc}",
         )
+
+    created_new_file = not file_already_exists or created_versioned_file
+    if created_versioned_file:
+        output_text = (
+            f"File written (versioned): {resolved_path} "
+            f"(requested: {requested_path})"
+        )
+    else:
+        output_text = f"File written: {resolved_path}"
 
     return ToolResult.ok(
         tool_name=tool_name,
-        output_text=f"File written: {path}",
+        output_text=output_text,
         payload={
-            "path": str(path),
+            "requested_path": str(requested_path),
+            "resolved_path": str(resolved_path),
+            "created_new_file": created_new_file,
+            "created_versioned_file": created_versioned_file,
+            "overwrite_applied": overwrite_applied,
+            "file_already_exists": file_already_exists,
+            "collision_policy_applied": collision_policy,
             "size_chars": len(content),
-            "overwrite": overwrite,
         },
     )
+
+
+def _generate_versioned_path(path: Path) -> Path:
+    """Return a timestamped variant of path that does not exist yet.
+
+    Example: data/note.txt -> data/note_20260322_185430.txt
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = path.stem
+    suffix = path.suffix  # e.g. ".txt" or ""
+    versioned = path.with_name(f"{stem}_{timestamp}{suffix}")
+    return versioned
 
 
 def move_file(
@@ -1015,6 +1098,7 @@ __all__ = [
     "RENAME_FILE_DEFINITION",
     "WRITE_TEXT_FILE_DEFINITION",
     "_MAX_WRITE_FILE_CHARS",
+    "_generate_versioned_path",
     "copy_file",
     "delete_file",
     "list_directory",

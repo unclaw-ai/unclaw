@@ -86,6 +86,7 @@ class RuntimeGuardrailSettings:
 @dataclass(frozen=True, slots=True)
 class FileToolSecuritySettings:
     allowed_roots: tuple[str, ...]
+    allow_destructive_file_overwrite: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +370,11 @@ def _build_app_settings(
                     file_security_section,
                     "allowed_roots",
                     default=(".",),
+                ),
+                allow_destructive_file_overwrite=_get_bool(
+                    file_security_section,
+                    "allow_destructive_file_overwrite",
+                    False,
                 ),
             ),
             fetch=FetchToolSecuritySettings(

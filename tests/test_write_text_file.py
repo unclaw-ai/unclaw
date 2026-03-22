@@ -1,4 +1,4 @@
-"""Targeted tests for write_text_file — P3-3 corrective patch."""
+"""Tests for write_text_file — collision policy and structured outcome."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from unclaw.tools.contracts import ToolCall, ToolPermissionLevel, ToolResult
 from unclaw.tools.file_tools import (
     WRITE_TEXT_FILE_DEFINITION,
     _MAX_WRITE_FILE_CHARS,
+    _generate_versioned_path,
     register_file_tools,
     write_text_file,
 )
@@ -81,7 +82,7 @@ def test_write_text_file_sets_0o600_permissions(tmp_path: Path) -> None:
     assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
 
 
-def test_write_text_file_payload_contains_path_and_size(tmp_path: Path) -> None:
+def test_write_text_file_payload_contains_structured_outcome_fields(tmp_path: Path) -> None:
     target = tmp_path / "f.txt"
     call = ToolCall(
         tool_name="write_text_file",
@@ -91,15 +92,21 @@ def test_write_text_file_payload_contains_path_and_size(tmp_path: Path) -> None:
     assert result.success is True
     assert result.payload is not None
     assert result.payload["size_chars"] == 3
-    assert result.payload["overwrite"] is False
+    assert result.payload["requested_path"] == str(target)
+    assert result.payload["resolved_path"] == str(target)
+    assert result.payload["created_new_file"] is True
+    assert result.payload["created_versioned_file"] is False
+    assert result.payload["overwrite_applied"] is False
+    assert result.payload["file_already_exists"] is False
+    assert result.payload["collision_policy_applied"] == "fail"
 
 
 # ---------------------------------------------------------------------------
-# Overwrite protection
+# Collision policy — fail (default)
 # ---------------------------------------------------------------------------
 
 
-def test_write_text_file_fails_without_overwrite_flag(tmp_path: Path) -> None:
+def test_write_text_file_fails_by_default_when_file_exists(tmp_path: Path) -> None:
     target = tmp_path / "existing.txt"
     target.write_text("original", encoding="utf-8")
 
@@ -114,17 +121,193 @@ def test_write_text_file_fails_without_overwrite_flag(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "original"
 
 
-def test_write_text_file_overwrites_with_explicit_flag(tmp_path: Path) -> None:
+def test_write_text_file_fail_policy_returns_structured_outcome(tmp_path: Path) -> None:
     target = tmp_path / "existing.txt"
     target.write_text("original", encoding="utf-8")
 
     call = ToolCall(
         tool_name="write_text_file",
-        arguments={"path": str(target), "content": "replaced", "overwrite": True},
+        arguments={"path": str(target), "content": "new content", "collision_policy": "fail"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["created_new_file"] is False
+    assert result.payload["created_versioned_file"] is False
+    assert result.payload["overwrite_applied"] is False
+    assert result.payload["collision_policy_applied"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# Collision policy — version
+# ---------------------------------------------------------------------------
+
+
+def test_write_text_file_version_policy_creates_new_file_when_target_exists(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "versioned", "collision_policy": "version"},
     )
     result = write_text_file(call, allowed_roots=(tmp_path,))
     assert result.success is True
+    # Original file must be untouched
+    assert target.read_text(encoding="utf-8") == "original"
+    # A new versioned file must exist
+    assert result.payload is not None
+    resolved = Path(result.payload["resolved_path"])
+    assert resolved != target
+    assert resolved.exists()
+    assert resolved.read_text(encoding="utf-8") == "versioned"
+
+
+def test_write_text_file_version_policy_timestamped_name_format(tmp_path: Path) -> None:
+    target = tmp_path / "report.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "v2", "collision_policy": "version"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is True
+    resolved = Path(result.payload["resolved_path"])  # type: ignore[index]
+    # stem must be report_YYYYMMDD_HHMMSS
+    assert resolved.stem.startswith("report_")
+    assert resolved.suffix == ".txt"
+    assert len(resolved.stem) == len("report_20260322_185430")
+
+
+def test_write_text_file_version_policy_no_extension(tmp_path: Path) -> None:
+    target = tmp_path / "report"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "v2", "collision_policy": "version"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is True
+    resolved = Path(result.payload["resolved_path"])  # type: ignore[index]
+    assert resolved.suffix == ""
+    assert resolved.name.startswith("report_")
+
+
+def test_write_text_file_version_policy_structured_outcome(tmp_path: Path) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "versioned", "collision_policy": "version"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["requested_path"] == str(target)
+    assert result.payload["resolved_path"] != str(target)
+    assert result.payload["created_new_file"] is True
+    assert result.payload["created_versioned_file"] is True
+    assert result.payload["overwrite_applied"] is False
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["collision_policy_applied"] == "version"
+
+
+def test_write_text_file_version_policy_new_file_writes_normally(tmp_path: Path) -> None:
+    """version policy on a new file should just write it at the requested path."""
+    target = tmp_path / "new.txt"
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "hello", "collision_policy": "version"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["resolved_path"] == str(target)
+    assert result.payload["created_versioned_file"] is False
+
+
+# ---------------------------------------------------------------------------
+# Collision policy — overwrite (dev mode)
+# ---------------------------------------------------------------------------
+
+
+def test_write_text_file_overwrite_policy_refused_without_dev_mode(tmp_path: Path) -> None:
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "replaced", "collision_policy": "overwrite"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert "dev mode" in result.error  # type: ignore[operator]
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_write_text_file_overwrite_policy_refused_without_dev_mode_structured_outcome(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "replaced", "collision_policy": "overwrite"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.payload is not None
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["overwrite_applied"] is False
+    assert result.payload["collision_policy_applied"] == "overwrite"
+
+
+def test_write_text_file_overwrite_policy_succeeds_with_dev_mode(tmp_path: Path) -> None:
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "replaced", "collision_policy": "overwrite"},
+    )
+    result = write_text_file(
+        call,
+        allowed_roots=(tmp_path,),
+        allow_destructive_file_overwrite=True,
+    )
+    assert result.success is True
     assert target.read_text(encoding="utf-8") == "replaced"
+
+
+def test_write_text_file_overwrite_policy_dev_mode_structured_outcome(tmp_path: Path) -> None:
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "replaced", "collision_policy": "overwrite"},
+    )
+    result = write_text_file(
+        call,
+        allowed_roots=(tmp_path,),
+        allow_destructive_file_overwrite=True,
+    )
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["requested_path"] == str(target)
+    assert result.payload["resolved_path"] == str(target)
+    assert result.payload["created_new_file"] is False
+    assert result.payload["created_versioned_file"] is False
+    assert result.payload["overwrite_applied"] is True
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["collision_policy_applied"] == "overwrite"
 
 
 # ---------------------------------------------------------------------------
@@ -211,14 +394,14 @@ def test_write_text_file_rejects_non_string_content(tmp_path: Path) -> None:
     assert "content" in result.error.lower()  # type: ignore[union-attr]
 
 
-def test_write_text_file_rejects_non_bool_overwrite(tmp_path: Path) -> None:
+def test_write_text_file_rejects_invalid_collision_policy(tmp_path: Path) -> None:
     call = ToolCall(
         tool_name="write_text_file",
-        arguments={"path": str(tmp_path / "f.txt"), "content": "x", "overwrite": "yes"},
+        arguments={"path": str(tmp_path / "f.txt"), "content": "x", "collision_policy": "clobber"},
     )
     result = write_text_file(call, allowed_roots=(tmp_path,))
     assert result.success is False
-    assert "overwrite" in result.error.lower()  # type: ignore[union-attr]
+    assert "collision_policy" in result.error.lower()  # type: ignore[union-attr]
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +467,7 @@ def test_project_relative_path_is_not_prefixed_twice(tmp_path: Path) -> None:
     assert result.success is True
     assert target.read_text(encoding="utf-8") == "explicit"
     assert result.payload is not None
-    assert result.payload["path"] == str(target)
+    assert result.payload["resolved_path"] == str(target)
     assert not (write_dir / "data" / "hello.txt").exists()
 
 
