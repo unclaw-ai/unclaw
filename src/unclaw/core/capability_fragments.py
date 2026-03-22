@@ -454,7 +454,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Default is overwrite=false — fails if the file already exists. "
             "Only use overwrite=true when the user explicitly asked to replace or "
             "overwrite an existing file (e.g. with words like 'overwrite', 'replace', "
-            "'update the file'). Do not infer overwrite intent from context alone.",
+            "'update the file'). Do not infer overwrite intent from context alone. "
+            "Overwriting an existing file requires two calls: the first call with "
+            "overwrite=true is refused and returns an overwrite_request_id in the payload; "
+            "pass that id as overwrite_request_id in the second call to complete the overwrite.",
         ),
         "available.local_file_delete": _static_prompt(
             "available.local_file_delete",

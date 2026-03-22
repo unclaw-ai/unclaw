@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
+import secrets
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +24,92 @@ from unclaw.tools.registry import ToolRegistry
 _DEFAULT_MAX_FILE_CHARS = 8_000
 _DEFAULT_DIRECTORY_LIMIT = 200
 _MAX_WRITE_FILE_CHARS = 1_000_000  # 1 MB upper bound on text content
+
+# ---------------------------------------------------------------------------
+# Overwrite authorization — short-ID pending approval store
+#
+# write_text_file with overwrite=true on an existing file is a two-round-trip
+# operation:
+#   Round 1: tool refuses, creates a pending approval entry keyed by a short
+#            opaque ID (e.g. "owr_a1b2c3d4") and returns it in the payload.
+#   Round 2: caller supplies that ID via overwrite_request_id=; tool validates
+#            the entry and executes the overwrite only if it is valid.
+#
+# The entry is bound to the exact (resolved path, content_hash).
+# It expires after _OVERWRITE_REQUEST_TTL_SECONDS and can only be used once.
+# ---------------------------------------------------------------------------
+
+_OVERWRITE_REQUEST_TTL_SECONDS: float = 300.0
+_OVERWRITE_REQUEST_ID_PREFIX = "owr_"
+
+
+class _PendingOverwrite:
+    __slots__ = ("path", "content_hash", "created_at", "consumed")
+
+    def __init__(self, path: Path, content_hash: str, created_at: float) -> None:
+        self.path = path
+        self.content_hash = content_hash
+        self.created_at = created_at
+        self.consumed = False
+
+
+# Process-local pending overwrite store.  Protected by _pending_lock.
+_pending_overwrites: dict[str, _PendingOverwrite] = {}
+_pending_lock = threading.Lock()
+
+
+def _create_overwrite_request(path: Path, content: str) -> str:
+    """Create a pending overwrite approval entry and return its short ID."""
+    request_id = _OVERWRITE_REQUEST_ID_PREFIX + secrets.token_hex(4)
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    entry = _PendingOverwrite(
+        path=path,
+        content_hash=content_hash,
+        created_at=time.monotonic(),
+    )
+    with _pending_lock:
+        _purge_expired_overwrites_locked()
+        _pending_overwrites[request_id] = entry
+    return request_id
+
+
+def _purge_expired_overwrites_locked() -> None:
+    """Remove expired entries.  Must be called with _pending_lock held."""
+    now = time.monotonic()
+    expired = [
+        rid
+        for rid, e in _pending_overwrites.items()
+        if (now - e.created_at) > _OVERWRITE_REQUEST_TTL_SECONDS
+    ]
+    for rid in expired:
+        del _pending_overwrites[rid]
+
+
+def _validate_and_consume_overwrite_request(
+    request_id: str, path: Path, content: str
+) -> str | None:
+    """Validate and consume a pending overwrite approval.
+
+    Returns None on success, or a human-readable error string on failure.
+    On success the entry is marked consumed so it cannot be reused.
+    """
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    now = time.monotonic()
+    with _pending_lock:
+        entry = _pending_overwrites.get(request_id)
+        if entry is None:
+            return "overwrite_request_id is invalid or has expired."
+        if (now - entry.created_at) > _OVERWRITE_REQUEST_TTL_SECONDS:
+            del _pending_overwrites[request_id]
+            return "overwrite_request_id has expired."
+        if entry.consumed:
+            return "overwrite_request_id has already been used."
+        if entry.path != path:
+            return "overwrite_request_id is bound to a different path."
+        if entry.content_hash != content_hash:
+            return "overwrite_request_id is bound to different content."
+        entry.consumed = True
+    return None
 
 # V1 document read scope — only plain text-based formats are supported.
 # Binary formats (pdf, docx, xlsx, etc.) are not supported in V1.
@@ -67,6 +157,9 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
         "Write plain UTF-8 text content to a local file. "
         "Relative paths are created inside the data/files/ directory by default. "
         "Fails if the file already exists unless overwrite is set to true. "
+        "Overwriting an existing file is a two-step process: the first call with "
+        "overwrite=true is refused and returns an overwrite_request_id in the payload; "
+        "the second call must include that id via overwrite_request_id to proceed. "
         "Content is limited to 1 MB. Only writes inside the configured allowed roots."
     ),
     permission_level=ToolPermissionLevel.LOCAL_WRITE,
@@ -78,9 +171,22 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
                 "Set to true only when the user explicitly asked to replace or "
                 "overwrite an existing file. "
                 "Default: false — write fails if the file already exists. "
-                "Do not set to true unless the user's replacement intent is explicit."
+                "Do not set to true unless the user's replacement intent is explicit. "
+                "When overwrite=true on an existing file the first call is refused "
+                "and returns an overwrite_token; include it in the next call."
             ),
             value_type="boolean",
+        ),
+        "overwrite_request_id": ToolArgumentSpec(
+            description=(
+                "Authorization handle required to overwrite an existing file. "
+                "Do not invent a value. "
+                "Obtain it from the overwrite_request_id field in the failure payload "
+                "returned when your overwrite=true call was refused. "
+                "The handle is bound to the exact path and content of that refused call "
+                "and expires after 5 minutes."
+            ),
+            value_type="string",
         ),
     },
 )
@@ -461,20 +567,76 @@ def write_text_file(
     if access_error is not None:
         return access_error
 
-    if path.exists() and not overwrite:
+    file_exists = path.exists()
+
+    if file_exists and not path.is_file():
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Path exists but is not a file: {path}",
+        )
+
+    if file_exists and not overwrite:
         return ToolResult.failure(
             tool_name=tool_name,
             error=(
                 f"File already exists: {path}. "
                 "Pass overwrite=true to replace it."
             ),
+            payload={
+                "file_already_exists": True,
+                "overwrite_refused": True,
+                "path": str(path),
+            },
         )
 
-    if path.exists() and not path.is_file():
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Path exists but is not a file: {path}",
-        )
+    overwrite_applied = False
+    if file_exists and overwrite:
+        # Overwriting an existing file requires an authorization token.
+        # Round 1 (no token): refuse and emit a signed token for round 2.
+        # Round 2 (valid token): execute the overwrite.
+        overwrite_request_id_arg = call.arguments.get("overwrite_request_id", "")
+        if not isinstance(overwrite_request_id_arg, str):
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error="Argument 'overwrite_request_id' must be a string.",
+            )
+
+        request_id = overwrite_request_id_arg.strip()
+        if not request_id:
+            new_request_id = _create_overwrite_request(path, content)
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error=(
+                    f"File already exists: {path}. "
+                    "An authorization handle is required to overwrite. "
+                    "Include the overwrite_request_id from this payload in your next call."
+                ),
+                payload={
+                    "file_already_exists": True,
+                    "overwrite_refused": True,
+                    "overwrite_retry_allowed": True,
+                    "path": str(path),
+                    "overwrite_request_id": new_request_id,
+                },
+            )
+
+        validation_error = _validate_and_consume_overwrite_request(request_id, path, content)
+        if validation_error is not None:
+            return ToolResult.failure(
+                tool_name=tool_name,
+                error=(
+                    f"File already exists: {path}. "
+                    f"{validation_error} "
+                    "Make a new overwrite=true call to get a fresh overwrite_request_id."
+                ),
+                payload={
+                    "file_already_exists": True,
+                    "overwrite_refused": True,
+                    "path": str(path),
+                },
+            )
+
+        overwrite_applied = True
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,11 +650,12 @@ def write_text_file(
 
     return ToolResult.ok(
         tool_name=tool_name,
-        output_text=f"File written: {path}",
+        output_text=f"File {'overwritten' if overwrite_applied else 'written'}: {path}",
         payload={
             "path": str(path),
             "size_chars": len(content),
-            "overwrite": overwrite,
+            "created_new_file": not overwrite_applied,
+            "overwrite_applied": overwrite_applied,
         },
     )
 

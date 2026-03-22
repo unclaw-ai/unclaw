@@ -91,7 +91,8 @@ def test_write_text_file_payload_contains_path_and_size(tmp_path: Path) -> None:
     assert result.success is True
     assert result.payload is not None
     assert result.payload["size_chars"] == 3
-    assert result.payload["overwrite"] is False
+    assert result.payload["created_new_file"] is True
+    assert result.payload["overwrite_applied"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +115,8 @@ def test_write_text_file_fails_without_overwrite_flag(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "original"
 
 
-def test_write_text_file_overwrites_with_explicit_flag(tmp_path: Path) -> None:
+def test_write_text_file_overwrite_true_on_existing_is_refused_first(tmp_path: Path) -> None:
+    """First call with overwrite=true on an existing file is always refused."""
     target = tmp_path / "existing.txt"
     target.write_text("original", encoding="utf-8")
 
@@ -123,8 +125,48 @@ def test_write_text_file_overwrites_with_explicit_flag(tmp_path: Path) -> None:
         arguments={"path": str(target), "content": "replaced", "overwrite": True},
     )
     result = write_text_file(call, allowed_roots=(tmp_path,))
-    assert result.success is True
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["overwrite_refused"] is True
+    assert result.payload["overwrite_retry_allowed"] is True
+    assert "overwrite_request_id" in result.payload
+    assert result.payload["overwrite_request_id"].startswith("owr_")
+    # Original content must be untouched
+    assert target.read_text(encoding="utf-8") == "original"
+
+
+def test_write_text_file_overwrites_with_request_id_from_refused_call(tmp_path: Path) -> None:
+    """Round 2: supplying the request id from the refused call executes the overwrite."""
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    # Round 1: refused, get approval handle
+    call_1 = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "replaced", "overwrite": True},
+    )
+    result_1 = write_text_file(call_1, allowed_roots=(tmp_path,))
+    assert result_1.success is False
+    assert result_1.payload is not None
+    request_id = result_1.payload["overwrite_request_id"]
+
+    # Round 2: supply request id — must succeed
+    call_2 = ToolCall(
+        tool_name="write_text_file",
+        arguments={
+            "path": str(target),
+            "content": "replaced",
+            "overwrite": True,
+            "overwrite_request_id": request_id,
+        },
+    )
+    result_2 = write_text_file(call_2, allowed_roots=(tmp_path,))
+    assert result_2.success is True
     assert target.read_text(encoding="utf-8") == "replaced"
+    assert result_2.payload is not None
+    assert result_2.payload["overwrite_applied"] is True
+    assert result_2.payload["created_new_file"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +377,264 @@ def test_register_file_tools_passes_default_write_dir_to_handler(tmp_path: Path)
 # deterministic runtime keyword behaviors were removed in the anti-determinism
 # cleanup. Overwrite protection is enforced by the tool layer; the model
 # synthesises replies when the tool returns a file-exists error.)
+
+
+# ---------------------------------------------------------------------------
+# Overwrite contract truthfulness — explicit outcome payload fields
+# ---------------------------------------------------------------------------
+
+
+def test_write_text_file_new_file_payload_marks_created_new_file(tmp_path: Path) -> None:
+    """Creating a new file returns created_new_file=True, overwrite_applied=False."""
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(tmp_path / "new.txt"), "content": "hello"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["created_new_file"] is True
+    assert result.payload["overwrite_applied"] is False
+
+
+def test_write_text_file_overwrite_payload_marks_overwrite_applied(tmp_path: Path) -> None:
+    """Successful overwrite (with valid request id) marks overwrite_applied=True."""
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    # Round 1
+    r1 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(target), "content": "new", "overwrite": True},
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    request_id = r1.payload["overwrite_request_id"]  # type: ignore[index]
+
+    # Round 2
+    r2 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target),
+                "content": "new",
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r2.success is True
+    assert r2.payload is not None
+    assert r2.payload["overwrite_applied"] is True
+    assert r2.payload["created_new_file"] is False
+
+
+def test_write_text_file_invalid_request_id_is_refused(tmp_path: Path) -> None:
+    """An invalid or fabricated overwrite_request_id must be refused."""
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={
+            "path": str(target),
+            "content": "new",
+            "overwrite": True,
+            "overwrite_request_id": "owr_notreal",
+        },
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["overwrite_refused"] is True
+    # File must be untouched
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_write_text_file_request_id_bound_to_content(tmp_path: Path) -> None:
+    """Request id from one content value does not authorize a different content."""
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    # Get a request id for content="A"
+    r1 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(target), "content": "A", "overwrite": True},
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    request_id = r1.payload["overwrite_request_id"]  # type: ignore[index]
+
+    # Try to use that request id for content="B"
+    r2 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target),
+                "content": "B",  # different content
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r2.success is False
+    assert r2.payload is not None
+    assert r2.payload["overwrite_refused"] is True
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_write_text_file_overwrite_false_on_existing_returns_file_already_exists(
+    tmp_path: Path,
+) -> None:
+    """overwrite=false on existing file includes file_already_exists in the payload."""
+    target = tmp_path / "existing.txt"
+    target.write_text("original", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={"path": str(target), "content": "new"},
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+    assert result.success is False
+    assert result.payload is not None
+    assert result.payload["file_already_exists"] is True
+    assert result.payload["overwrite_refused"] is True
+    # No approval handle for overwrite=false case (user did not ask to overwrite)
+    assert "overwrite_request_id" not in result.payload
+
+
+# ---------------------------------------------------------------------------
+# Approval handle — expiry, reuse, and path binding
+# ---------------------------------------------------------------------------
+
+
+def test_overwrite_request_id_expired_is_refused(tmp_path: Path) -> None:
+    """An expired approval handle must be refused cleanly."""
+    import unclaw.tools.file_tools as ft
+
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    # Round 1: get approval handle
+    r1 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(target), "content": "new", "overwrite": True},
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    request_id = r1.payload["overwrite_request_id"]  # type: ignore[index]
+
+    # Artificially expire the entry by setting created_at far in the past
+    with ft._pending_lock:
+        ft._pending_overwrites[request_id].created_at = 0.0
+
+    # Round 2: expired handle must be refused
+    r2 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target),
+                "content": "new",
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r2.success is False
+    assert r2.payload is not None
+    assert r2.payload["overwrite_refused"] is True
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_overwrite_request_id_cannot_be_reused(tmp_path: Path) -> None:
+    """A consumed approval handle must be refused on a second use."""
+    target = tmp_path / "target.txt"
+    target.write_text("old", encoding="utf-8")
+
+    # Round 1: get approval handle
+    r1 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(target), "content": "new", "overwrite": True},
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    request_id = r1.payload["overwrite_request_id"]  # type: ignore[index]
+
+    # Round 2: first use succeeds and consumes the handle
+    r2 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target),
+                "content": "new",
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r2.success is True
+
+    # Restore file so overwrite protection triggers again
+    target.write_text("old", encoding="utf-8")
+
+    # Round 3: reuse the same consumed handle — must be refused
+    r3 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target),
+                "content": "new",
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r3.success is False
+    assert r3.payload is not None
+    assert r3.payload["overwrite_refused"] is True
+    assert target.read_text(encoding="utf-8") == "old"
+
+
+def test_overwrite_request_id_bound_to_path(tmp_path: Path) -> None:
+    """Approval handle issued for file A cannot authorize overwrite of file B."""
+    target_a = tmp_path / "a.txt"
+    target_b = tmp_path / "b.txt"
+    target_a.write_text("old_a", encoding="utf-8")
+    target_b.write_text("old_b", encoding="utf-8")
+
+    # Get a handle for target_a
+    r1 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(target_a), "content": "new", "overwrite": True},
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    request_id = r1.payload["overwrite_request_id"]  # type: ignore[index]
+
+    # Try to use it against target_b
+    r2 = write_text_file(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={
+                "path": str(target_b),
+                "content": "new",
+                "overwrite": True,
+                "overwrite_request_id": request_id,
+            },
+        ),
+        allowed_roots=(tmp_path,),
+    )
+    assert r2.success is False
+    assert r2.payload is not None
+    assert r2.payload["overwrite_refused"] is True
+    assert target_b.read_text(encoding="utf-8") == "old_b"
