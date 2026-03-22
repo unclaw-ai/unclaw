@@ -9,8 +9,6 @@ from unclaw.core.capability_fragments import (
     load_builtin_capability_fragment_registry,
 )
 from unclaw.settings import load_settings
-from unclaw.skills.models import SkillPromptSourceKind
-from unclaw.skills.registry import load_skill_registry
 
 pytestmark = pytest.mark.unit
 
@@ -46,9 +44,3 @@ def test_builtin_capability_prompt_sources_stay_inside_capability_fragments_modu
         )
 
 
-def test_skill_prompt_sources_stay_inside_skill_manifests() -> None:
-    registry = load_skill_registry()
-
-    for fragment in registry.list_prompt_fragments():
-        assert fragment.source.kind is SkillPromptSourceKind.INLINE
-        assert fragment.source.reference.startswith("unclaw.skills.manifests:")

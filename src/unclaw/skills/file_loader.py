@@ -6,22 +6,10 @@ from collections.abc import Collection, Sequence
 from functools import lru_cache
 from pathlib import Path
 import re
-from types import MappingProxyType
 
 from unclaw.skills.file_models import SkillBundle, UnknownSkillIdError
 
 _SKILL_FILE_NAME = "SKILL.md"
-_LEGACY_TO_FILE_FIRST_SKILL_IDS = MappingProxyType(
-    {
-        "information.weather": "weather",
-    }
-)
-_FILE_FIRST_TO_LEGACY_SKILL_IDS = MappingProxyType(
-    {
-        file_first_skill_id: legacy_skill_id
-        for legacy_skill_id, file_first_skill_id in _LEGACY_TO_FILE_FIRST_SKILL_IDS.items()
-    }
-)
 _CODE_SPAN_PATTERN = re.compile(r"`([^`]+)`")
 _INLINE_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _ASTERISK_EMPHASIS_PATTERN = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
@@ -96,19 +84,7 @@ def list_known_skill_ids(
         skills_root=skills_root,
         discovered_skill_bundles=discovered_skill_bundles,
     )
-    known_skill_ids: list[str] = []
-    discovered_skill_ids = frozenset(bundle.skill_id for bundle in bundles)
-
-    for bundle in bundles:
-        _append_unique(known_skill_ids, bundle.skill_id)
-
-    for legacy_skill_id, file_first_skill_id in sorted(
-        _LEGACY_TO_FILE_FIRST_SKILL_IDS.items()
-    ):
-        if file_first_skill_id in discovered_skill_ids:
-            _append_unique(known_skill_ids, legacy_skill_id)
-
-    return tuple(known_skill_ids)
+    return tuple(bundle.skill_id for bundle in bundles)
 
 
 def load_active_skill_bundles(
@@ -133,17 +109,16 @@ def load_active_skill_bundles(
 
     for raw_skill_id in enabled_skill_ids:
         normalized_skill_id = _normalize_skill_id(raw_skill_id)
-        file_first_skill_id = resolve_file_first_skill_id(normalized_skill_id)
-        bundle = bundles_by_id.get(file_first_skill_id)
+        bundle = bundles_by_id.get(normalized_skill_id)
 
         if bundle is None:
             unknown_skill_ids.append(normalized_skill_id)
             continue
-        if file_first_skill_id in seen_bundle_ids:
+        if normalized_skill_id in seen_bundle_ids:
             continue
 
         active_bundles.append(bundle)
-        seen_bundle_ids.add(file_first_skill_id)
+        seen_bundle_ids.add(normalized_skill_id)
 
     if unknown_skill_ids:
         raise UnknownSkillIdError(
@@ -152,16 +127,6 @@ def load_active_skill_bundles(
         )
 
     return tuple(active_bundles)
-
-
-def resolve_file_first_skill_id(skill_id: str) -> str:
-    normalized_skill_id = _normalize_skill_id(skill_id)
-    return _LEGACY_TO_FILE_FIRST_SKILL_IDS.get(normalized_skill_id, normalized_skill_id)
-
-
-def resolve_legacy_manifest_skill_id(skill_id: str) -> str:
-    normalized_skill_id = _normalize_skill_id(skill_id)
-    return _FILE_FIRST_TO_LEGACY_SKILL_IDS.get(normalized_skill_id, normalized_skill_id)
 
 
 def _resolve_discovered_bundles(
@@ -283,11 +248,6 @@ def _ensure_terminal_punctuation(text: str) -> str:
     return f"{text}."
 
 
-def _append_unique(values: list[str], value: str) -> None:
-    if value not in values:
-        values.append(value)
-
-
 __all__ = [
     "discover_internal_skill_bundles",
     "discover_skill_bundles",
@@ -295,7 +255,5 @@ __all__ = [
     "list_known_skill_ids",
     "load_active_skill_bundles",
     "load_skill_bundle",
-    "resolve_file_first_skill_id",
-    "resolve_legacy_manifest_skill_id",
     "shipped_skill_bundle_root",
 ]

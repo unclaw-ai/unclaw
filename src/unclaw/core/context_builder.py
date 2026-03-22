@@ -29,7 +29,6 @@ from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.skills.catalog import build_active_skill_catalog
 from unclaw.skills.file_loader import load_active_skill_bundles
 from unclaw.skills.file_models import UnknownSkillIdError
-from unclaw.skills.runtime import build_active_skill_context_notes
 from unclaw.skills.selector import select_skill_for_turn
 
 _UNTRUSTED_TOOL_OUTPUT_NOTE = (
@@ -154,15 +153,6 @@ def build_context_messages(
             context_messages.append(
                 LLMMessage(role=LLMRole.SYSTEM, content=full_skill_content)
             )
-        context_messages.extend(
-            LLMMessage(role=LLMRole.SYSTEM, content=note)
-            for note in _resolve_skill_context_notes_for_context(
-                session_manager=session_manager,
-                capability_summary=capability_summary,
-                model_profile_name=model_profile_name,
-                capability_budget_policy=capability_budget_policy,
-            )
-        )
     if system_context_notes:
         context_messages.extend(
             LLMMessage(role=LLMRole.SYSTEM, content=note)
@@ -251,36 +241,6 @@ def _resolve_file_first_skill_catalog_for_context(
         )
     except UnknownSkillIdError:
         return ""
-
-
-def _resolve_skill_context_notes_for_context(
-    *,
-    session_manager: SessionManager,
-    capability_summary: RuntimeCapabilitySummary,
-    model_profile_name: str | None,
-    capability_budget_policy: CapabilityBudgetPolicy | None,
-) -> tuple[str, ...]:
-    if model_profile_name is None:
-        return ()
-
-    settings = getattr(session_manager, "settings", None)
-    if settings is None:
-        return ()
-
-    skills = getattr(settings, "skills", None)
-    if skills is None or not getattr(skills, "enabled_skill_ids", ()):
-        return ()
-
-    model_pack = getattr(settings, "model_pack", None)
-    if not isinstance(model_pack, str):
-        return ()
-
-    return build_active_skill_context_notes(
-        settings=settings,
-        capability_summary=capability_summary,
-        model_profile_name=model_profile_name,
-        budget_policy=capability_budget_policy,
-    )
 
 
 def _limit_history(

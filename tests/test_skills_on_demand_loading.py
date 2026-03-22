@@ -149,10 +149,6 @@ class TestFullSkillInjectionInContext:
             "unclaw.core.context_builder.build_active_skill_catalog",
             lambda **kwargs: catalog,
         )
-        monkeypatch.setattr(
-            "unclaw.core.context_builder.build_active_skill_context_notes",
-            lambda **kwargs: (),
-        )
 
     def test_no_full_skill_injected_when_no_skills_enabled(self, monkeypatch) -> None:
         self._base_patches(monkeypatch)

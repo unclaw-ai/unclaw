@@ -1,11 +1,10 @@
 """Unit tests for compact active-skill catalog injection into context messages.
 
-Phase 2 success criteria verified here:
+Success criteria verified here:
 - active skills appear in compact catalog form in context messages
 - inactive skills (no enabled ids) produce no catalog injection
 - full SKILL.md content is NOT injected
 - built-in capability context and optional-skill catalog are separate messages
-- legacy skill notes still work alongside the new catalog
 """
 
 from __future__ import annotations
@@ -72,10 +71,6 @@ def test_compact_catalog_appears_as_separate_system_message(
         "unclaw.core.context_builder.build_active_skill_catalog",
         lambda **kwargs: catalog_text,
     )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (),
-    )
 
     session_manager = _make_session_manager(enabled_skill_ids=("weather",))
     messages = build_context_messages(
@@ -101,10 +96,6 @@ def test_no_catalog_message_when_no_skills_enabled(monkeypatch) -> None:
         "unclaw.core.context_builder.build_active_skill_catalog",
         lambda **kwargs: called.append(kwargs) or "",
     )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (),
-    )
 
     session_manager = _make_session_manager(enabled_skill_ids=())
     messages = build_context_messages(
@@ -127,10 +118,6 @@ def test_catalog_is_separate_from_capability_context(monkeypatch) -> None:
     monkeypatch.setattr(
         "unclaw.core.context_builder.build_active_skill_catalog",
         lambda **kwargs: catalog_text,
-    )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (),
     )
 
     session_manager = _make_session_manager(enabled_skill_ids=("weather",))
@@ -169,10 +156,6 @@ def test_full_skill_md_content_is_not_injected_in_catalog_message(monkeypatch) -
         "unclaw.core.context_builder.build_active_skill_catalog",
         lambda **kwargs: compact_catalog,
     )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (),
-    )
     # Suppress on-demand full-skill loading so this test focuses on catalog only.
     monkeypatch.setattr(
         "unclaw.core.context_builder._resolve_full_skill_content_for_turn",
@@ -210,10 +193,6 @@ def test_unknown_skill_id_silently_produces_no_catalog(monkeypatch) -> None:
         "unclaw.core.context_builder.build_active_skill_catalog",
         _raise,
     )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (),
-    )
 
     session_manager = _make_session_manager(enabled_skill_ids=("ghost.skill",))
     # Should not raise
@@ -227,44 +206,6 @@ def test_unknown_skill_id_silently_produces_no_catalog(monkeypatch) -> None:
 
     catalog_msgs = [m for m in messages if "Active optional skills" in m.content]
     assert catalog_msgs == []
-
-
-def test_catalog_coexists_with_legacy_skill_notes(monkeypatch) -> None:
-    """Context builder pipeline: compact catalog and legacy manifest notes can coexist.
-
-    This tests the plumbing (context_builder routes both sources into separate
-    system messages). In practice, weather no longer produces legacy manifest
-    notes — but other skills (e.g. fabrication.three_d_printer) may still do
-    so until they are migrated to file-first bundles.
-    """
-    catalog_text = "Active optional skills:\n- weather: Live weather."
-    legacy_note = "Active optional skill: Weather\n- Prefer get_weather for conditions."
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_catalog",
-        lambda **kwargs: catalog_text,
-    )
-    monkeypatch.setattr(
-        "unclaw.core.context_builder.build_active_skill_context_notes",
-        lambda **kwargs: (legacy_note,),
-    )
-
-    session_manager = _make_session_manager(enabled_skill_ids=("weather",))
-    messages = build_context_messages(
-        session_manager=session_manager,
-        session_id="test-session",
-        user_message="What is the weather?",
-        capability_summary=_minimal_capability_summary(),
-        model_profile_name="native",
-    )
-
-    system_messages = [m for m in messages if m.role is LLMRole.SYSTEM]
-    catalog_msgs = [m for m in system_messages if "Active optional skills:" in m.content]
-    legacy_msgs = [m for m in system_messages if "Active optional skill: Weather" in m.content]
-
-    assert len(catalog_msgs) == 1, "compact catalog must appear"
-    assert len(legacy_msgs) == 1, "legacy weather notes must still appear"
-    # They must be distinct messages
-    assert catalog_msgs[0] is not legacy_msgs[0]
 
 
 def test_catalog_uses_real_shipped_weather_bundle() -> None:

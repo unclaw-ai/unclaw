@@ -25,7 +25,7 @@ thinking:
   default_enabled: false
 skills:
   enabled_skill_ids:
-  - information.weather
+  - weather
 providers:
   ollama:
     timeout_seconds: 60.0

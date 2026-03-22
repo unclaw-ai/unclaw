@@ -621,12 +621,8 @@ def _validate_enabled_skill_ids(skill_settings: SkillSettings) -> None:
         return
 
     from unclaw.skills.file_loader import list_known_skill_ids
-    from unclaw.skills.registry import load_skill_registry
 
-    registry = load_skill_registry()
-    known_skill_ids = frozenset(
-        (*registry.list_skill_ids(), *list_known_skill_ids())
-    )
+    known_skill_ids = frozenset(list_known_skill_ids())
     unknown_skill_ids = tuple(
         skill_id
         for skill_id in skill_settings.enabled_skill_ids

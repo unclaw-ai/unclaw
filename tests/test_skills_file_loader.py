@@ -79,7 +79,7 @@ def test_load_skill_bundle_reads_display_name_summary_tool_hints_and_raw_content
     assert bundle.load_raw_content() == skill_md_content
 
 
-def test_load_active_skill_bundles_resolves_legacy_aliases_and_deduplicates(
+def test_load_active_skill_bundles_deduplicates_repeated_skill_ids(
     tmp_path: Path,
 ) -> None:
     skills_root = tmp_path / "skills"
@@ -91,7 +91,7 @@ def test_load_active_skill_bundles_resolves_legacy_aliases_and_deduplicates(
     )
 
     active_bundles = load_active_skill_bundles(
-        enabled_skill_ids=("information.weather", "weather"),
+        enabled_skill_ids=("weather", "weather"),
         skills_root=skills_root,
     )
 
@@ -132,7 +132,7 @@ def test_build_active_skill_catalog_renders_compact_catalog_for_active_skills(
     )
 
     catalog = build_active_skill_catalog(
-        enabled_skill_ids=("information.weather",),
+        enabled_skill_ids=("weather",),
         skills_root=skills_root,
     )
 

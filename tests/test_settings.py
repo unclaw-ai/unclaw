@@ -171,7 +171,7 @@ def test_load_settings_reads_enabled_skill_ids_from_config(
 
     settings = load_settings(project_root=project_root)
 
-    assert settings.skills.enabled_skill_ids == ("information.weather",)
+    assert settings.skills.enabled_skill_ids == ("weather",)
 
 
 def test_load_settings_accepts_file_first_enabled_skill_ids_from_config(

@@ -1,4 +1,4 @@
-"""Optional skills package with legacy manifests and file-first bundle helpers."""
+"""Optional skills package — file-first bundle helpers."""
 
 from __future__ import annotations
 
@@ -7,25 +7,10 @@ from typing import Any
 
 _EXPORTED_MEMBERS = {
     "SkillBundle": ("unclaw.skills.file_models", "SkillBundle"),
-    "SkillAvailability": ("unclaw.skills.models", "SkillAvailability"),
-    "SkillBudgetMetadata": ("unclaw.skills.models", "SkillBudgetMetadata"),
-    "SkillInstallMode": ("unclaw.skills.models", "SkillInstallMode"),
-    "SkillManifest": ("unclaw.skills.models", "SkillManifest"),
-    "SkillPromptBudgetTier": ("unclaw.skills.models", "SkillPromptBudgetTier"),
-    "SkillPromptFragment": ("unclaw.skills.models", "SkillPromptFragment"),
-    "SkillPromptFragmentKind": ("unclaw.skills.models", "SkillPromptFragmentKind"),
-    "SkillPromptSource": ("unclaw.skills.models", "SkillPromptSource"),
-    "SkillPromptSourceKind": ("unclaw.skills.models", "SkillPromptSourceKind"),
-    "SkillRegistry": ("unclaw.skills.registry", "SkillRegistry"),
-    "SkillToolBinding": ("unclaw.skills.models", "SkillToolBinding"),
     "UnknownSkillIdError": ("unclaw.skills.file_models", "UnknownSkillIdError"),
     "build_active_skill_catalog": (
         "unclaw.skills.catalog",
         "build_active_skill_catalog",
-    ),
-    "build_active_skill_context_notes": (
-        "unclaw.skills.runtime",
-        "build_active_skill_context_notes",
     ),
     "discover_internal_skill_bundles": (
         "unclaw.skills.file_loader",
@@ -39,19 +24,6 @@ _EXPORTED_MEMBERS = {
         "load_active_skill_bundles",
     ),
     "load_skill_bundle": ("unclaw.skills.file_loader", "load_skill_bundle"),
-    "load_skill_registry": ("unclaw.skills.registry", "load_skill_registry"),
-    "resolve_file_first_skill_id": (
-        "unclaw.skills.file_loader",
-        "resolve_file_first_skill_id",
-    ),
-    "resolve_active_skill_manifests": (
-        "unclaw.skills.runtime",
-        "resolve_active_skill_manifests",
-    ),
-    "resolve_legacy_manifest_skill_id": (
-        "unclaw.skills.file_loader",
-        "resolve_legacy_manifest_skill_id",
-    ),
     "shipped_skill_bundle_root": (
         "unclaw.skills.file_loader",
         "shipped_skill_bundle_root",
