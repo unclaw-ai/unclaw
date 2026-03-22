@@ -249,6 +249,10 @@ def build_startup_report(
             _build_telegram_access_check(allowed_chat_ids=telegram_allowed_chat_ids)
         )
 
+    skills_check = _build_skills_check(settings)
+    if skills_check is not None:
+        checks.append(skills_check)
+
     return StartupReport(channel_name=channel_name, checks=tuple(checks))
 
 
@@ -306,6 +310,55 @@ def _build_default_model_warm_load_check(settings: Settings) -> StartupCheck | N
             "Default model warm-load completed for "
             f"{resolved_profile.name}={resolved_profile.model_name}."
         ),
+    )
+
+
+def _build_skills_check(settings: Settings) -> StartupCheck | None:
+    """Report file-first skill bundle discovery and tool-loading status."""
+    from unclaw.skills.bundle_tools import probe_skill_tool_loading
+    from unclaw.skills.file_loader import load_active_skill_bundles
+    from unclaw.skills.file_models import UnknownSkillIdError
+
+    enabled_skill_ids = getattr(
+        getattr(settings, "skills", None), "enabled_skill_ids", ()
+    )
+    if not enabled_skill_ids:
+        return None
+
+    try:
+        active_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
+    except UnknownSkillIdError as exc:
+        unknown = ", ".join(exc.unknown_skill_ids)
+        return StartupCheck(
+            status=CheckStatus.ERROR,
+            label="Skills",
+            detail=f"Unknown skill id(s): {unknown}.",
+            guidance="Check skills.enabled_skill_ids in config/app.yaml.",
+        )
+
+    if not active_bundles:
+        return None
+
+    probe_results = probe_skill_tool_loading(enabled_skill_ids=enabled_skill_ids)
+
+    skill_parts: list[str] = []
+    any_failed = False
+    for bundle in active_bundles:
+        error = probe_results.get(bundle.skill_id)
+        has_tool_py = (bundle.bundle_dir / "tool.py").is_file()
+        if not has_tool_py:
+            skill_parts.append(f"{bundle.skill_id} (prompt-only)")
+        elif error is None:
+            skill_parts.append(f"{bundle.skill_id} (tools ok)")
+        else:
+            skill_parts.append(f"{bundle.skill_id} (tool load failed: {error})")
+            any_failed = True
+
+    detail = "; ".join(skill_parts)
+    return StartupCheck(
+        status=CheckStatus.WARN if any_failed else CheckStatus.OK,
+        label="Skills",
+        detail=detail,
     )
 
 

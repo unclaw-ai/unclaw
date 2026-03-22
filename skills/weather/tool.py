@@ -226,6 +226,12 @@ def register_weather_tools(registry: ToolRegistry) -> None:
     registry.register(GET_WEATHER_DEFINITION, get_weather)
 
 
+# Generic skill bundle hook — called by the runtime skill loader when this
+# bundle is active.  The convention is: a bundle's tool.py may expose
+# register_skill_tools(registry: ToolRegistry) -> None.
+register_skill_tools = register_weather_tools
+
+
 def get_weather(call: ToolCall) -> ToolResult:
     """Resolve one place and return compact current-weather and forecast data."""
     tool_name = GET_WEATHER_DEFINITION.name
@@ -1138,6 +1144,7 @@ __all__ = [
     "get_weather_async",
     "ground_weather_tool_result",
     "lookup_weather",
+    "register_skill_tools",
     "register_weather_tools",
     "resolve_weather_temporal_request",
 ]

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from unclaw.memory.long_term_store import LongTermStore
 from unclaw.settings import Settings
-from skills.weather.tool import GET_WEATHER_DEFINITION, register_weather_tools
+from unclaw.skills.bundle_tools import register_active_skill_tools
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
@@ -52,10 +52,15 @@ BUILTIN_TOOL_COMMANDS = MappingProxyType(
 
 
 def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
-    """Register the built-in local tools on the provided registry."""
+    """Register the built-in local tools on the provided registry.
+
+    Used when no Settings object is available (e.g. test helpers).  Defaults
+    to loading the shipped weather skill bundle so the registry has the same
+    tools as a fully-configured runtime with weather enabled.
+    """
     register_file_tools(registry)
     register_web_tools(registry)
-    register_weather_tools(registry)
+    register_active_skill_tools(registry, enabled_skill_ids=("weather",))
     register_system_tools(registry)
     register_terminal_tools(registry)
     return registry
@@ -81,7 +86,10 @@ def create_default_tool_registry(
             registry,
             allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
         )
-        register_weather_tools(registry)
+        register_active_skill_tools(
+            registry,
+            enabled_skill_ids=settings.skills.enabled_skill_ids,
+        )
         register_system_tools(registry)
         register_terminal_tools(
             registry,
@@ -148,7 +156,6 @@ __all__ = [
     "BUILTIN_TOOL_COMMANDS",
     "DELETE_FILE_DEFINITION",
     "FORGET_LONG_TERM_MEMORY_DEFINITION",
-    "GET_WEATHER_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_LONG_TERM_MEMORY_DEFINITION",
     "REMEMBER_LONG_TERM_MEMORY_DEFINITION",
