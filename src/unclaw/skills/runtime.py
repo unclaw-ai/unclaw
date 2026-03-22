@@ -15,6 +15,7 @@ from unclaw.skills.models import (
     SkillPromptFragmentKind,
 )
 from unclaw.skills.registry import SkillRegistry, load_skill_registry
+from unclaw.skills.file_loader import resolve_legacy_manifest_skill_id
 
 _SKILL_BUDGET_ORDER: dict[SkillPromptBudgetTier, int] = {
     SkillPromptBudgetTier.MINIMAL: 0,
@@ -61,9 +62,14 @@ def resolve_active_skill_manifests(
     registry = skill_registry or load_skill_registry()
 
     active_skills: list[SkillManifest] = []
+    seen_skill_ids: set[str] = set()
     for skill_id in enabled_skill_ids:
+        resolved_skill_id = resolve_legacy_manifest_skill_id(skill_id)
+        if resolved_skill_id in seen_skill_ids:
+            continue
+
         try:
-            skill = registry.get_skill(skill_id)
+            skill = registry.get_skill(resolved_skill_id)
         except KeyError:
             continue
 
@@ -77,6 +83,7 @@ def resolve_active_skill_manifests(
         ):
             continue
         active_skills.append(skill)
+        seen_skill_ids.add(resolved_skill_id)
 
     return tuple(active_skills)
 

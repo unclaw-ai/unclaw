@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from unclaw.core.capabilities import (
     build_runtime_capability_context,
@@ -273,6 +276,37 @@ def test_weather_skill_resolves_only_for_native_profiles_with_dedicated_weather_
     ) == ()
 
 
+def test_weather_skill_still_resolves_through_legacy_runtime_when_file_first_id_is_configured(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["skills"]["enabled_skill_ids"] = ["weather"]
+    _write_yaml(app_config_path, app_payload)
+
+    settings = load_settings(project_root=project_root)
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        GET_WEATHER_DEFINITION,
+        lambda call: None,  # pragma: no cover - tool execution is not used here
+    )
+    native_summary = build_runtime_capability_summary(
+        tool_registry=tool_registry,
+        memory_summary_available=False,
+        model_can_call_tools=True,
+    )
+
+    assert tuple(
+        skill.skill_id
+        for skill in resolve_active_skill_manifests(
+            settings=settings,
+            capability_summary=native_summary,
+            model_profile_name="main",
+        )
+    ) == ("information.weather",)
+
+
 def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
     make_temp_project,
 ) -> None:
@@ -318,3 +352,16 @@ def test_weather_skill_context_notes_stay_compact_on_lite_and_absent_on_fast(
         capability_summary=fast_summary,
         model_profile_name="fast",
     ) == ()
+
+
+def _read_yaml(path: Path) -> dict[str, object]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _write_yaml(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )

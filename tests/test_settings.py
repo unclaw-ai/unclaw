@@ -174,6 +174,20 @@ def test_load_settings_reads_enabled_skill_ids_from_config(
     assert settings.skills.enabled_skill_ids == ("information.weather",)
 
 
+def test_load_settings_accepts_file_first_enabled_skill_ids_from_config(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["skills"]["enabled_skill_ids"] = ["weather"]
+    _write_yaml(app_config_path, app_payload)
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.skills.enabled_skill_ids == ("weather",)
+
+
 def test_load_settings_errors_when_enabled_skill_id_is_unknown(
     make_temp_project,
 ) -> None:
