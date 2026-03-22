@@ -31,8 +31,6 @@ runtime:
   max_tool_calls_per_turn: 8
 skills:
   enabled_skill_ids:
-  - git_repo
-  - local_text_search
   - weather
 security:
   tools:

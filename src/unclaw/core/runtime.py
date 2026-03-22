@@ -172,6 +172,23 @@ def run_user_turn(
     assistant_reply: str | None = None
     turn_start_message_count = len(session_manager.list_messages(session.id))
 
+    # Track whether the streaming callback was ever invoked by the provider.
+    # If a final reply exists but nothing was streamed, we emit it once as a
+    # fallback so callers always receive output when a reply was produced.
+    _streamed_something = False
+    _effective_stream_func: LLMContentCallback | None
+    if stream_output_func is not None:
+        _orig_stream_func = stream_output_func
+
+        def _tracking_stream_func(text: str) -> None:
+            nonlocal _streamed_something
+            _streamed_something = True
+            _orig_stream_func(text)
+
+        _effective_stream_func = _tracking_stream_func
+    else:
+        _effective_stream_func = None
+
     if runtime_explicit_tool_call is None and legacy_tool_definitions is not None:
         active_assistant_reply_transform = _compose_reply_transforms(
             _build_default_search_grounding_transform(
@@ -229,7 +246,7 @@ def run_user_turn(
                     capability_summary=responder_capability_summary,
                     system_context_notes=system_context_notes,
                     thinking_enabled=thinking_enabled,
-                    content_callback=stream_output_func,
+                    content_callback=_effective_stream_func,
                     tools=responder_tool_definitions,
                 )
                 active_tracer.trace_model_succeeded(
@@ -282,7 +299,7 @@ def run_user_turn(
                         tool_definitions=responder_tool_definitions,
                         model_profile_name=selected_model_profile_name,
                         thinking_enabled=thinking_enabled,
-                        content_callback=stream_output_func,
+                        content_callback=_effective_stream_func,
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
@@ -324,6 +341,13 @@ def run_user_turn(
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
+
+    # Fallback: if a callback was registered but the provider never invoked it
+    # (e.g. the model returned all content in a final aggregated chunk with no
+    # streaming deltas), emit the final reply once so callers always receive
+    # output through the callback when a reply was produced.
+    if stream_output_func is not None and not _streamed_something and assistant_reply:
+        stream_output_func(assistant_reply)
 
     session_manager.add_message(
         MessageRole.ASSISTANT,

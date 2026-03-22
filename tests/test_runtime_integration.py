@@ -7086,6 +7086,151 @@ def test_run_user_turn_streaming_plain_text_still_works(
         session_manager.close()
 
 
+def test_run_user_turn_stream_fallback_emits_reply_when_provider_never_streams(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Fallback: if the provider returns a reply but never calls content_callback,
+    run_user_turn must emit the final reply once through stream_output_func."""
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class _SilentProvider:
+        """Provider that returns a reply but never calls content_callback."""
+
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url: str = "", default_timeout_seconds: float = 60.0) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Silent provider reply.",
+                created_at="2026-03-23T10:00:00Z",
+                finish_reason="stop",
+            )
+
+        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+            del timeout_seconds
+            return True
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", _SilentProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, "Hello", session_id=session.id,
+        )
+        streamed_chunks: list[str] = []
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Hello",
+            tracer=tracer,
+            stream_output_func=streamed_chunks.append,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert reply == "Silent provider reply."
+        assert streamed_chunks == ["Silent provider reply."]
+        assert "".join(streamed_chunks) == reply
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_stream_no_duplicate_when_chunks_already_streamed(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """When the provider already streams chunks, the fallback must not re-emit
+    the full reply, so stream_output_func receives exactly the original chunks."""
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    def fake_urlopen(request, timeout):  # type: ignore[no-untyped-def]
+        return _RuntimeFakeStreamResponse(
+            (
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-23T10:00:00Z",
+                    "message": {"content": "Chunk one. "},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-23T10:00:01Z",
+                    "message": {"content": "Chunk two."},
+                },
+                {
+                    "model": "qwen3.5:4b",
+                    "created_at": "2026-03-23T10:00:02Z",
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+    monkeypatch.setattr("unclaw.llm.ollama_provider.urlopen", fake_urlopen)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, "Hi", session_id=session.id,
+        )
+        streamed_chunks: list[str] = []
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Hi",
+            tracer=tracer,
+            stream_output_func=streamed_chunks.append,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert reply == "Chunk one. Chunk two."
+        # Exactly the two provider chunks — no extra fallback emission.
+        assert streamed_chunks == ["Chunk one. ", "Chunk two."]
+        assert "".join(streamed_chunks) == reply
+    finally:
+        session_manager.close()
+
+
 class _RuntimeFakeStreamResponse:
     def __init__(self, payloads: tuple[dict[str, object], ...]) -> None:
         self._lines = [
