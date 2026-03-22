@@ -24,7 +24,9 @@ SYSTEM_INFO_DEFINITION = ToolDefinition(
     name="system_info",
     description=(
         "Return a bounded read-only summary of the local machine and runtime: "
-        "OS, Python version, CPU core count, total RAM, hostname, local date/time, and locale."
+        "OS, Python version, CPU core count, total RAM, hostname, local date/time, and locale. "
+        "Call this tool when asked about the current date, time, day of week, OS, "
+        "hardware specs, hostname, or locale — do not guess these facts."
     ),
     permission_level=ToolPermissionLevel.LOCAL_READ,
     arguments={},

@@ -55,7 +55,7 @@ _MINIMAL_GUIDANCE_FRAGMENT_IDS: frozenset[str] = frozenset(
     }
 )
 _COMPACT_GUIDANCE_LINE_SELECTIONS: dict[str, tuple[int, ...]] = {
-    "guidance.model_callable.core_rules": (0, 1, 3, 7),
+    "guidance.model_callable.core_rules": (0, 1, 3, 7, 8),
     "guidance.model_callable.long_term_memory": (0, 2, 4, 5, 8, 9),
 }
 _COMPACT_TOOL_LABELS_PER_LINE = 4

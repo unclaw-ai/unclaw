@@ -75,8 +75,10 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
         "content": ToolArgumentSpec(description="UTF-8 text content to write."),
         "overwrite": ToolArgumentSpec(
             description=(
-                "Set to true to allow overwriting an existing file. "
-                "Default: false — write fails if the file already exists."
+                "Set to true only when the user explicitly asked to replace or "
+                "overwrite an existing file. "
+                "Default: false — write fails if the file already exists. "
+                "Do not set to true unless the user's replacement intent is explicit."
             ),
             value_type="boolean",
         ),

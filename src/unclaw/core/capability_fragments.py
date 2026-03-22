@@ -452,7 +452,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "write_text_file <path>: write a new local file. "
             "Relative paths are created inside data/files/ by default. "
             "Default is overwrite=false — fails if the file already exists. "
-            "Only use overwrite=true when the user explicitly intends to replace an existing file.",
+            "Only use overwrite=true when the user explicitly asked to replace or "
+            "overwrite an existing file (e.g. with words like 'overwrite', 'replace', "
+            "'update the file'). Do not infer overwrite intent from context alone.",
         ),
         "available.local_file_delete": _static_prompt(
             "available.local_file_delete",
@@ -570,6 +572,14 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Only claim a file was written, created, or modified if write_text_file "
             "output is present in this conversation. If no such tool ran, say the "
             "action has not happened yet.",
+            "If the user explicitly asked to write, save, or create a file and the "
+            "task involves research or content generation, the task is not complete "
+            "until write_text_file has been called and its output confirms success. "
+            "Do not stop after research alone when a file output was requested.",
+            "If a person, organization, or entity name in the user's request is "
+            "ambiguous or could match multiple real entities, do not silently "
+            "substitute a different entity. Ask for clarification or explicitly "
+            "state which entity you identified and why before proceeding.",
         ),
         "guidance.user_initiated.core_rules": _static_prompt(
             "guidance.user_initiated.core_rules",
@@ -618,6 +628,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "guidance.model_callable.system_info",
             "Use system_info for current local machine facts and runtime facts such "
             "as local date/time, day, OS, CPU, RAM, hostname, and locale.",
+            "Do not claim you cannot know the current date, time, or OS when "
+            "system_info is available — call the tool to get accurate local facts.",
         ),
         "guidance.model_callable.shell_command_execution": _static_prompt(
             "guidance.model_callable.shell_command_execution",
