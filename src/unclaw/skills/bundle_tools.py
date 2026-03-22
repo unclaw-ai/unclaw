@@ -12,8 +12,8 @@ they are treated as prompt-only skills.
 Usage
 -----
 Call :func:`register_active_skill_tools` once per registry construction, passing
-the configured enabled skill IDs.  The function handles legacy ID aliases,
-deduplication, and import errors internally.
+the configured enabled skill IDs.  The function handles deduplication and import
+errors internally.
 """
 
 from __future__ import annotations

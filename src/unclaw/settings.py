@@ -582,9 +582,9 @@ def _build_runtime_paths(
     app_settings: AppSettings,
 ) -> RuntimePaths:
     prompts_dir = config_dir / PROMPTS_DIRECTORY_NAME
-    # Phase 6 prompt ownership: only the stable base system prompt remains
-    # config-backed here. Built-in capability wording lives in
-    # unclaw.core.capability_fragments, and skill wording lives in skill manifests.
+    # Only the stable base system prompt is config-backed here. Built-in capability
+    # wording lives in unclaw.core.capability_fragments; skill wording lives in
+    # SKILL.md bundles under ./skills/.
     data_dir = _resolve_path(project_root, app_settings.directories.data_dir)
     logs_dir = _resolve_path(data_dir, app_settings.directories.logs_dir)
     sessions_dir = _resolve_path(data_dir, app_settings.directories.sessions_dir)

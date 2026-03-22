@@ -2,26 +2,20 @@
 
 ## Status
 
-This document defines the target architecture for optional skills in Unclaw.
-It is a design reset point for Phase 1 only.
+Migration complete. The file-first skill architecture described in this document
+is now the only skill system in Unclaw. The legacy manifest-based system
+(`models.py`, `manifests.py`, `registry.py`, `runtime.py`) has been removed.
 
-This document does not change the shipped runtime yet.
-It does not migrate existing skills yet.
-It does not redesign tools, routing, memory, or orchestration.
+This document is preserved as architectural reference.
 
-## Why this reset is needed
+## Why this reset was needed
 
-The current optional-skill path is heavier than it should be.
-Today skill prompt content is modeled through typed Python manifests in:
+The previous optional-skill path was heavier than needed.
+Skill prompt content was modeled through typed Python manifests, adding registry
+plumbing, prompt-fragment bookkeeping, and validation machinery for something
+that should stay lightweight.
 
-- `src/unclaw/skills/models.py`
-- `src/unclaw/skills/manifests.py`
-- `src/unclaw/skills/registry.py`
-- `src/unclaw/skills/runtime.py`
-
-That structure works, but it adds Python metadata, registry plumbing, prompt-fragment bookkeeping, and validation machinery for something that should stay lightweight.
-
-At the same time, Unclaw already has a clear native tool boundary:
+Unclaw already had a clear native tool boundary:
 
 - real execution lives in Python tool handlers
 - the runtime exposes tools through `ToolDefinition`, `ToolRegistry`, and `ToolDispatcher`
@@ -111,43 +105,37 @@ skills/
 Other files are optional.
 
 The bundle directory is the source of truth for the skill.
-Phase 2 should treat current manifest-based skill modules as transitional and move away from them.
 
-The new skill id should be the bundle directory name, using simple slugs such as `weather`.
-Current manifest ids like `information.weather` can be supported as migration aliases temporarily, but they should not remain the long-term source of truth.
+The skill id is the bundle directory name, using simple slugs such as `weather`.
 
 ## Discovery and activation
 
 ### Discovery
 
-Phase 2 should discover shipped skills by scanning `skills/` for directories that contain `SKILL.md`.
+Unclaw discovers shipped skills by scanning `skills/` for directories that contain `SKILL.md`.
 
-Discovery should be:
+Discovery is:
 
 - deterministic
 - local-only
 - filesystem-based
 - cheap enough to cache in memory for the process lifetime
 
-No Python manifest import should be required for discovery.
+No Python manifest import is required for discovery.
 
 ### Activation
 
-For the first new implementation, Unclaw should keep the existing config concept of explicitly enabled skills in `config/app.yaml`.
-
-That means:
+Activation uses the existing config concept of explicitly enabled skills in `config/app.yaml`.
 
 - the runtime discovers all shipped skill bundles
 - `skills.enabled_skill_ids` selects which ones are active for this installation
-- activation remains opt-in by config, not automatic marketplace behavior
-
-Phase 2 may support temporary aliases so existing config values such as `information.weather` continue to resolve while the repo migrates to bundle-based ids.
+- activation is opt-in by config, not automatic marketplace behavior
 
 ## Prompt strategy
 
 ### What is injected by default
 
-By default, the runtime should inject only a compact catalog of active skills, not the full contents of every skill.
+By default, the runtime injects only a compact catalog of active skills, not the full contents of every skill.
 
 That catalog should stay short and include only the minimum needed to help the model notice relevant skills, for example:
 
@@ -166,7 +154,7 @@ This keeps prompt cost low on local machines and matches Unclaw's existing capab
 
 ### When a full skill is loaded
 
-The full `SKILL.md` for a skill should be loaded only when that specific skill is relevant to the current turn.
+The full `SKILL.md` for a skill is loaded only when that specific skill is relevant to the current turn.
 
 Relevant means one of:
 
@@ -174,8 +162,8 @@ Relevant means one of:
 - the user request clearly falls into the skill's scoped domain
 - the runtime selects the skill from the compact catalog using a simple local matching step
 
-The exact matching heuristic is a Phase 2 implementation detail, but it must remain small, deterministic, and cheap.
-This phase does not require a new planner or router.
+The matching heuristic is small, deterministic, and cheap (see `selector.py`).
+No planner or router changes are needed.
 
 Default guardrails:
 
@@ -183,30 +171,15 @@ Default guardrails:
 - only load more than one skill if a later use case proves it is necessary
 - never inline full content for every active skill by default
 
-## Weather in the new model
+## Weather in the file-first model
 
-Weather remains the first migration candidate and stays part of the optional skill model.
+Weather is the first migrated skill and illustrates the clean split:
 
-Target split:
-
-- `get_weather` is a native built-in tool implemented and registered like other serious Python tools
+- `get_weather` is a native built-in tool in `skills/weather/tool.py`, registered via the `register_skill_tools` hook
 - the weather skill is a `SKILL.md` bundle that teaches when and how to use `get_weather`
 - `search_web` remains a fallback tool for alerts or details outside the dedicated weather backend
 
-Why weather goes first:
-
-- it already has a useful grounded tool contract
-- it already has a clear optional-guidance story
-- it has integration tests that prove the current behavior is valuable
-- it is the cleanest example of "tool in Python, workflow in skill text"
-
-Current mixed ownership should be treated as transitional:
-
-- execution lives in `src/unclaw/skills/weather/tool.py`
-- the compatibility export lives in `src/unclaw/tools/weather_tools.py`
-- prompt guidance lives in `src/unclaw/skills/manifests.py`
-
-Phase 2 should simplify that into one built-in weather tool path plus one file-first weather skill bundle.
+This is the canonical example of "tool in Python, workflow in skill text".
 
 ## Sticky notes are out of scope
 
@@ -227,29 +200,14 @@ Therefore:
 - do not reintroduce the removed legacy notes subsystem through a skill wrapper
 - revisit this only after the product boundary is redesigned clearly
 
-## Migration path from the current repo
+## Completed migration steps
 
-Phase 2 should implement this in small steps:
-
-1. Add a file-first skill loader that discovers `SKILL.md` bundles and can build a compact active-skill catalog.
-2. Keep `skills.enabled_skill_ids` as the activation switch initially, with temporary alias support for current dotted ids if needed.
-3. Add on-demand full-skill loading for a selected skill without changing the core tool loop or memory architecture.
-4. Migrate the weather skill text out of manifest fragments into `skills/weather/SKILL.md`.
-5. Normalize weather execution ownership so `get_weather` is clearly a built-in Python tool, not a skill-owned runtime subsystem.
-6. Once the weather path works, migrate other optional skills away from Python manifests.
-7. Remove the old manifest/registry/prompt-fragment skill machinery after parity is reached.
-
-## Explicit non-goals for Phase 2
-
-Phase 2 should not use this redesign as a reason to:
-
-- rewrite the runtime
-- redesign tool calling
-- redesign the orchestrator
-- redesign memory
-- build a skill marketplace or installer
-- continue sticky-notes feature work in its current form
-- migrate every existing skill at once
+1. File-first skill loader discovers `SKILL.md` bundles and builds a compact active-skill catalog. ✓
+2. `skills.enabled_skill_ids` is the activation switch; dotted-id aliases have been removed. ✓
+3. On-demand full-skill loading is implemented for a selected skill without changing the core tool loop. ✓
+4. Weather skill text lives in `skills/weather/SKILL.md`. ✓
+5. Weather execution is a bundle-owned Python tool registered via `register_skill_tools`. ✓
+6. Old manifest/registry/prompt-fragment skill machinery has been removed. ✓
 
 ## Decision summary
 

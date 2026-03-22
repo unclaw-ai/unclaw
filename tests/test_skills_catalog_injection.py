@@ -174,7 +174,6 @@ def test_full_skill_md_content_is_not_injected_in_catalog_message(monkeypatch) -
     all_content = "\n".join(m.content for m in messages)
     # The raw multi-line bundle description should not appear in the catalog message
     assert "This bundle is present for Skills discovery" not in all_content
-    assert "Live runtime prompt ownership stays in the legacy manifest" not in all_content
     # The compact catalog IS there
     assert "Active optional skills:" in all_content
 
