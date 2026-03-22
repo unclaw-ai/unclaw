@@ -175,6 +175,7 @@ runtime artifacts.
 │   ├── test_session_history_reliability.py
 │   ├── test_session_history_tool.py
 │   ├── test_settings.py
+│   ├── test_skills_catalog_injection.py
 │   ├── test_skills_file_loader.py
 │   ├── test_skills_registry.py
 │   ├── test_startup.py

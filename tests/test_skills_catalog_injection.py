@@ -156,14 +156,13 @@ def test_catalog_is_separate_from_capability_context(monkeypatch) -> None:
     assert "Active optional skills" not in capability_msg.content
 
 
-def test_full_skill_md_content_is_not_injected(monkeypatch) -> None:
-    """The catalog is compact — no raw SKILL.md body should appear."""
-    full_skill_md_body = (
-        "# Weather\n\nLive weather and short forecasts.\n\n"
-        "Tool hints: Prefer `get_weather`; use `search_web` only as fallback.\n\n"
-        "This bundle is present for Skills discovery and compact-catalog loading.\n"
-        "Live runtime prompt ownership stays in the legacy manifest path for now.\n"
-    )
+def test_full_skill_md_content_is_not_injected_in_catalog_message(monkeypatch) -> None:
+    """The catalog message is compact — full SKILL.md body is a separate message if loaded.
+
+    This test verifies that the compact catalog itself does not embed raw SKILL.md
+    content. On-demand full loading (Phase 4) is suppressed here so we can
+    isolate catalog compactness from full-skill injection.
+    """
     # Simulate catalog returning only the compact form, not the full body
     compact_catalog = "Active optional skills:\n- weather: Live weather and short forecasts."
     monkeypatch.setattr(
@@ -173,6 +172,11 @@ def test_full_skill_md_content_is_not_injected(monkeypatch) -> None:
     monkeypatch.setattr(
         "unclaw.core.context_builder.build_active_skill_context_notes",
         lambda **kwargs: (),
+    )
+    # Suppress on-demand full-skill loading so this test focuses on catalog only.
+    monkeypatch.setattr(
+        "unclaw.core.context_builder._resolve_full_skill_content_for_turn",
+        lambda **kwargs: "",
     )
 
     session_manager = _make_session_manager(enabled_skill_ids=("weather",))
@@ -185,7 +189,7 @@ def test_full_skill_md_content_is_not_injected(monkeypatch) -> None:
     )
 
     all_content = "\n".join(m.content for m in messages)
-    # The raw multi-line bundle description should not appear verbatim
+    # The raw multi-line bundle description should not appear in the catalog message
     assert "This bundle is present for Skills discovery" not in all_content
     assert "Live runtime prompt ownership stays in the legacy manifest" not in all_content
     # The compact catalog IS there
