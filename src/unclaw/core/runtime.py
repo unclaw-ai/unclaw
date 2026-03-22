@@ -37,8 +37,6 @@ from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
-
 _MAX_STEPS_FALLBACK_REPLY = (
     "I reached the maximum number of steps for this request. "
     "Here is what I found so far."
@@ -51,192 +49,6 @@ _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
     "I couldn't safely execute a tool request because the model returned an "
     "invalid tool payload. Please try again or rephrase the request."
 )
-
-# ---------------------------------------------------------------------------
-# Overwrite intent guard — P3-4 corrective mission.
-# Explicitly required by the P3-4 mission spec; satisfies mandatory_rules.md
-# rule 5 allowed exception (tiny local safeguard, scoped, not core routing)
-# and rule 10 (explicitly justified, easy to audit, easy to remove).
-# ---------------------------------------------------------------------------
-
-_OVERWRITE_INTENT_KEYWORDS: frozenset[str] = frozenset(
-    {
-        "écrase",
-        "écraser",
-        "remplace",
-        "remplacer",
-        "réécris par-dessus",
-        "overwrite",
-        "replace existing",
-        "overwrite the file",
-        "replace the file",
-    }
-)
-
-
-def _has_explicit_overwrite_intent(user_input: str) -> bool:
-    """Return True if user_input contains an explicit overwrite intent keyword.
-
-    Keyword list is defined in the P3-4 corrective mission spec.
-    Checks the latest user turn only, never the full conversation history.
-    """
-    lowered = user_input.lower()
-    return any(keyword in lowered for keyword in _OVERWRITE_INTENT_KEYWORDS)
-
-
-def _guard_write_overwrite_intent(
-    tool_calls: Sequence[ToolCall],
-    user_input: str,
-) -> Sequence[ToolCall]:
-    """Strip overwrite=True from write_text_file calls when user intent is absent.
-
-    When the user's message contains an explicit overwrite keyword, calls pass
-    through unchanged. Otherwise overwrite=True is removed so the tool naturally
-    returns a 'file already exists' error, prompting the assistant to surface
-    the conflict and ask the user for explicit confirmation before retrying.
-    """
-    if _has_explicit_overwrite_intent(user_input):
-        return tool_calls
-
-    guarded: list[ToolCall] = []
-    for call in tool_calls:
-        if call.tool_name == "write_text_file":
-            overwrite_val = call.arguments.get("overwrite")
-            overwrite_is_true = overwrite_val is True or overwrite_val == "true"
-            if overwrite_is_true:
-                new_args = {k: v for k, v in call.arguments.items() if k != "overwrite"}
-                guarded.append(ToolCall(tool_name=call.tool_name, arguments=new_args))
-                continue
-        guarded.append(call)
-    return guarded
-
-
-# ---------------------------------------------------------------------------
-# Overwrite-refusal deterministic reply — P3-4 corrective follow-up.
-# Prevents the model from falsely claiming success after write_text_file
-# returns the specific "already exists" overwrite-protection failure.
-# Short-circuits the agent loop so the model is never called with the
-# tool-failure context, eliminating the false-success response path.
-# Explicitly required by the P3-4 corrective mission; satisfies
-# mandatory_rules.md rule 7 (smallest correct patch) and rule 10
-# (explicitly justified, visibly scoped, easy to audit and remove).
-# ---------------------------------------------------------------------------
-
-_WRITE_FILE_ALREADY_EXISTS_MARKER = "already exists"
-_OVERWRITE_REFUSED_REPLY_TEMPLATE = (
-    "The file already exists and was not overwritten.\n"
-    "{error}\n"
-    'Please confirm explicitly if you want to replace it '
-    '(for example: "overwrite the file" or "replace the file").'
-)
-
-_TERMINAL_FAILURE_REPLY = (
-    "The terminal command failed and did not complete successfully."
-)
-_TERMINAL_NOT_RUNNING_REPLY = "No terminal command is currently running."
-
-
-def _build_overwrite_refusal_reply(tool_results: tuple[ToolResult, ...]) -> str | None:
-    """Return a deterministic reply if write_text_file was blocked by overwrite protection.
-
-    Checks tool_results for the specific write_text_file "already exists" error.
-    When found, returns a pre-built refusal reply so the model is never called
-    again on that path — eliminating the false-success assistant reply.
-    Returns None if no such failure is present.
-    """
-    for result in tool_results:
-        if (
-            result.tool_name == "write_text_file"
-            and not result.success
-            and result.error is not None
-            and _WRITE_FILE_ALREADY_EXISTS_MARKER in result.error
-        ):
-            return _OVERWRITE_REFUSED_REPLY_TEMPLATE.format(error=result.error)
-    return None
-
-
-def _build_terminal_failure_reply(
-    *,
-    tool_calls: Sequence[ToolCall],
-    tool_results: Sequence[ToolResult],
-) -> str | None:
-    """Return a deterministic reply for failed local terminal tool executions."""
-    for tool_call, tool_result in zip(tool_calls, tool_results):
-        if tool_result.tool_name != RUN_TERMINAL_COMMAND_DEFINITION.name:
-            continue
-        if tool_result.success:
-            continue
-
-        lines = [_TERMINAL_FAILURE_REPLY]
-        command = _read_terminal_reply_command(
-            tool_call=tool_call,
-            tool_result=tool_result,
-        )
-        if command is not None:
-            lines.append(f"Command: {command}")
-
-        working_directory = _read_terminal_reply_working_directory(
-            tool_call=tool_call,
-            tool_result=tool_result,
-        )
-        if working_directory is not None:
-            lines.append(f"Working directory: {working_directory}")
-
-        error = tool_result.error.strip() if isinstance(tool_result.error, str) else ""
-        lines.append(
-            f"Error: {error or 'The terminal tool reported a failure.'}"
-        )
-
-        exit_code = _read_terminal_reply_exit_code(tool_result=tool_result)
-        if exit_code is not None:
-            lines.append(f"Exit code: {exit_code}")
-
-        lines.append(_TERMINAL_NOT_RUNNING_REPLY)
-        return "\n".join(lines)
-    return None
-
-
-def _read_terminal_reply_command(
-    *,
-    tool_call: ToolCall,
-    tool_result: ToolResult,
-) -> str | None:
-    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
-    payload_command = payload.get("command")
-    if isinstance(payload_command, str) and payload_command.strip():
-        return payload_command.strip()
-
-    raw_command = tool_call.arguments.get("command")
-    if isinstance(raw_command, str) and raw_command.strip():
-        return raw_command.strip()
-    return None
-
-
-def _read_terminal_reply_working_directory(
-    *,
-    tool_call: ToolCall,
-    tool_result: ToolResult,
-) -> str | None:
-    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
-    payload_working_directory = payload.get("working_directory")
-    if (
-        isinstance(payload_working_directory, str)
-        and payload_working_directory.strip()
-    ):
-        return payload_working_directory.strip()
-
-    raw_working_directory = tool_call.arguments.get("working_directory")
-    if isinstance(raw_working_directory, str) and raw_working_directory.strip():
-        return raw_working_directory.strip()
-    return None
-
-
-def _read_terminal_reply_exit_code(*, tool_result: ToolResult) -> int | None:
-    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
-    exit_code = payload.get("exit_code")
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        return None
-    return exit_code
 
 
 @dataclass(slots=True)
@@ -281,87 +93,6 @@ class _InlineToolPayloadAnalysis:
     tool_calls: tuple[ToolCall, ...] | None = None
     raw_tool_calls_payload: tuple[dict[str, Any], ...] | None = None
     invalid_tool_payload: bool = False
-
-
-# ---------------------------------------------------------------------------
-# Explicit inventory request detection — stabilization cleanup.
-# Provides a deterministic TOOLS / SKILLS reply from real registry data,
-# bypassing the model when the user explicitly asks for a capability listing.
-# ---------------------------------------------------------------------------
-
-_INVENTORY_LISTING_VERBS: frozenset[str] = frozenset(
-    {
-        "list",
-        "liste",
-        "lister",
-        "show",
-        "enumerate",
-        "donne",
-        "what",
-        "quels",
-        "quelles",
-    }
-)
-_INVENTORY_LISTING_NOUNS: frozenset[str] = frozenset({"tools", "skills"})
-
-
-def _is_explicit_inventory_request(user_input: str) -> bool:
-    """Return True when the user explicitly asks to list tools and/or skills."""
-    import re
-
-    words = set(re.findall(r"\w+", user_input.lower()))
-    return bool(words & _INVENTORY_LISTING_VERBS) and bool(words & _INVENTORY_LISTING_NOUNS)
-
-
-def _build_inventory_reply(
-    *,
-    tool_registry: ToolRegistry,
-    settings: Any = None,
-) -> str:
-    """Build a structured TOOLS / SKILLS reply from real registry data."""
-    builtin_tools = tool_registry.list_builtin_tools()
-
-    lines = ["TOOLS"]
-    if builtin_tools:
-        for tool_def in builtin_tools:
-            lines.append(f"- {tool_def.name}: {tool_def.description}")
-    else:
-        lines.append("- (none)")
-
-    lines.append("")
-    lines.append("SKILLS")
-
-    enabled_skill_ids: tuple[str, ...] = ()
-    if settings is not None:
-        skill_settings = getattr(settings, "skills", None)
-        if skill_settings is not None:
-            enabled_skill_ids = getattr(skill_settings, "enabled_skill_ids", ())
-
-    if enabled_skill_ids:
-        from unclaw.skills.file_loader import load_active_skill_bundles
-
-        try:
-            skill_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
-            bundles_by_id = {b.skill_id: b for b in skill_bundles}
-        except Exception:
-            bundles_by_id = {}
-
-        for skill_id in enabled_skill_ids:
-            bundle = bundles_by_id.get(skill_id)
-            description = bundle.summary if bundle is not None else ""
-            if description:
-                lines.append(f"- {skill_id}: {description}")
-            else:
-                lines.append(f"- {skill_id}")
-    else:
-        registry_skill_ids = tool_registry.list_active_skill_ids()
-        if registry_skill_ids:
-            for skill_id in registry_skill_ids:
-                lines.append(f"- {skill_id}")
-        else:
-            lines.append("- (none)")
-
-    return "\n".join(lines)
 
 
 def run_user_turn(
@@ -470,7 +201,7 @@ def run_user_turn(
                 tool_guard_state=tool_guard_state,
             )
             if assistant_reply is None:
-                explicit_tool_results = _execute_runtime_tool_calls(
+                _execute_runtime_tool_calls(
                     session_manager=session_manager,
                     session_id=session.id,
                     tracer=active_tracer,
@@ -478,21 +209,11 @@ def run_user_turn(
                     tool_calls=(runtime_explicit_tool_call,),
                     tool_guard_state=tool_guard_state,
                 )
-                assistant_reply = _build_terminal_failure_reply(
-                    tool_calls=(runtime_explicit_tool_call,),
-                    tool_results=explicit_tool_results,
-                )
                 if tool_guard_state.is_cancelled():
                     assistant_reply = _TURN_CANCELLED_REPLY
 
         if assistant_reply is None and tool_guard_state.is_cancelled():
             assistant_reply = _TURN_CANCELLED_REPLY
-
-        if assistant_reply is None and _is_explicit_inventory_request(user_input):
-            assistant_reply = _build_inventory_reply(
-                tool_registry=active_tool_registry,
-                settings=session_manager.settings,
-            )
 
         if assistant_reply is None:
             orchestrator = Orchestrator(
@@ -565,7 +286,6 @@ def run_user_turn(
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
-                        user_input=user_input,
                     )
                 elif assistant_reply is None:
                     assistant_reply = (
@@ -699,7 +419,6 @@ def _run_agent_loop(
     max_steps: int,
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None,
-    user_input: str = "",
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
     context_messages: list[LLMMessage] = list(first_response.context_messages)
@@ -709,9 +428,6 @@ def _run_agent_loop(
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
             return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
-
-        # Apply overwrite intent guard before executing write_text_file calls.
-        tool_calls = _guard_write_overwrite_intent(tool_calls, user_input)
 
         stop_reply = _preflight_runtime_tool_batch(
             tool_calls=tool_calls,
@@ -738,7 +454,6 @@ def _run_agent_loop(
             tool_calls=tool_calls,
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
-            user_input=user_input,
         )
         for tool_result in tool_results:
             context_messages.append(
@@ -749,20 +464,6 @@ def _run_agent_loop(
                     ),
                 )
             )
-
-        # Overwrite-refusal short-circuit: if write_text_file was blocked by the
-        # overwrite protection guard, return a deterministic reply immediately.
-        # The model is never called again after this path — it cannot claim success.
-        overwrite_refusal = _build_overwrite_refusal_reply(tool_results)
-        if overwrite_refusal is not None:
-            return overwrite_refusal
-
-        terminal_failure_reply = _build_terminal_failure_reply(
-            tool_calls=tool_calls,
-            tool_results=tool_results,
-        )
-        if terminal_failure_reply is not None:
-            return terminal_failure_reply
 
         if tool_guard_state.is_cancelled():
             return _TURN_CANCELLED_REPLY
@@ -818,7 +519,6 @@ def _execute_runtime_tool_calls(
     tool_calls: Sequence[ToolCall],
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None = None,
-    user_input: str = "",
 ) -> tuple[ToolResult, ...]:
     """Execute one tool-call batch while keeping context and persistence ordered."""
     pending_calls = _start_pending_tool_executions(

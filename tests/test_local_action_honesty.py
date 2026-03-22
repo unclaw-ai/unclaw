@@ -7,7 +7,6 @@ Proves:
    when registered and keeps unsupported local file actions explicit when tools
    are missing.
 3. The capability context describes delete_file honestly as file-only and confirm-gated.
-4. The existing overwrite refusal short-circuit path still works (regression guard).
 """
 
 from __future__ import annotations
@@ -19,11 +18,6 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.runtime import (
-    _build_overwrite_refusal_reply,
-    _build_terminal_failure_reply,
-)
-from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
 
 pytestmark = pytest.mark.unit
@@ -182,86 +176,6 @@ def test_empty_capability_context_still_forbids_confirmation_hint_for_missing_ac
     assert "Do not suggest it might work after confirmation" in context
 
 
-# ---------------------------------------------------------------------------
-# 5. Existing overwrite refusal path still works (regression guard)
-# ---------------------------------------------------------------------------
-
-
-def test_overwrite_refusal_short_circuit_still_fires_on_file_exists() -> None:
-    """The P3-4 overwrite refusal path must not be broken by this patch.
-
-    Regression guard: _build_overwrite_refusal_reply must still return a
-    deterministic reply for the 'already exists' write_text_file failure.
-    """
-    result = ToolResult.failure(
-        tool_name="write_text_file",
-        error="File already exists: /tmp/test.txt. Pass overwrite=true to replace it.",
-    )
-    reply = _build_overwrite_refusal_reply((result,))
-    assert reply is not None
-    assert "already exists" in reply
-    assert "not overwritten" in reply.lower()
-    assert "confirm" in reply.lower() or "replace" in reply.lower()
-
-
-def test_overwrite_refusal_returns_none_for_other_failures() -> None:
-    """Non-overwrite write failures must not trigger the short-circuit."""
-    result = ToolResult.failure(
-        tool_name="write_text_file",
-        error="Access to '/etc/passwd' is outside the allowed local roots.",
-    )
-    assert _build_overwrite_refusal_reply((result,)) is None
-
-
-def test_overwrite_refusal_returns_none_for_empty_results() -> None:
-    """Empty result set must not crash or short-circuit."""
-    assert _build_overwrite_refusal_reply(()) is None
-
-
-def test_terminal_failure_reply_reports_failure_and_no_running_command() -> None:
-    """Failed terminal actions must be grounded without a second model synthesis step."""
-    reply = _build_terminal_failure_reply(
-        tool_calls=(
-            ToolCall(
-                tool_name="run_terminal_command",
-                arguments={
-                    "command": "sudo apt upgrade",
-                    "working_directory": "/tmp",
-                    "timeout_seconds": 120,
-                },
-            ),
-        ),
-        tool_results=(
-            ToolResult.failure(
-                tool_name="run_terminal_command",
-                error=(
-                    "Argument 'timeout_seconds' exceeds the configured maximum of "
-                    "10 seconds."
-                ),
-            ),
-        ),
-    )
-
-    assert reply is not None
-    assert "failed" in reply.lower()
-    assert "sudo apt upgrade" in reply
-    assert "configured maximum" in reply
-    assert "currently running" in reply.lower()
-
-
-def test_terminal_failure_reply_ignores_successful_terminal_results() -> None:
-    """Successful terminal calls must still go through the normal model reply path."""
-    assert _build_terminal_failure_reply(
-        tool_calls=(
-            ToolCall(
-                tool_name="run_terminal_command",
-                arguments={"command": "pwd"},
-            ),
-        ),
-        tool_results=(
-            ToolResult.ok(
-                tool_name="run_terminal_command",
-                output_text="ok",
-            ),
-        ),
-    ) is None
+# (Section 5 — overwrite refusal and terminal failure short-circuit tests — was
+# removed as part of the anti-determinism cleanup. Those canned runtime replies
+# were deleted; tool failures now flow back to the model as normal tool results.)
