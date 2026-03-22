@@ -131,7 +131,7 @@ class ToolExecutor:
         return cls(registry=create_default_tool_registry(settings))
 
     def list_tools(self) -> list[ToolDefinition]:
-        return self.registry.list_tools()
+        return self.registry.list_builtin_tools()
 
     def execute(self, call: ToolCall) -> ToolResult:
         return self.dispatcher.dispatch(call)

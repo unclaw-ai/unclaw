@@ -95,7 +95,7 @@ def build_runtime_capability_summary(
 ) -> RuntimeCapabilitySummary:
     """Summarize the currently enabled built-in tools and related runtime features."""
     available_tool_names = tuple(
-        tool_definition.name for tool_definition in tool_registry.list_tools()
+        tool_definition.name for tool_definition in tool_registry.list_builtin_tools()
     )
     available_tool_name_set = frozenset(available_tool_names)
 

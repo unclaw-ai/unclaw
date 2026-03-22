@@ -52,6 +52,22 @@ class ToolRegistry:
     def list_tools(self) -> list[ToolDefinition]:
         return [registered_tool.definition for registered_tool in self._tools.values()]
 
+    def list_builtin_tools(self) -> list[ToolDefinition]:
+        """Return only tools with no owning skill (true built-in tools)."""
+        return [
+            rt.definition for rt in self._tools.values() if rt.skill_id is None
+        ]
+
+    def list_active_skill_ids(self) -> list[str]:
+        """Return unique skill_ids from skill-owned tool entries, in insertion order."""
+        seen: set[str] = set()
+        result: list[str] = []
+        for rt in self._tools.values():
+            if rt.skill_id is not None and rt.skill_id not in seen:
+                seen.add(rt.skill_id)
+                result.append(rt.skill_id)
+        return result
+
 
 __all__ = ["RegisteredTool", "ToolRegistry"]
 

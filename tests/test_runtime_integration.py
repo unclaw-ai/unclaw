@@ -149,7 +149,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
             create_default_tool_registry(
                 settings,
                 session_manager=session_manager,
-            ).list_tools()
+            ).list_builtin_tools()
         )
         assert isinstance(provider_messages, list)
         assert all(isinstance(message, LLMMessage) for message in provider_messages)

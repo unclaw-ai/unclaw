@@ -283,6 +283,87 @@ class _InlineToolPayloadAnalysis:
     invalid_tool_payload: bool = False
 
 
+# ---------------------------------------------------------------------------
+# Explicit inventory request detection — stabilization cleanup.
+# Provides a deterministic TOOLS / SKILLS reply from real registry data,
+# bypassing the model when the user explicitly asks for a capability listing.
+# ---------------------------------------------------------------------------
+
+_INVENTORY_LISTING_VERBS: frozenset[str] = frozenset(
+    {
+        "list",
+        "liste",
+        "lister",
+        "show",
+        "enumerate",
+        "donne",
+        "what",
+        "quels",
+        "quelles",
+    }
+)
+_INVENTORY_LISTING_NOUNS: frozenset[str] = frozenset({"tools", "skills"})
+
+
+def _is_explicit_inventory_request(user_input: str) -> bool:
+    """Return True when the user explicitly asks to list tools and/or skills."""
+    import re
+
+    words = set(re.findall(r"\w+", user_input.lower()))
+    return bool(words & _INVENTORY_LISTING_VERBS) and bool(words & _INVENTORY_LISTING_NOUNS)
+
+
+def _build_inventory_reply(
+    *,
+    tool_registry: ToolRegistry,
+    settings: Any = None,
+) -> str:
+    """Build a structured TOOLS / SKILLS reply from real registry data."""
+    builtin_tools = tool_registry.list_builtin_tools()
+
+    lines = ["TOOLS"]
+    if builtin_tools:
+        for tool_def in builtin_tools:
+            lines.append(f"- {tool_def.name}: {tool_def.description}")
+    else:
+        lines.append("- (none)")
+
+    lines.append("")
+    lines.append("SKILLS")
+
+    enabled_skill_ids: tuple[str, ...] = ()
+    if settings is not None:
+        skill_settings = getattr(settings, "skills", None)
+        if skill_settings is not None:
+            enabled_skill_ids = getattr(skill_settings, "enabled_skill_ids", ())
+
+    if enabled_skill_ids:
+        from unclaw.skills.file_loader import load_active_skill_bundles
+
+        try:
+            skill_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
+            bundles_by_id = {b.skill_id: b for b in skill_bundles}
+        except Exception:
+            bundles_by_id = {}
+
+        for skill_id in enabled_skill_ids:
+            bundle = bundles_by_id.get(skill_id)
+            description = bundle.summary if bundle is not None else ""
+            if description:
+                lines.append(f"- {skill_id}: {description}")
+            else:
+                lines.append(f"- {skill_id}")
+    else:
+        registry_skill_ids = tool_registry.list_active_skill_ids()
+        if registry_skill_ids:
+            for skill_id in registry_skill_ids:
+                lines.append(f"- {skill_id}")
+        else:
+            lines.append("- (none)")
+
+    return "\n".join(lines)
+
+
 def run_user_turn(
     *,
     session_manager: SessionManager,
@@ -406,6 +487,12 @@ def run_user_turn(
 
         if assistant_reply is None and tool_guard_state.is_cancelled():
             assistant_reply = _TURN_CANCELLED_REPLY
+
+        if assistant_reply is None and _is_explicit_inventory_request(user_input):
+            assistant_reply = _build_inventory_reply(
+                tool_registry=active_tool_registry,
+                settings=session_manager.settings,
+            )
 
         if assistant_reply is None:
             orchestrator = Orchestrator(

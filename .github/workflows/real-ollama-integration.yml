@@ -52,7 +52,13 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Install Ollama
-        run: curl -fsSL https://ollama.com/install.sh | sh
+        run: |
+          for attempt in 1 2 3; do
+            curl -fsSL https://ollama.com/install.sh | sh && break
+            echo "Ollama install attempt $attempt failed, retrying..."
+            sleep 5
+          done
+          ollama --version
 
       - name: Start Ollama server
         run: |

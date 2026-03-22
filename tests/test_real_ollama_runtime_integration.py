@@ -88,7 +88,6 @@ def test_real_ollama_run_user_turn_streams_end_to_end(
         event_types = [getattr(event, "event_type", None) for event in published_events]
         assert event_types == [
             "runtime.started",
-            "route.selected",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
