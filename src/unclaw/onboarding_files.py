@@ -86,6 +86,9 @@ def build_onboarding_file_payloads(
             "tool_timeout_seconds": settings.app.runtime.tool_timeout_seconds,
             "max_tool_calls_per_turn": settings.app.runtime.max_tool_calls_per_turn,
         },
+        "skills": {
+            "enabled_skill_ids": list(plan.enabled_skill_ids),
+        },
         "security": {
             "tools": {
                 "files": {

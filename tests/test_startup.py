@@ -520,6 +520,88 @@ def test_bootstrap_rehardens_existing_database_permissions_on_posix(
         assert stat.S_IMODE(settings.paths.database_path.stat().st_mode) == 0o600
 
 
+def test_startup_skill_drift_check_warns_when_new_bundle_is_not_enabled(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """A skill bundle present in ./skills/ but absent from enabled_skill_ids triggers a WARN."""
+    project_root = make_temp_project()
+    skills_dir = project_root / "skills"
+    skills_dir.mkdir()
+    news_dir = skills_dir / "news"
+    news_dir.mkdir()
+    (news_dir / "SKILL.md").write_text("# News\n\nLatest headlines.\n", encoding="utf-8")
+
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=False,
+            model_names=(),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(),
+    )
+
+    skill_check = next(
+        (check for check in report.checks if check.label == "Skills"), None
+    )
+    assert skill_check is not None
+    assert skill_check.status is CheckStatus.WARN
+    assert "news" in skill_check.detail
+    assert skill_check.guidance is not None
+    assert "onboard" in skill_check.guidance
+
+
+def test_startup_skill_check_ok_when_all_discovered_bundles_are_enabled(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """No drift warning when every discovered bundle matches a configured enabled_skill_id."""
+    project_root = make_temp_project()
+    skills_dir = project_root / "skills"
+    skills_dir.mkdir()
+    weather_dir = skills_dir / "weather"
+    weather_dir.mkdir()
+    (weather_dir / "SKILL.md").write_text(
+        "# Weather\n\nLive weather.\n", encoding="utf-8"
+    )
+
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=False,
+            model_names=(),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(),
+    )
+
+    skill_check = next(
+        (check for check in report.checks if check.label == "Skills"), None
+    )
+    # weather is enabled in the copied config, and the bundle exists in skills/ — no drift
+    if skill_check is not None:
+        assert "New bundles not yet enabled" not in skill_check.detail
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 

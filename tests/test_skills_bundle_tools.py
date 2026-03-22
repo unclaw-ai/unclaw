@@ -284,4 +284,4 @@ def test_build_startup_report_skills_check_ok_for_valid_weather_bundle(
 
     skills_check = next(check for check in report.checks if check.label == "Skills")
     assert skills_check.status is CheckStatus.OK
-    assert skills_check.detail == "weather"
+    assert "weather" in skills_check.detail

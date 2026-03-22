@@ -52,7 +52,7 @@ from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
-from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
+from skills.weather.tool import GET_WEATHER_DEFINITION
 
 pytestmark = pytest.mark.integration
 

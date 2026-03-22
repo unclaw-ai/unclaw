@@ -306,6 +306,38 @@ def prompt_telegram_bot_token(
     )
 
 
+def prompt_skill_selection(
+    settings: Settings,
+    *,
+    prompt_ui: PromptUI,
+) -> tuple[str, ...]:
+    """Discover available skill bundles and let the user choose which to enable.
+
+    Returns the current enabled_skill_ids unchanged when no bundles are found
+    in the project's skills/ directory (preserves existing config on template
+    projects and test fixtures that have no skills/ folder).
+    """
+    from unclaw.skills.file_loader import discover_skill_bundles, shipped_skill_bundle_root
+
+    skills_root = shipped_skill_bundle_root(settings.paths.project_root)
+    available_bundles = discover_skill_bundles(skills_root=skills_root)
+
+    if not available_bundles:
+        return settings.skills.enabled_skill_ids
+
+    current_enabled = set(settings.skills.enabled_skill_ids)
+    selected: list[str] = []
+    for bundle in available_bundles:
+        enabled = prompt_ui.confirm(
+            f"Enable the {bundle.display_name} skill?",
+            default=bundle.skill_id in current_enabled,
+            help_text=bundle.summary,
+        )
+        if enabled:
+            selected.append(bundle.skill_id)
+    return tuple(selected)
+
+
 def print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None:
     output_func(
         "- Setup style: "
@@ -321,6 +353,10 @@ def print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None
             if channel_name in plan.enabled_channels
         )
     )
+    if plan.enabled_skill_ids:
+        output_func("- Skills: " + ", ".join(plan.enabled_skill_ids))
+    else:
+        output_func("- Skills: none enabled")
     output_func("- Model lineup:")
     for profile_name in PROFILE_ORDER:
         output_func(f"  {profile_name}: {plan.model_profiles[profile_name].model_name}")
@@ -699,5 +735,6 @@ __all__ = [
     "prompt_model_pack",
     "prompt_channel_preset",
     "prompt_model_profiles",
+    "prompt_skill_selection",
     "prompt_telegram_bot_token",
 ]

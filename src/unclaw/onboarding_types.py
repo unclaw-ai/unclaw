@@ -41,6 +41,7 @@ class OnboardingPlan:
     automatic_configuration: bool
     logging_mode: str
     enabled_channels: tuple[str, ...]
+    enabled_skill_ids: tuple[str, ...]
     default_profile: str
     model_pack: str
     model_profiles: dict[str, ModelProfileDraft]

@@ -13,7 +13,7 @@ from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.weather_tools import GET_WEATHER_DEFINITION
+from skills.weather.tool import GET_WEATHER_DEFINITION
 
 pytestmark = pytest.mark.integration
 

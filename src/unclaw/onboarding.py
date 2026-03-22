@@ -26,6 +26,7 @@ from unclaw.onboarding_flow import (
     prompt_channel_preset as _prompt_channel_preset,
     prompt_model_pack as _prompt_model_pack,
     prompt_model_profiles as _prompt_model_profiles,
+    prompt_skill_selection as _prompt_skill_selection,
     prompt_telegram_bot_token as _prompt_telegram_bot_token,
 )
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
@@ -213,6 +214,12 @@ def run_onboarding(
     )
 
     prompt_ui.section(
+        "🔌 Optional skills",
+        "Skills extend built-in tools with optional domain-specific capabilities.",
+    )
+    enabled_skill_ids = _prompt_skill_selection(settings, prompt_ui=prompt_ui)
+
+    prompt_ui.section(
         "🧠 Model profiles",
         "Choose a pack for your machine, or switch to manual control with the dev pack.",
     )
@@ -255,6 +262,7 @@ def run_onboarding(
         automatic_configuration=automatic_configuration,
         logging_mode=logging_mode,
         enabled_channels=enabled_channels,
+        enabled_skill_ids=enabled_skill_ids,
         default_profile="main",
         model_pack=selected_pack,
         model_profiles=model_profiles,

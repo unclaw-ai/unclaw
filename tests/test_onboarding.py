@@ -544,6 +544,129 @@ def test_write_local_secrets_creates_new_file_with_owner_only_permissions(
     assert secrets_path.exists()
     assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
 
+def test_onboarding_skill_section_discovers_bundles_and_writes_enabled_skill_ids(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """When a skills/ dir with a valid bundle exists, onboarding presents it and writes the selection."""
+    project_root = make_temp_project(remove_secrets=True)
+    skills_dir = project_root / "skills"
+    skills_dir.mkdir()
+    weather_dir = skills_dir / "weather"
+    weather_dir.mkdir()
+    (weather_dir / "SKILL.md").write_text(
+        "# Weather\n\nLive weather and short forecasts.\n", encoding="utf-8"
+    )
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+
+    # 1. setup mode (recommended)  2. logging  3. channel (terminal only)
+    # 4. Enable Weather skill? (yes, default)  5. model pack  6. write config
+    responses = iter(["", "", "1", "", "", ""])
+    outputs: list[str] = []
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=outputs.append,
+    )
+
+    assert result == 0
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    assert app_payload.get("skills", {}).get("enabled_skill_ids") == ["weather"]
+    # section heading and skill summary both flow through output_func
+    assert any("Optional skills" in line for line in outputs)
+    assert any("Live weather" in line for line in outputs)
+
+
+def test_onboarding_writes_empty_skill_ids_when_user_disables_all_skills(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """User can deselect all skills; onboarding writes an empty enabled_skill_ids list."""
+    project_root = make_temp_project(remove_secrets=True)
+    skills_dir = project_root / "skills"
+    skills_dir.mkdir()
+    weather_dir = skills_dir / "weather"
+    weather_dir.mkdir()
+    (weather_dir / "SKILL.md").write_text(
+        "# Weather\n\nLive weather and short forecasts.\n", encoding="utf-8"
+    )
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+
+    # "n" disables the Weather skill
+    responses = iter(["", "", "1", "n", "", ""])
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _: None,
+    )
+
+    assert result == 0
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    assert app_payload.get("skills", {}).get("enabled_skill_ids") == []
+
+
+def test_onboarding_preserves_existing_skill_ids_when_no_skills_dir_found(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    """With no skills/ directory in the project, onboarding skips the skill section and preserves config."""
+    project_root = make_temp_project(remove_secrets=True)
+    settings = load_settings(project_root=project_root)
+    original_enabled = list(settings.skills.enabled_skill_ids)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+    monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+
+    # No skill section prompts since no skills/ dir exists
+    responses = iter(["", "", "1", "", ""])
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _: None,
+    )
+
+    assert result == 0
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    written_ids = app_payload.get("skills", {}).get("enabled_skill_ids", [])
+    assert written_ids == original_enabled
+
+
 def _read_yaml(path: Path) -> dict[str, object]:
     with path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle)

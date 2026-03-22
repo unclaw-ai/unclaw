@@ -314,15 +314,35 @@ def _build_default_model_warm_load_check(settings: Settings) -> StartupCheck | N
 
 
 def _build_skills_check(settings: Settings) -> StartupCheck | None:
-    """Report file-first skill bundle discovery and tool-loading status."""
+    """Report file-first skill bundle discovery, tool-loading status, and drift."""
     from unclaw.skills.bundle_tools import probe_skill_tool_loading
-    from unclaw.skills.file_loader import load_active_skill_bundles
+    from unclaw.skills.file_loader import (
+        discover_skill_bundles,
+        load_active_skill_bundles,
+        shipped_skill_bundle_root,
+    )
     from unclaw.skills.file_models import UnknownSkillIdError
 
     enabled_skill_ids = getattr(
         getattr(settings, "skills", None), "enabled_skill_ids", ()
     )
+
+    # Detect skill bundles present in ./skills/ that are not yet configured.
+    skills_root = shipped_skill_bundle_root(settings.paths.project_root)
+    available_bundles = discover_skill_bundles(skills_root=skills_root)
+    available_ids = {bundle.skill_id for bundle in available_bundles}
+    enabled_ids = set(enabled_skill_ids)
+    new_skill_ids = sorted(available_ids - enabled_ids)
+
     if not enabled_skill_ids:
+        if new_skill_ids:
+            new_label = ", ".join(new_skill_ids)
+            return StartupCheck(
+                status=CheckStatus.WARN,
+                label="Skills",
+                detail=f"New skill bundle(s) found but not enabled: {new_label}.",
+                guidance="Run `unclaw onboard` to activate them.",
+            )
         return None
 
     try:
@@ -351,7 +371,17 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
             skill_parts.append(f"{bundle.skill_id} (load failed: {error})")
             any_failed = True
 
-    detail = ", ".join(skill_parts)
+    detail = "Active: " + ", ".join(skill_parts)
+    if new_skill_ids:
+        new_label = ", ".join(new_skill_ids)
+        detail += f". New bundles not yet enabled: {new_label}."
+        return StartupCheck(
+            status=CheckStatus.WARN,
+            label="Skills",
+            detail=detail,
+            guidance="Run `unclaw onboard` to enable new skill bundles.",
+        )
+
     return StartupCheck(
         status=CheckStatus.WARN if any_failed else CheckStatus.OK,
         label="Skills",

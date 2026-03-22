@@ -7,15 +7,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal, TypedDict
 
-from skills.weather.contracts import (
-    WeatherCurrentConditionsPayload,
-    WeatherDailyForecastPayload,
-    WeatherLookupPayload,
-    WeatherRelativeDayAnchorPayload,
-    WeatherResolvedLocationPayload,
-    WeatherTemporalRequestPayload,
-)
-
 
 class ToolPermissionLevel(StrEnum):
     """Minimal permission categories for built-in tools."""
@@ -248,11 +239,5 @@ __all__ = [
     "ToolHandler",
     "ToolPermissionLevel",
     "ToolResult",
-    "WeatherCurrentConditionsPayload",
-    "WeatherDailyForecastPayload",
-    "WeatherLookupPayload",
-    "WeatherRelativeDayAnchorPayload",
-    "WeatherResolvedLocationPayload",
-    "WeatherTemporalRequestPayload",
     "resolve_tool_argument_spec",
 ]

@@ -23,15 +23,15 @@ models:
   default_profile: main
 thinking:
   default_enabled: false
-skills:
-  enabled_skill_ids:
-  - weather
 providers:
   ollama:
     timeout_seconds: 60.0
 runtime:
   tool_timeout_seconds: 15.0
   max_tool_calls_per_turn: 8
+skills:
+  enabled_skill_ids:
+  - weather
 security:
   tools:
     files:
