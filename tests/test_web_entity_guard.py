@@ -46,6 +46,14 @@ class TestExtractUserEntitySurface:
         entity = extract_user_entity_surface("Marine Leleu")
         assert entity == "Marine Leleu"
 
+    def test_extracts_entity_from_follow_up_correction(self) -> None:
+        entity = extract_user_entity_surface("non, Marine Leleu")
+        assert entity == "Marine Leleu"
+
+    def test_extracts_entity_from_explicit_follow_up_reference(self) -> None:
+        entity = extract_user_entity_surface("je parle bien de Inoxtag")
+        assert entity == "Inoxtag"
+
     def test_returns_empty_for_keyword_query(self) -> None:
         # "latest news on climate change" has no clear entity span
         entity = extract_user_entity_surface("latest news on climate change")
@@ -233,3 +241,15 @@ class TestApplyEntityGuardToToolCalls:
         corrected = guarded[0].arguments["query"]
         assert "Marine Leleu" in corrected
         assert "biographie" in corrected
+
+    def test_follow_up_correction_reanchors_on_corrected_entity(self) -> None:
+        """Correction phrasing should still restore the corrected entity on the next search."""
+        user_input = "je parle bien de Marine Leleu"
+        user_entity = extract_user_entity_surface(user_input)
+
+        guarded = apply_entity_guard_to_tool_calls(
+            [self._make_call("fast_web_search", "Marine Le Pen")],
+            user_entity,
+        )
+
+        assert guarded[0].arguments["query"] == "Marine Leleu"

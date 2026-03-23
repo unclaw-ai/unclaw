@@ -693,6 +693,24 @@ class TestCapabilitySummaryIntegration:
         )
         assert not summary.fast_web_search_available
 
+    def test_native_capability_context_encourages_literal_fast_identity_checks(self) -> None:
+        from unclaw.core.capabilities import (
+            build_runtime_capability_context,
+            build_runtime_capability_summary,
+        )
+        from unclaw.core.executor import create_default_tool_registry
+
+        summary = build_runtime_capability_summary(
+            tool_registry=create_default_tool_registry(),
+            memory_summary_available=False,
+            model_can_call_tools=True,
+        )
+        context = build_runtime_capability_context(summary)
+
+        assert "For identity or biography requests" in context
+        assert "do a literal fast_web_search first instead of guessing" in context
+        assert "After the user corrects you" in context
+
 
 # ---------------------------------------------------------------------------
 # search_web remains usable in existing flows

@@ -79,7 +79,8 @@ class TestEntityPreservedInStagedQueries:
     def test_exact_entity_surface_on_first_query(self) -> None:
         """First staged query must use the exact user-supplied entity name."""
         queries = _build_staged_search_queries("biographie de Marine Leleu", fast_mode=False)
-        assert queries[0] == '"Marine Leleu"'
+        assert queries[0] == "Marine Leleu"
+        assert queries[1] == "Marine Leleu Wikipédia"
         assert all("le pen" not in q.casefold() for q in queries)
 
     def test_no_silent_substitution_leleu_to_le_pen(self) -> None:
@@ -96,6 +97,13 @@ class TestEntityPreservedInStagedQueries:
         queries = _build_staged_search_queries("qui est Marine Leleu", fast_mode=False)
         assert all("marine leleu" in q.casefold() for q in queries)
         assert all("le pen" not in q.casefold() for q in queries)
+
+    def test_literal_first_current_event_lookup_stays_on_user_wording(self) -> None:
+        """Recent-topic lookups keep the user's literal wording before recency expansion."""
+        queries = _build_staged_search_queries("guerre iran mars 2026", fast_mode=False)
+
+        assert queries[0] == "guerre iran mars 2026"
+        assert queries[1] == "guerre iran mars 2026 actualités"
 
     def test_staging_does_not_contaminate_independent_lookups(self) -> None:
         """Entity from one lookup must not bleed into an independent lookup."""
@@ -152,6 +160,27 @@ class TestBiographySourcePrioritization:
         generic_score = _score_search_result(generic_result, query=search_query)
         assert wiki_score > generic_score
 
+    def test_french_identity_query_prefers_french_reference_source(self) -> None:
+        """French identity prompts should prefer a French reference page over other-language wiki."""
+        search_query = _build_search_query("Qui est Marine Leleu ?")
+        ranked = _rank_search_results(
+            [
+                {
+                    "title": "Marine Leleu - Wikipedia",
+                    "url": "https://en.wikipedia.org/wiki/Marine_Leleu",
+                    "snippet": "Marine Leleu is a French endurance athlete.",
+                },
+                {
+                    "title": "Marine Leleu - Wikipédia",
+                    "url": "https://fr.wikipedia.org/wiki/Marine_Leleu",
+                    "snippet": "Marine Leleu est une athlète française d'endurance.",
+                },
+            ],
+            query=search_query,
+        )
+
+        assert ranked[0]["url"].startswith("https://fr.wikipedia.org")
+
     def test_social_profile_shell_demoted(self) -> None:
         """Instagram/TikTok profile landing pages should score lower than real content pages."""
         from unclaw.tools.web_search import _score_search_result
@@ -170,6 +199,51 @@ class TestBiographySourcePrioritization:
         social_score = _score_search_result(social_result, query=search_query)
         article_score = _score_search_result(article_result, query=search_query)
         assert social_score < article_score
+
+    def test_amazon_listing_demoted_for_biography_lookup(self) -> None:
+        """Amazon listing pages should not outrank a reference result for biography lookups."""
+        from unclaw.tools.web_search import _score_search_result
+
+        search_query = _build_search_query("biographie de Marine Leleu")
+        amazon_result = {
+            "title": "Marine Leleu: Books, Biography, Latest Update",
+            "url": "https://www.amazon.fr/Marine-Leleu/e/B0ABCDE123",
+            "snippet": "Discover books by Marine Leleu and related products.",
+        }
+        wiki_result = {
+            "title": "Marine Leleu — Wikipédia",
+            "url": "https://fr.wikipedia.org/wiki/Marine_Leleu",
+            "snippet": "Marine Leleu est une athlète française spécialisée dans l'endurance.",
+        }
+
+        assert _score_search_result(wiki_result, query=search_query) > _score_search_result(
+            amazon_result,
+            query=search_query,
+        )
+
+    def test_youtube_channel_shell_demoted_for_biography_lookup(self) -> None:
+        """YouTube channel shells should not outrank stronger biography sources."""
+        from unclaw.tools.web_search import _score_search_result
+
+        search_query = _build_search_query("who is Marine Leleu")
+        youtube_channel = {
+            "title": "Marine Leleu - YouTube",
+            "url": "https://www.youtube.com/@marineleleu",
+            "snippet": "Official channel for Marine Leleu.",
+        }
+        article_result = {
+            "title": "Marine Leleu - Athlete profile",
+            "url": "https://example.com/athletes/marine-leleu",
+            "snippet": "Marine Leleu is a French endurance athlete and speaker.",
+        }
+
+        assert _score_search_result(
+            article_result,
+            query=search_query,
+        ) > _score_search_result(
+            youtube_channel,
+            query=search_query,
+        )
 
     def test_entity_ranking_penalizes_partial_name_substitution(self) -> None:
         """Partial entity match (Le Pen) must rank below exact match (Leleu)."""

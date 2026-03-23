@@ -20,7 +20,8 @@ def test_first_pass_preserves_exact_entity_surface() -> None:
         fast_mode=False,
     )
 
-    assert queries[0] == '"Marine Leleu"'
+    assert queries[0] == "Marine Leleu"
+    assert queries[1] == "Marine Leleu Wikipédia"
     assert all("le pen" not in query.casefold() for query in queries)
 
 
@@ -31,6 +32,13 @@ def test_staged_queries_do_not_contaminate_next_lookup() -> None:
     assert any("marine leleu" in query.casefold() for query in first_queries)
     assert all("marine" not in query.casefold() for query in second_queries)
     assert any("ada lovelace" in query.casefold() for query in second_queries)
+
+
+def test_current_event_queries_stay_literal_first_before_news_expansion() -> None:
+    queries = _build_staged_search_queries("guerre iran mars 2026", fast_mode=False)
+
+    assert queries[0] == "guerre iran mars 2026"
+    assert queries[1] == "guerre iran mars 2026 actualités"
 
 
 def test_entity_ranking_penalizes_partial_name_substitution() -> None:
@@ -89,7 +97,7 @@ def test_staged_broadening_waits_until_first_pass_is_weak(
         call.kwargs["query"]
         for call in mock_search.call_args_list
     ]
-    assert searched_queries == ['"Marine Leleu"', "Marine Leleu"]
+    assert searched_queries == ["Marine Leleu", "Marine Leleu Wikipedia"]
     assert ranked_results[0]["title"] == "Marine Leleu"
 
 
@@ -116,7 +124,7 @@ def test_staged_broadening_stops_after_strong_exact_match(
     )
 
     assert mock_search.call_count == 1
-    assert mock_search.call_args.kwargs["query"] == '"Marine Leleu"'
+    assert mock_search.call_args.kwargs["query"] == "Marine Leleu"
 
 
 def test_source_hygiene_penalty_pushes_noisy_pages_down() -> None:

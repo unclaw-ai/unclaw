@@ -139,15 +139,22 @@ _NAME_PARTICLES = frozenset(
 )
 _QUERY_ENTITY_PATTERNS = (
     re.compile(
-        r"^\s*(?:who\s+is|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|news\s+about|latest\s+news\s+about)\s+(.+?)\s*$",
+        r"^\s*(?:who\s+is|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of|news\s+about|latest\s+news\s+about)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:qui\s+est|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|actualit(?:e|é)s\s+sur|nouvelles\s+sur)\s+(.+?)\s*$",
+        r"^\s*(?:qui\s+est|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de|parle(?:\s+moi)?\s+de|actualit(?:e|é)s\s+sur|nouvelles\s+sur)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:quien\s+es|biograf(?:i|í)a\s+de|perfil\s+de|noticias\s+sobre)\s+(.+?)\s*$",
+        r"^\s*(?:quien\s+es|biograf(?:i|í)a\s+de|perfil\s+de|habla(?:r)?\s+de|noticias\s+sobre)\s+(.+?)\s*$",
+        re.IGNORECASE,
+    ),
+)
+_FOLLOW_UP_CORRECTION_PATTERNS = (
+    re.compile(r"^\s*(?:non|no)\s*[,;:-]\s+(.+?)\s*$", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:je\s+parle\s+bien\s+de|je\s+parle\s+de|je\s+veux\s+dire|i\s+mean|i\s+meant|i['’]?m\s+talking\s+about|talking\s+about)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
 )
@@ -155,23 +162,163 @@ _ENTITY_CONTEXT_MODIFIERS = frozenset(
     {
         "actualite",
         "actualites",
+        "actuality",
+        "actualizacion",
+        "actualizaciones",
         "biografia",
         "biographie",
         "bio",
         "career",
         "dernieres",
+        "encyclopedia",
         "history",
         "latest",
+        "noticias",
         "news",
         "nouvelles",
         "official",
         "profil",
         "profile",
+        "reference",
         "recent",
         "recente",
         "recientes",
         "wiki",
         "wikipedia",
+    }
+)
+_IDENTITY_INTENT_PATTERNS = (
+    re.compile(
+        r"^\s*(?:who\s+is|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:qui\s+est|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:quien\s+es|biograf(?:i|í)a\s+de|perfil\s+de)\b",
+        re.IGNORECASE,
+    ),
+)
+_FRENCH_QUERY_HINT_TOKENS = frozenset(
+    {
+        "actualite",
+        "actualites",
+        "biographie",
+        "cest",
+        "guerre",
+        "nouvelles",
+        "parle",
+        "profil",
+        "qui",
+    }
+)
+_SPANISH_QUERY_HINT_TOKENS = frozenset(
+    {
+        "biografia",
+        "noticias",
+        "perfil",
+        "quien",
+    }
+)
+_ENGLISH_QUERY_HINT_TOKENS = frozenset(
+    {
+        "about",
+        "biography",
+        "latest",
+        "news",
+        "profile",
+        "who",
+    }
+)
+_IDENTITY_CONTEXT_TOKENS = frozenset(
+    {
+        "biografia",
+        "biographie",
+        "bio",
+        "profile",
+        "profil",
+        "wiki",
+        "wikipedia",
+    }
+)
+_RECENCY_HINT_TOKENS = frozenset(
+    {
+        "actualite",
+        "actualites",
+        "aujourdhui",
+        "current",
+        "dernieres",
+        "latest",
+        "news",
+        "noticias",
+        "nouvelles",
+        "recent",
+        "today",
+    }
+)
+_EVENT_TOPIC_TOKENS = frozenset(
+    {
+        "attaque",
+        "attack",
+        "ceasefire",
+        "conflict",
+        "conflit",
+        "election",
+        "elections",
+        "guerre",
+        "invasion",
+        "strike",
+        "war",
+    }
+)
+_MONTH_HINT_TOKENS = frozenset(
+    {
+        "april",
+        "august",
+        "avril",
+        "december",
+        "decembre",
+        "february",
+        "fevrier",
+        "january",
+        "janvier",
+        "july",
+        "juillet",
+        "june",
+        "juin",
+        "march",
+        "mars",
+        "may",
+        "november",
+        "novembre",
+        "october",
+        "octobre",
+        "september",
+        "septembre",
+    }
+)
+_REFERENCE_HINTS_BY_LANGUAGE = {
+    "en": "Wikipedia",
+    "es": "Wikipedia",
+    "fr": "Wikipédia",
+    "unknown": "Wikipedia",
+}
+_RECENCY_HINTS_BY_LANGUAGE = {
+    "en": "news",
+    "es": "noticias",
+    "fr": "actualités",
+    "unknown": "news",
+}
+_NON_EXPANSION_CONTEXT_TOKENS = frozenset(
+    {
+        "about",
+        "parle",
+        "qui",
+        "quien",
+        "talking",
+        "who",
     }
 )
 _SEO_PROFILE_CUES = frozenset(
@@ -209,12 +356,15 @@ _SOCIAL_PROFILE_SHELL_DOMAINS = frozenset(
         "twitter.com",
         "x.com",
         "facebook.com",
+        "linkedin.com",
         "youtube.com",
         "threads.net",
         "snapchat.com",
         "pinterest.com",
     }
 )
+_AMAZON_DOMAIN_PREFIXES = ("amazon.",)
+_YOUTUBE_CHANNEL_PREFIXES = frozenset({"@", "c", "channel", "user"})
 
 
 @dataclass(slots=True)
@@ -237,6 +387,9 @@ class _SearchQuery:
     normalized_entity: str = ""
     entity_tokens: tuple[str, ...] = ()
     context_tokens: tuple[str, ...] = ()
+    language_hint: str = "unknown"
+    identity_intent: bool = False
+    recency_intent: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +402,9 @@ class _QueryDiscipline:
     normalized_entity: str
     entity_tokens: tuple[str, ...]
     context_tokens: tuple[str, ...]
+    language_hint: str
+    identity_intent: bool
+    recency_intent: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,6 +561,24 @@ def _extract_prefixed_entity(query: str) -> str:
     return ""
 
 
+def _strip_follow_up_correction_prefix(query: str) -> str:
+    candidate = _normalize_query_surface(query)
+    if not candidate:
+        return ""
+
+    while True:
+        for pattern in _FOLLOW_UP_CORRECTION_PATTERNS:
+            match = pattern.match(candidate)
+            if match is None:
+                continue
+            stripped = _normalize_query_surface(match.group(1))
+            if stripped and stripped != candidate:
+                candidate = stripped
+                break
+        else:
+            return candidate
+
+
 def _query_token_surfaces(query: str) -> tuple[str, ...]:
     return tuple(
         _strip_wrapping_punctuation(token)
@@ -460,13 +634,19 @@ def _extract_entity_surface(query: str) -> str:
     if not normalized_query:
         return ""
 
-    for candidate in (
-        _extract_quoted_entity(normalized_query),
-        _extract_prefixed_entity(normalized_query),
-        _extract_leading_entity_span(normalized_query),
-    ):
-        if candidate:
-            return candidate
+    candidate_queries = (normalized_query,)
+    stripped_query = _strip_follow_up_correction_prefix(normalized_query)
+    if stripped_query and stripped_query != normalized_query:
+        candidate_queries = (stripped_query, normalized_query)
+
+    for candidate_query in candidate_queries:
+        for candidate in (
+            _extract_quoted_entity(candidate_query),
+            _extract_prefixed_entity(candidate_query),
+            _extract_leading_entity_span(candidate_query),
+        ):
+            if candidate:
+                return candidate
 
     token_surfaces = _query_token_surfaces(normalized_query)
     if 1 <= len(token_surfaces) <= 4:
@@ -488,23 +668,39 @@ def _build_context_tokens(query: str, entity_surface: str) -> tuple[str, ...]:
         for token in full_tokens
         if len(token) >= 3
         and token not in _QUERY_STOPWORDS
+        and token not in _NON_EXPANSION_CONTEXT_TOKENS
         and token not in entity_tokens
     )[:4]
 
 
 def _analyze_query_discipline(query: str) -> _QueryDiscipline:
     normalized_query = _normalize_query_surface(query)
-    entity_surface = _extract_entity_surface(normalized_query)
+    analysis_query = _strip_follow_up_correction_prefix(normalized_query)
+    entity_surface = _extract_entity_surface(analysis_query)
     normalized_entity = _fold_for_match(entity_surface)
-    context_tokens = _build_context_tokens(normalized_query, entity_surface)
-    conservative_query = entity_surface or normalized_query
+    context_tokens = _build_context_tokens(analysis_query, entity_surface)
+    language_hint = _detect_query_language(analysis_query)
+    identity_intent = _query_looks_identity_like(
+        analysis_query,
+        entity_surface=entity_surface,
+        context_tokens=context_tokens,
+    )
+    recency_intent = _query_looks_recency_like(analysis_query, context_tokens=context_tokens)
+    if recency_intent and entity_surface == analysis_query and not identity_intent:
+        entity_surface = ""
+        normalized_entity = ""
+        context_tokens = _build_context_tokens(analysis_query, entity_surface)
+    conservative_query = entity_surface or analysis_query
     return _QueryDiscipline(
-        raw_query=normalized_query,
+        raw_query=analysis_query,
         conservative_query=conservative_query,
         entity_surface=entity_surface,
         normalized_entity=normalized_entity,
         entity_tokens=_text_tokens(entity_surface),
         context_tokens=context_tokens,
+        language_hint=language_hint,
+        identity_intent=identity_intent,
+        recency_intent=recency_intent,
     )
 
 
@@ -529,21 +725,31 @@ def _build_staged_search_queries(
         seen_queries.add(key)
 
     if discipline.entity_surface:
-        quoted_entity = f"\"{discipline.entity_surface}\""
-        _add(quoted_entity)
-        if discipline.context_tokens:
-            _add(" ".join((quoted_entity, *discipline.context_tokens[:2])))
-            _add(" ".join((discipline.entity_surface, *discipline.context_tokens[:4])))
-        else:
+        if discipline.identity_intent or not discipline.context_tokens:
             _add(discipline.entity_surface)
+        else:
+            _add(discipline.raw_query)
+        if discipline.identity_intent:
+            _add(_build_reference_favoring_query(discipline))
+            if not fast_mode and discipline.context_tokens:
+                _add(
+                    " ".join(
+                        (discipline.entity_surface, *discipline.context_tokens[:3])
+                    )
+                )
+        elif discipline.context_tokens:
+            _add(" ".join((discipline.entity_surface, *discipline.context_tokens[:4])))
+            if not fast_mode:
+                _add(f"\"{discipline.entity_surface}\"")
+        elif not fast_mode:
+            _add(f"\"{discipline.entity_surface}\"")
     else:
         _add(discipline.conservative_query)
-        keyword_only = " ".join(
-            token
-            for token in _text_tokens(discipline.raw_query)
-            if token not in _QUERY_STOPWORDS
-        )
-        _add(keyword_only)
+        if discipline.recency_intent:
+            _add(_build_recency_favoring_query(discipline))
+        keyword_only = _build_keyword_only_query(discipline.raw_query)
+        if not discipline.recency_intent or not fast_mode:
+            _add(keyword_only)
 
     return tuple(planned_queries[:max_passes])
 
@@ -636,6 +842,24 @@ def _search_results_look_weak(
             for result in top_results
             if _result_entity_token_hits(result, query=query) >= len(query.entity_tokens)
         )
+        aligned_anchor_matches = sum(
+            1
+            for result in top_results
+            if _result_entity_token_hits(result, query=query) >= len(query.entity_tokens)
+            and not _result_looks_weak_identity_source(result)
+        )
+        reference_matches = sum(
+            1
+            for result in top_results
+            if _result_entity_token_hits(result, query=query) >= len(query.entity_tokens)
+            and _url_looks_reference_like(result.get("url", ""))
+        )
+        if query.identity_intent:
+            return not (
+                reference_matches >= 1
+                or aligned_anchor_matches >= 1 and max(scored_results, default=0.0) >= 7.0
+                or aligned_anchor_matches >= 2
+            )
         return not (
             exact_matches >= 1
             or aligned_matches >= 1 and max(scored_results, default=0.0) >= 6.0
@@ -694,11 +918,13 @@ def _build_search_query(query: str) -> _SearchQuery:
     discipline = _analyze_query_discipline(query)
     keyword_tokens = tuple(
         token
-        for token in _text_tokens(query)
+        for token in _text_tokens(discipline.raw_query)
         if len(token) >= 3 and token not in _QUERY_STOPWORDS
     )
     if not keyword_tokens:
-        keyword_tokens = tuple(token for token in _text_tokens(query) if len(token) >= 2)
+        keyword_tokens = tuple(
+            token for token in _text_tokens(discipline.raw_query) if len(token) >= 2
+        )
     return _SearchQuery(
         raw_query=discipline.raw_query,
         normalized_query=_fold_for_match(discipline.raw_query),
@@ -707,6 +933,9 @@ def _build_search_query(query: str) -> _SearchQuery:
         normalized_entity=discipline.normalized_entity,
         entity_tokens=discipline.entity_tokens,
         context_tokens=discipline.context_tokens,
+        language_hint=discipline.language_hint,
+        identity_intent=discipline.identity_intent,
+        recency_intent=discipline.recency_intent,
     )
 
 
@@ -784,11 +1013,161 @@ def _score_search_result(
     score -= _result_hygiene_penalty(title=title, snippet=snippet, url=url)
 
     if _url_looks_reference_like(url):
-        score += 3.0
-    if _url_looks_social_profile_shell(url):
+        score += 4.5 if query.identity_intent else 3.0
+        score += _reference_language_bonus(url=url, query=query)
+    weak_identity_penalty = _weak_identity_source_penalty(
+        url=url,
+        title=title,
+        snippet=snippet,
+        query=query,
+    )
+    if weak_identity_penalty:
+        score -= weak_identity_penalty
+    elif _url_looks_social_profile_shell(url):
         score -= 3.5
 
     return score
+
+
+def _detect_query_language(query: str) -> str:
+    folded_tokens = set(_text_tokens(query))
+    if folded_tokens & _FRENCH_QUERY_HINT_TOKENS:
+        return "fr"
+    if folded_tokens & _SPANISH_QUERY_HINT_TOKENS:
+        return "es"
+    if folded_tokens & _ENGLISH_QUERY_HINT_TOKENS:
+        return "en"
+    return "unknown"
+
+
+def _query_looks_identity_like(
+    query: str,
+    *,
+    entity_surface: str,
+    context_tokens: tuple[str, ...],
+) -> bool:
+    if any(pattern.match(query) for pattern in _IDENTITY_INTENT_PATTERNS):
+        return True
+    if any(token in _IDENTITY_CONTEXT_TOKENS for token in context_tokens):
+        return True
+    return bool(
+        entity_surface
+        and not context_tokens
+        and 1 <= len(_text_tokens(entity_surface)) <= 4
+        and _surface_looks_identity_candidate(entity_surface)
+    )
+
+
+def _query_looks_recency_like(
+    query: str,
+    *,
+    context_tokens: tuple[str, ...],
+) -> bool:
+    query_tokens = set(_text_tokens(query))
+    if query_tokens & _RECENCY_HINT_TOKENS:
+        return True
+    has_recent_date_hint = bool(re.search(r"\b20\d{2}\b", query)) or bool(
+        query_tokens & _MONTH_HINT_TOKENS
+    )
+    return has_recent_date_hint and bool(query_tokens & _EVENT_TOPIC_TOKENS)
+
+
+def _build_reference_favoring_query(discipline: _QueryDiscipline) -> str:
+    hint = _REFERENCE_HINTS_BY_LANGUAGE.get(
+        discipline.language_hint,
+        _REFERENCE_HINTS_BY_LANGUAGE["unknown"],
+    )
+    return f"{discipline.entity_surface} {hint}"
+
+
+def _build_recency_favoring_query(discipline: _QueryDiscipline) -> str:
+    hint = _RECENCY_HINTS_BY_LANGUAGE.get(
+        discipline.language_hint,
+        _RECENCY_HINTS_BY_LANGUAGE["unknown"],
+    )
+    return f"{discipline.raw_query} {hint}"
+
+
+def _build_keyword_only_query(query: str) -> str:
+    return " ".join(
+        token
+        for token in _text_tokens(query)
+        if token not in _QUERY_STOPWORDS
+    )
+
+
+def _surface_looks_identity_candidate(entity_surface: str) -> bool:
+    token_surfaces = _query_token_surfaces(entity_surface)
+    if not token_surfaces:
+        return False
+    if len(token_surfaces) == 1:
+        return True
+    lowercase_non_particles = sum(
+        1
+        for token in token_surfaces
+        if token
+        and token[0].islower()
+        and _fold_for_match(token) not in _NAME_PARTICLES
+    )
+    return lowercase_non_particles == 0
+
+
+def _reference_language_bonus(*, url: str, query: _SearchQuery) -> float:
+    if query.language_hint == "unknown":
+        return 0.0
+    hostname = (urlparse(url).hostname or "").lower()
+    if hostname.startswith(f"{query.language_hint}."):
+        return 1.5
+    return 0.0
+
+
+def _result_looks_seo_profile_farm(
+    *,
+    title: str,
+    snippet: str,
+    url: str,
+) -> bool:
+    if _url_looks_reference_like(url):
+        return False
+    folded_metadata = _fold_for_match(f"{title} {snippet} {url}")
+    cue_hits = sum(1 for cue in _SEO_PROFILE_CUES if cue in folded_metadata)
+    return cue_hits >= 3
+
+
+def _weak_identity_source_penalty(
+    *,
+    url: str,
+    title: str,
+    snippet: str,
+    query: _SearchQuery,
+) -> float:
+    if not query.identity_intent:
+        if _url_looks_social_profile_shell(url):
+            return 3.5
+        return 0.0
+
+    penalty = 0.0
+    if _url_looks_social_profile_shell(url):
+        penalty += 5.5
+    if _url_looks_amazon_listing(url):
+        penalty += 4.5
+    if _result_looks_seo_profile_farm(title=title, snippet=snippet, url=url):
+        penalty += 3.5
+    return penalty
+
+
+def _result_looks_weak_identity_source(result: Mapping[str, str]) -> bool:
+    return _weak_identity_source_penalty(
+        url=result.get("url", ""),
+        title=result.get("title", ""),
+        snippet=result.get("snippet", ""),
+        query=_SearchQuery(
+            raw_query="",
+            normalized_query="",
+            keyword_tokens=(),
+            identity_intent=True,
+        ),
+    ) >= 3.5
 
 
 # --- URL classification and utilities ---
@@ -928,15 +1307,35 @@ def _url_looks_reference_like(url: str) -> bool:
 def _url_looks_social_profile_shell(url: str) -> bool:
     """True for social network profile landing pages with little extractable biography text."""
     parsed = urlparse(url)
-    hostname = (parsed.hostname or "").lower()
-    # Strip leading www.
-    if hostname.startswith("www."):
-        hostname = hostname[4:]
+    hostname = _registered_domain(parsed.hostname or "")
     if hostname not in _SOCIAL_PROFILE_SHELL_DOMAINS:
         return False
-    # Profile shell: root or single user-slug segment (e.g. /username or /username/).
     path_segments = _url_path_segments(url)
+    if hostname == "youtube.com":
+        if len(path_segments) <= 1:
+            return True
+        first_segment = path_segments[0].casefold()
+        return (
+            first_segment.startswith("@")
+            or first_segment in _YOUTUBE_CHANNEL_PREFIXES and len(path_segments) <= 2
+        )
+    if hostname == "linkedin.com":
+        if len(path_segments) <= 1:
+            return True
+        first_segment = path_segments[0].casefold()
+        return first_segment in {"company", "in", "school"} and len(path_segments) <= 2
     return len(path_segments) <= 1
+
+
+def _url_looks_amazon_listing(url: str) -> bool:
+    parsed = urlparse(url)
+    hostname = _registered_domain(parsed.hostname or "")
+    if not hostname.startswith(_AMAZON_DOMAIN_PREFIXES):
+        return False
+    path_segments = tuple(segment.casefold() for segment in _url_path_segments(url))
+    if not path_segments:
+        return True
+    return bool({"dp", "gp", "product", "products", "shop", "shops", "store"} & set(path_segments))
 
 
 def _source_title_looks_weak(title: str) -> bool:

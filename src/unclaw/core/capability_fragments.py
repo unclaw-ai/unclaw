@@ -523,7 +523,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "available.fast_web_search",
             "fast_web_search <query>: quick lightweight web grounding probe. "
             "Use before full search_web when unsure about a person, place, "
-            "organization, or product name. Returns a tiny grounding note, "
+            "organization, or product name. Use the user's literal wording first. "
+            "Returns a tiny grounding note, "
             "not a full answer.",
         ),
         "unavailable.local_file_read": _static_prompt(
@@ -646,12 +647,22 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "guidance.model_callable.fast_web_grounding": _static_prompt(
             "guidance.model_callable.fast_web_grounding",
+            "For identity or biography requests such as 'who is', 'qui est', "
+            "'c'est qui', or 'bio de', use fast_web_search first with the exact "
+            "entity wording from the user before deciding whether search_web is needed.",
             "When unsure about a person, place, organization, or product name, "
             "use fast_web_search first with the exact name as written by the user. "
             "This prevents silently substituting an unknown entity with a more "
             "famous wrong one.",
+            "If you are tempted to correct, normalize, reinterpret, infer the "
+            "domain, or answer from weak memory, do a literal fast_web_search "
+            "first instead of guessing.",
+            "For recent or current topics, keep the first lookup literal as written "
+            "by the user before adding any cautious news-oriented expansion.",
             "If fast_web_search results are clearly for a different entity, say "
             "so explicitly instead of presenting the wrong entity's information.",
+            "After the user corrects you, reuse the corrected entity or context "
+            "exactly on the next search step and do not drift back to the earlier mistake.",
             "fast_web_search is very fast and cheap — use it liberally for "
             "entity resolution before committing to a full research flow.",
         ),

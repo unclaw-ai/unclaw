@@ -18,11 +18,14 @@ from unclaw.tools.web_search import (
     _canonicalize_url,
     _is_internal_link,
     _score_search_result,
+    _url_looks_amazon_listing,
     _url_looks_archive_like,
     _url_looks_article_like,
     _url_looks_homepage_like,
     _url_looks_live_or_streaming,
     _url_looks_low_value,
+    _url_looks_reference_like,
+    _url_looks_social_profile_shell,
     _url_path_segments,
 )
 from unclaw.tools.web_text import (
@@ -614,6 +617,10 @@ def _score_fetched_page(
         hub_score -= 0.8
     if _url_looks_live_or_streaming(page.resolved_url):
         hub_score += 2.0
+    if query.identity_intent and _url_looks_social_profile_shell(page.resolved_url):
+        hub_score += 2.0
+    if query.identity_intent and _url_looks_amazon_listing(page.resolved_url):
+        hub_score += 1.5
 
     terminal_score = 0.0
     if _url_looks_article_like(page.resolved_url):
@@ -633,6 +640,12 @@ def _score_fetched_page(
         terminal_score -= 1.5
     if _url_looks_live_or_streaming(page.resolved_url):
         terminal_score -= 2.0
+    if query.identity_intent and _url_looks_reference_like(page.resolved_url):
+        terminal_score += 2.5
+    if query.identity_intent and _url_looks_social_profile_shell(page.resolved_url):
+        terminal_score -= 2.5
+    if query.identity_intent and _url_looks_amazon_listing(page.resolved_url):
+        terminal_score -= 2.0
 
     hygiene_penalty = _page_hygiene_penalty(
         url=page.resolved_url,
@@ -640,6 +653,7 @@ def _score_fetched_page(
         title=title,
         link_count=internal_link_count,
         informative_passage_count=informative_passage_count,
+        query=query,
     )
     usefulness = (
         relevance * 3.0
@@ -863,6 +877,7 @@ def _page_hygiene_penalty(
     title: str,
     link_count: int,
     informative_passage_count: int,
+    query: _SearchQuery,
 ) -> float:
     if not text:
         return 2.0
@@ -904,5 +919,13 @@ def _page_hygiene_penalty(
         penalty += 1.0
     if link_count >= 8 and token_count < 180:
         penalty += 1.0
+    if query.identity_intent and cue_hits >= 2 and token_count < 220:
+        penalty += 1.0
+    if query.identity_intent and _url_looks_social_profile_shell(url):
+        penalty += 2.5
+    if query.identity_intent and _url_looks_amazon_listing(url):
+        penalty += 2.0
+    if query.identity_intent and _url_looks_reference_like(url) and informative_passage_count >= 1:
+        penalty = max(penalty - 0.5, 0.0)
 
     return penalty
