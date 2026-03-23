@@ -47,6 +47,9 @@ Thumbs.db
 .env.*
 !.env.example
 config/secrets.yaml
+config/app.yaml
+config/telegram.yaml
+config/models.yaml
 
 # Project data
 data/
