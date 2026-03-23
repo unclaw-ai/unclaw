@@ -39,7 +39,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command_name == "logs":
         return logs_cli.main(project_root=project_root, mode=args.mode)
     if command_name == "skills":
-        return skills_cli.main(project_root=project_root)
+        return skills_cli.main(
+            project_root=project_root,
+            action=args.skills_command or "list",
+            skill_id=getattr(args, "skill_id", None),
+        )
     if command_name == "update":
         return update_main(project_root=project_root)
 
@@ -60,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw logs\n"
             "  unclaw logs full\n"
             "  unclaw skills\n"
+            "  unclaw skills install weather\n"
+            "  unclaw skills enable weather\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
             "  unclaw telegram allow-latest\n"
@@ -146,10 +152,36 @@ def build_parser() -> argparse.ArgumentParser:
             "`full` for raw JSON. `simple` remains accepted as a compatibility alias."
         ),
     )
-    subparsers.add_parser(
+    skills_parser = subparsers.add_parser(
         "skills",
-        help="Show skill catalog status: installed, available, and updates.",
+        help="List, install, enable, disable, remove, or update optional skills.",
     )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
+    install_parser = skills_subparsers.add_parser(
+        "install",
+        help="Install one skill from the remote catalog into ./skills/<skill_id>.",
+    )
+    install_parser.add_argument("skill_id", help="Catalog skill id to install.")
+    enable_parser = skills_subparsers.add_parser(
+        "enable",
+        help="Enable one already-installed skill in config/app.yaml.",
+    )
+    enable_parser.add_argument("skill_id", help="Installed skill id to enable.")
+    disable_parser = skills_subparsers.add_parser(
+        "disable",
+        help="Disable one enabled skill without removing its files.",
+    )
+    disable_parser.add_argument("skill_id", help="Enabled skill id to disable.")
+    remove_parser = skills_subparsers.add_parser(
+        "remove",
+        help="Remove one installed skill bundle from ./skills/<skill_id>.",
+    )
+    remove_parser.add_argument("skill_id", help="Installed skill id to remove.")
+    update_parser = skills_subparsers.add_parser(
+        "update",
+        help="Update one installed skill from the remote catalog.",
+    )
+    update_parser.add_argument("skill_id", help="Installed skill id to update.")
     subparsers.add_parser(
         "update",
         help="Safely fetch and fast-forward this local checkout.",

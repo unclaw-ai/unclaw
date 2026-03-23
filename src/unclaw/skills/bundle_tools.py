@@ -173,7 +173,16 @@ def _import_bundle_tool_module(bundle: SkillBundle) -> object | None:
         return None
 
 
+def clear_skill_tool_module_cache(skill_id: str) -> None:
+    """Remove cached imported modules for one skill bundle."""
+    module_prefix = f"skills.{skill_id}"
+    for module_name in tuple(sys.modules):
+        if module_name == module_prefix or module_name.startswith(f"{module_prefix}."):
+            sys.modules.pop(module_name, None)
+
+
 __all__ = [
+    "clear_skill_tool_module_cache",
     "probe_skill_tool_loading",
     "register_active_skill_tools",
 ]

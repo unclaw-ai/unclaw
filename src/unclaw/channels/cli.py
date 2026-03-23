@@ -221,6 +221,10 @@ def run_cli(
 
         if stripped_input.startswith("/"):
             result = command_handler.handle(stripped_input)
+            if result.refresh_tool_executor:
+                tool_executor = ToolExecutor.with_default_tools(
+                    command_handler.session_manager.settings
+                )
             if result.list_tools:
                 _render_tool_list(tool_executor.list_tools())
                 continue

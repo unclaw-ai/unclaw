@@ -39,6 +39,12 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     )
     assert "/session  Show the current session state." in result.lines
     assert "/summary  Show the saved session summary." in result.lines
+    assert "/skills  Show installed, available, and updatable skills." in result.lines
+    assert "/skills install <skill_id>  Install one skill from the catalog." in result.lines
+    assert "/skills enable <skill_id>  Enable one installed skill." in result.lines
+    assert "/skills disable <skill_id>  Disable one enabled skill." in result.lines
+    assert "/skills remove <skill_id>  Remove one installed skill bundle." in result.lines
+    assert "/skills update <skill_id>  Update one installed skill." in result.lines
     assert "/help  Show this command list with examples." in result.lines
     assert "Examples:" in result.lines
     assert "/ls ." in result.lines

@@ -112,4 +112,9 @@ class UnknownSkillIdError(ValueError):
         )
 
 
-__all__ = ["SkillBundle", "UnknownSkillIdError"]
+def clear_skill_bundle_cache(skill_md_path: Path) -> None:
+    """Drop one cached SKILL.md entry if it exists."""
+    _raw_content_cache.pop(skill_md_path.expanduser().resolve(), None)
+
+
+__all__ = ["SkillBundle", "UnknownSkillIdError", "clear_skill_bundle_cache"]

@@ -39,6 +39,8 @@ class CommandResult:
     list_tools: bool = False
     tool_call: ToolCall | None = None
     session_id: str | None = None
+    updated_settings: Settings | None = None
+    refresh_tool_executor: bool = False
 
     @property
     def should_exit(self) -> bool:
@@ -329,40 +331,38 @@ class CommandHandler:
         )
 
     def _handle_skills(self, arguments: tuple[str, ...]) -> CommandResult:
-        if arguments:
-            return self._usage("/skills")
+        from unclaw.skills.manager import run_skill_command
 
-        from unclaw.skills.file_loader import discover_skill_bundles
-        from unclaw.skills.remote_catalog import (
-            CatalogFetchError,
-            build_skill_status_report,
-            fetch_remote_catalog,
-            render_skills_report,
-        )
+        if not arguments:
+            action = "list"
+            skill_id = None
+        elif len(arguments) == 2 and arguments[0] in {
+            "install",
+            "enable",
+            "disable",
+            "remove",
+            "update",
+        }:
+            action, skill_id = arguments
+        else:
+            return self._usage("/skills [install|enable|disable|remove|update] <skill_id>")
 
-        catalog_url = self.settings.catalog.url
+        outcome = run_skill_command(self.settings, action=action, skill_id=skill_id)
+        if outcome.updated_settings is not None:
+            self.settings = outcome.updated_settings
+            self.session_manager.settings = outcome.updated_settings
 
-        try:
-            catalog_entries = fetch_remote_catalog(catalog_url)
-        except CatalogFetchError as exc:
-            return self._error(
-                "Could not fetch the skills catalog.",
-                str(exc),
-                "Local skill runtime is not affected.",
+        if outcome.ok:
+            return self._ok(
+                *outcome.lines,
+                updated_settings=outcome.updated_settings,
+                refresh_tool_executor=outcome.refresh_runtime,
             )
-
-        local_bundles = discover_skill_bundles(
-            skills_root=self.settings.paths.project_root / "skills"
+        return self._error(
+            *outcome.lines,
+            updated_settings=outcome.updated_settings,
+            refresh_tool_executor=outcome.refresh_runtime,
         )
-
-        entries = build_skill_status_report(
-            local_bundles=local_bundles,
-            enabled_skill_ids=self.settings.skills.enabled_skill_ids,
-            catalog_entries=catalog_entries,
-        )
-
-        lines = render_skills_report(entries, catalog_url=catalog_url)
-        return self._ok(*lines)
 
     def _handle_memory_status(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
@@ -403,6 +403,11 @@ class CommandHandler:
             "",
             "Skills:",
             "/skills  Show installed, available, and updatable skills.",
+            "/skills install <skill_id>  Install one skill from the catalog.",
+            "/skills enable <skill_id>  Enable one installed skill.",
+            "/skills disable <skill_id>  Disable one enabled skill.",
+            "/skills remove <skill_id>  Remove one installed skill bundle.",
+            "/skills update <skill_id>  Update one installed skill.",
             "",
             "Memory:",
             "/session  Show the current session state.",
@@ -507,15 +512,33 @@ class CommandHandler:
 
         return raw_value
 
-    def _ok(self, *lines: str, session_id: str | None = None) -> CommandResult:
+    def _ok(
+        self,
+        *lines: str,
+        session_id: str | None = None,
+        updated_settings: Settings | None = None,
+        refresh_tool_executor: bool = False,
+    ) -> CommandResult:
         return CommandResult(
             status=CommandStatus.OK,
             lines=tuple(lines),
             session_id=session_id,
+            updated_settings=updated_settings,
+            refresh_tool_executor=refresh_tool_executor,
         )
 
-    def _error(self, *lines: str) -> CommandResult:
-        return CommandResult(status=CommandStatus.ERROR, lines=tuple(lines))
+    def _error(
+        self,
+        *lines: str,
+        updated_settings: Settings | None = None,
+        refresh_tool_executor: bool = False,
+    ) -> CommandResult:
+        return CommandResult(
+            status=CommandStatus.ERROR,
+            lines=tuple(lines),
+            updated_settings=updated_settings,
+            refresh_tool_executor=refresh_tool_executor,
+        )
 
     def _usage(self, usage_line: str) -> CommandResult:
         return self._error(f"Usage: {usage_line}")

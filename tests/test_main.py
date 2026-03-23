@@ -159,6 +159,59 @@ def test_main_dispatches_logs_with_backward_compatible_simple_alias(
     assert captured["mode"] == "simple"
 
 
+def test_main_dispatches_skills_listing(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_skills(
+        *,
+        project_root: Path | None = None,
+        action: str = "list",
+        skill_id: str | None = None,
+        output_func=print,
+    ) -> int:
+        del output_func
+        captured["project_root"] = project_root
+        captured["action"] = action
+        captured["skill_id"] = skill_id
+        return 88
+
+    monkeypatch.setattr(unclaw_main.skills_cli, "main", fake_skills)
+
+    assert unclaw_main.main(["--project-root", str(tmp_path), "skills"]) == 88
+    assert captured["project_root"] == tmp_path
+    assert captured["action"] == "list"
+    assert captured["skill_id"] is None
+
+
+def test_main_dispatches_skills_subcommand(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_skills(
+        *,
+        project_root: Path | None = None,
+        action: str = "list",
+        skill_id: str | None = None,
+        output_func=print,
+    ) -> int:
+        del output_func
+        captured["project_root"] = project_root
+        captured["action"] = action
+        captured["skill_id"] = skill_id
+        return 89
+
+    monkeypatch.setattr(unclaw_main.skills_cli, "main", fake_skills)
+
+    assert (
+        unclaw_main.main(
+            ["--project-root", str(tmp_path), "skills", "install", "weather"]
+        )
+        == 89
+    )
+    assert captured["project_root"] == tmp_path
+    assert captured["action"] == "install"
+    assert captured["skill_id"] == "weather"
+
+
 def test_main_dispatches_update(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Path | None] = {}
 

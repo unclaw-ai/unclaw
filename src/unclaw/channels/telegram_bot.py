@@ -547,6 +547,15 @@ class TelegramBotChannel:
             normalized_command = "/help"
 
         result = command_handler.handle(normalized_command)
+        if result.updated_settings is not None:
+            self.settings = result.updated_settings
+            for handler in self.command_handlers.values():
+                handler.settings = result.updated_settings
+                handler.session_manager.settings = result.updated_settings
+        if result.refresh_tool_executor:
+            self.tool_executor = ToolExecutor.with_default_tools(
+                command_handler.session_manager.settings
+            )
         bound_session_id = self._resolve_command_session_id(
             fallback_session_id=session_id,
             result=result,

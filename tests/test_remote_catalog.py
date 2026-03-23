@@ -25,6 +25,7 @@ import pytest
 from unclaw.core.command_handler import CommandHandler, CommandStatus
 from unclaw.settings import CatalogSettings, load_settings
 from unclaw.skills.file_models import SkillBundle
+from unclaw.skills.manager import SkillCommandOutcome
 from unclaw.skills.remote_catalog import (
     CatalogFetchError,
     RemoteCatalogEntry,
@@ -565,19 +566,12 @@ def test_skills_cli_calls_output_and_returns_zero(monkeypatch) -> None:
     project_root = Path(__file__).resolve().parents[1]
     collected: list[str] = []
 
-    fake_catalog = [
-        RemoteCatalogEntry(
-            skill_id="weather",
-            display_name="Weather",
-            version="0.1.0",
-            summary=None,
-            repo_relative_path="skills/weather",
-        )
-    ]
-
     monkeypatch.setattr(
-        "unclaw.skills.cli.fetch_remote_catalog",
-        lambda url, **_: fake_catalog,
+        "unclaw.skills.cli.run_skill_command",
+        lambda settings, action="list", skill_id=None: SkillCommandOutcome(
+            ok=True,
+            lines=("Installed (0)", "", "Update (0)", "", "Available (1)"),
+        ),
     )
 
     rc = skills_cli.main(project_root=project_root, output_func=collected.append)
@@ -595,8 +589,15 @@ def test_skills_cli_returns_one_on_catalog_fetch_error(monkeypatch) -> None:
     collected: list[str] = []
 
     monkeypatch.setattr(
-        "unclaw.skills.cli.fetch_remote_catalog",
-        lambda url, **_: (_ for _ in ()).throw(CatalogFetchError("timeout")),
+        "unclaw.skills.cli.run_skill_command",
+        lambda settings, action="list", skill_id=None: SkillCommandOutcome(
+            ok=False,
+            lines=(
+                "Could not fetch the skills catalog.",
+                "timeout",
+                "Local skill runtime is not affected.",
+            ),
+        ),
     )
 
     rc = skills_cli.main(project_root=project_root, output_func=collected.append)
@@ -615,8 +616,15 @@ def test_skills_cli_error_message_does_not_mention_local_path(monkeypatch) -> No
     collected: list[str] = []
 
     monkeypatch.setattr(
-        "unclaw.skills.cli.fetch_remote_catalog",
-        lambda url, **_: (_ for _ in ()).throw(CatalogFetchError("network error")),
+        "unclaw.skills.cli.run_skill_command",
+        lambda settings, action="list", skill_id=None: SkillCommandOutcome(
+            ok=False,
+            lines=(
+                "Could not fetch the skills catalog.",
+                "network error",
+                "Local skill runtime is not affected.",
+            ),
+        ),
     )
 
     skills_cli.main(project_root=project_root, output_func=collected.append)
@@ -630,24 +638,12 @@ def test_skills_cli_error_message_does_not_mention_local_path(monkeypatch) -> No
 
 
 def test_slash_skills_returns_ok_and_three_sections(monkeypatch) -> None:
-    fake_catalog = [
-        RemoteCatalogEntry(
-            skill_id="weather",
-            display_name="Weather",
-            version="0.1.0",
-            summary=None,
-            repo_relative_path="skills/weather",
-        )
-    ]
     monkeypatch.setattr(
-        "unclaw.core.command_handler.fetch_remote_catalog",
-        lambda url, **_: fake_catalog,
-        raising=False,
-    )
-    # Patch the import inside the handler
-    monkeypatch.setattr(
-        "unclaw.skills.remote_catalog.fetch_remote_catalog",
-        lambda url, **_: fake_catalog,
+        "unclaw.skills.manager.run_skill_command",
+        lambda settings, action="list", skill_id=None: SkillCommandOutcome(
+            ok=True,
+            lines=("Installed (0)", "", "Update (0)", "", "Available (1)"),
+        ),
     )
 
     handler = CommandHandler(
@@ -666,8 +662,15 @@ def test_slash_skills_returns_ok_and_three_sections(monkeypatch) -> None:
 
 def test_slash_skills_returns_error_on_catalog_fetch_failure(monkeypatch) -> None:
     monkeypatch.setattr(
-        "unclaw.skills.remote_catalog.fetch_remote_catalog",
-        lambda url, **_: (_ for _ in ()).throw(CatalogFetchError("timeout")),
+        "unclaw.skills.manager.run_skill_command",
+        lambda settings, action="list", skill_id=None: SkillCommandOutcome(
+            ok=False,
+            lines=(
+                "Could not fetch the skills catalog.",
+                "timeout",
+                "Local skill runtime is not affected.",
+            ),
+        ),
     )
 
     handler = CommandHandler(

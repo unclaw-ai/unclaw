@@ -3,27 +3,19 @@
 Architecture
 ------------
 The installer downloads every file listed in
-``RemoteCatalogEntry.public_entry_files`` from the raw GitHub URL derived
-from the catalog base URL and ``repo_relative_path``, then writes them into
-``skills_root/<skill_id>/``.
+``RemoteCatalogEntry.public_entry_files`` from a raw GitHub URL built from:
+
+- ``RemoteCatalogEntry.repository_owner``
+- ``RemoteCatalogEntry.repository_name``
+- ``RemoteCatalogEntry.repo_relative_path``
+- ``RemoteCatalogEntry.public_entry_files``
+
+The Git ref (for example ``main``) is derived from the configured catalog URL,
+then each file is written into ``skills_root/<skill_id>/``.
 
 A ``_meta.json`` sidecar is also written with the skill version so that
 :func:`~unclaw.skills.remote_catalog.read_local_skill_version` can track
 whether the local copy is up-to-date.
-
-URL derivation
---------------
-Given the catalog URL (e.g.
-``https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.json``),
-the base URL is the catalog URL with ``catalog.json`` stripped:
-``https://raw.githubusercontent.com/unclaw-ai/skills/main/``.
-
-Each file URL is then::
-
-    <base_url><repo_relative_path>/<filename>
-
-This approach is fully determined by the catalog URL — no separate
-owner / repo / branch values are hardcoded.
 """
 
 from __future__ import annotations
@@ -41,18 +33,23 @@ class SkillInstallError(Exception):
     """Raised when a skill bundle cannot be installed."""
 
 
-def catalog_base_url(catalog_url: str) -> str:
-    """Return the base URL for raw file downloads derived from *catalog_url*.
-
-    Strips the trailing filename (typically ``catalog.json``) from the URL so
-    that skill file paths can be appended directly.
-
-    >>> catalog_base_url("https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.json")
-    'https://raw.githubusercontent.com/unclaw-ai/skills/main/'
-    """
+def catalog_base_url(
+    catalog_url: str,
+    *,
+    repository_owner: str,
+    repository_name: str,
+) -> str:
+    """Return the raw GitHub base URL for one catalog entry's repository."""
     parsed = urllib.parse.urlparse(catalog_url)
-    # Strip the last path component (catalog.json) and keep the trailing slash.
-    base_path = parsed.path.rsplit("/", 1)[0] + "/"
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if parsed.netloc != "raw.githubusercontent.com" or len(path_parts) < 4:
+        raise SkillInstallError(
+            "Catalog URL must be a raw GitHub URL so skill file URLs can be "
+            "derived safely."
+        )
+
+    ref = path_parts[2]
+    base_path = f"/{repository_owner}/{repository_name}/{ref}/"
     return urllib.parse.urlunparse(parsed._replace(path=base_path))
 
 
@@ -84,11 +81,16 @@ def install_skill(
 
     Raises :class:`SkillInstallError` when:
 
+    - repository metadata is missing
     - ``entry.repo_relative_path`` is missing
     - ``entry.public_entry_files`` is empty
     - any file download fails
     - writing to the filesystem fails
     """
+    if not entry.repository_owner or not entry.repository_name:
+        raise SkillInstallError(
+            f"Catalog entry for {entry.skill_id!r} is missing repository metadata."
+        )
     if not entry.repo_relative_path:
         raise SkillInstallError(
             f"Catalog entry for {entry.skill_id!r} has no repo_relative_path — "
@@ -100,7 +102,11 @@ def install_skill(
             "nothing to install."
         )
 
-    base = catalog_base_url(catalog_url)
+    base = catalog_base_url(
+        catalog_url,
+        repository_owner=entry.repository_owner,
+        repository_name=entry.repository_name,
+    )
     bundle_dir = skills_root / entry.skill_id
 
     try:
@@ -116,8 +122,9 @@ def install_skill(
             content = _download_bytes(url, timeout=timeout)
         except SkillInstallError:
             raise
-        dest = bundle_dir / filename
+        dest = _resolve_bundle_destination(bundle_dir, filename)
         try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(content)
         except OSError as exc:
             raise SkillInstallError(
@@ -158,6 +165,16 @@ def _write_meta(bundle_dir: Path, *, version: str | None) -> None:
         raise SkillInstallError(
             f"Could not write _meta.json in {bundle_dir}: {exc}"
         ) from exc
+
+
+def _resolve_bundle_destination(bundle_dir: Path, relative_path: str) -> Path:
+    candidate = (bundle_dir / relative_path).resolve()
+    resolved_bundle_dir = bundle_dir.resolve()
+    if candidate != resolved_bundle_dir and resolved_bundle_dir not in candidate.parents:
+        raise SkillInstallError(
+            f"Catalog file path {relative_path!r} escapes the target bundle directory."
+        )
+    return candidate
 
 
 __all__ = [

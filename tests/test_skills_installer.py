@@ -40,14 +40,22 @@ _CATALOG_URL = "https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.
 
 
 def test_catalog_base_url_strips_catalog_json() -> None:
-    result = catalog_base_url(_CATALOG_URL)
+    result = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     assert result == "https://raw.githubusercontent.com/unclaw-ai/skills/main/"
 
 
 def test_catalog_base_url_with_trailing_path() -> None:
     url = "https://example.com/org/repo/main/subdir/catalog.json"
-    result = catalog_base_url(url)
-    assert result == "https://example.com/org/repo/main/subdir/"
+    with pytest.raises(SkillInstallError, match="raw GitHub URL"):
+        catalog_base_url(
+            url,
+            repository_owner="unclaw-ai",
+            repository_name="skills",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -56,13 +64,21 @@ def test_catalog_base_url_with_trailing_path() -> None:
 
 
 def test_build_file_url_constructs_correct_url() -> None:
-    base = "https://raw.githubusercontent.com/unclaw-ai/skills/main/"
+    base = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url = build_file_url(base, "weather", "SKILL.md")
     assert url == "https://raw.githubusercontent.com/unclaw-ai/skills/main/weather/SKILL.md"
 
 
 def test_build_file_url_strips_leading_slash_from_path() -> None:
-    base = "https://raw.githubusercontent.com/unclaw-ai/skills/main/"
+    base = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url = build_file_url(base, "/weather/", "tool.py")
     assert url == "https://raw.githubusercontent.com/unclaw-ai/skills/main/weather/tool.py"
 
@@ -80,6 +96,8 @@ def test_install_skill_raises_when_repo_relative_path_missing(tmp_path: Path) ->
         summary="Weather skill.",
         repo_relative_path=None,
         public_entry_files=("SKILL.md",),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
     with pytest.raises(SkillInstallError, match="repo_relative_path"):
         install_skill(entry, skills_root=tmp_path / "skills", catalog_url=_CATALOG_URL)
@@ -93,8 +111,23 @@ def test_install_skill_raises_when_public_entry_files_empty(tmp_path: Path) -> N
         summary="Weather skill.",
         repo_relative_path="weather",
         public_entry_files=(),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
     with pytest.raises(SkillInstallError, match="public_entry_files"):
+        install_skill(entry, skills_root=tmp_path / "skills", catalog_url=_CATALOG_URL)
+
+
+def test_install_skill_raises_when_repository_metadata_missing(tmp_path: Path) -> None:
+    entry = RemoteCatalogEntry(
+        skill_id="weather",
+        display_name="Weather",
+        version="0.1.0",
+        summary="Weather skill.",
+        repo_relative_path="weather",
+        public_entry_files=("SKILL.md",),
+    )
+    with pytest.raises(SkillInstallError, match="repository metadata"):
         install_skill(entry, skills_root=tmp_path / "skills", catalog_url=_CATALOG_URL)
 
 
@@ -106,6 +139,8 @@ def test_install_skill_raises_on_http_error(tmp_path: Path) -> None:
         summary="Weather skill.",
         repo_relative_path="weather",
         public_entry_files=("SKILL.md",),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
 
     import urllib.error
@@ -160,7 +195,11 @@ def _mock_urlopen(url_to_content: dict[str, bytes]):
 def test_install_skill_downloads_files_and_writes_meta(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
     skill_md_content = b"# Weather\n\nLive weather.\n"
-    base = catalog_base_url(_CATALOG_URL)
+    base = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url_map = {
         f"{base}weather/SKILL.md": skill_md_content,
         f"{base}weather/__init__.py": b"",
@@ -173,6 +212,8 @@ def test_install_skill_downloads_files_and_writes_meta(tmp_path: Path) -> None:
         summary="Live weather.",
         repo_relative_path="weather",
         public_entry_files=("SKILL.md", "__init__.py"),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
 
     with _mock_urlopen(url_map):
@@ -190,7 +231,11 @@ def test_install_skill_writes_meta_without_version_when_version_is_none(
     tmp_path: Path,
 ) -> None:
     skills_root = tmp_path / "skills"
-    base = catalog_base_url(_CATALOG_URL)
+    base = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url_map = {f"{base}weather/SKILL.md": b"# Weather\n\nSkill.\n"}
 
     entry = RemoteCatalogEntry(
@@ -200,6 +245,8 @@ def test_install_skill_writes_meta_without_version_when_version_is_none(
         summary="Skill.",
         repo_relative_path="weather",
         public_entry_files=("SKILL.md",),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
 
     with _mock_urlopen(url_map):
@@ -214,7 +261,11 @@ def test_installed_skill_is_discovered_by_discover_skill_bundles(tmp_path: Path)
     from unclaw.skills.file_loader import discover_skill_bundles
 
     skills_root = tmp_path / "skills"
-    base = catalog_base_url(_CATALOG_URL)
+    base = catalog_base_url(
+        _CATALOG_URL,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url_map = {f"{base}weather/SKILL.md": b"# Weather\n\nLive weather.\n"}
 
     entry = RemoteCatalogEntry(
@@ -224,6 +275,8 @@ def test_installed_skill_is_discovered_by_discover_skill_bundles(tmp_path: Path)
         summary="Live weather.",
         repo_relative_path="weather",
         public_entry_files=("SKILL.md",),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
     )
 
     with _mock_urlopen(url_map):
@@ -254,7 +307,11 @@ def test_onboarding_installs_selected_skills_from_mocked_catalog(
     settings = load_settings(project_root=project_root)
 
     skill_md_bytes = b"# Weather\n\nLive weather.\n"
-    base = catalog_base_url(settings.catalog.url)
+    base = catalog_base_url(
+        settings.catalog.url,
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
     url_map = {f"{base}weather/SKILL.md": skill_md_bytes}
 
     catalog_entries = [
@@ -265,6 +322,8 @@ def test_onboarding_installs_selected_skills_from_mocked_catalog(
             summary="Live weather.",
             repo_relative_path="weather",
             public_entry_files=("SKILL.md",),
+            repository_owner="unclaw-ai",
+            repository_name="skills",
         )
     ]
 
