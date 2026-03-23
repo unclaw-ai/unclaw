@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -257,18 +256,161 @@ def test_update_when_already_current_is_noop(
     outcome = run_skill_command(settings, action="update", skill_id="weather")
 
     assert outcome.ok is True
-    assert outcome.lines == ("Skill 'weather' is already up to date.",)
+    assert outcome.lines == ("Skill 'weather' is already current.",)
     assert marker_path.read_text(encoding="utf-8") == "keep me\n"
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_skill_id"),
+    [
+        ("weather", "weather"),
+        ("Travel Guide", "travel_guide"),
+        ("itinerary", "travel_guide"),
+        ("maps", "travel_guide"),
+    ],
+)
+def test_search_matches_catalog_fields_via_manager(
+    monkeypatch,
+    make_temp_project,
+    query: str,
+    expected_skill_id: str,
+) -> None:
+    _, settings = _load_temp_settings(
+        make_temp_project,
+        enabled_skill_ids=["weather"],
+        install_skill_bundles={"weather": "# Weather\n\nLive weather.\n"},
+    )
+
+    monkeypatch.setattr(
+        "unclaw.skills.manager.fetch_remote_catalog",
+        lambda url, **_: [
+            _catalog_entry(
+                "weather",
+                version="1.0.0",
+                public_entry_files=("SKILL.md",),
+            ),
+            RemoteCatalogEntry(
+                skill_id="travel_guide",
+                display_name="Travel Guide",
+                version="1.2.0",
+                summary="Offline itinerary planning.",
+                repo_relative_path="travel_guide",
+                public_entry_files=("SKILL.md",),
+                tags=("maps", "planning"),
+                repository_owner="unclaw-ai",
+                repository_name="skills",
+            ),
+        ],
+    )
+
+    outcome = run_skill_command(settings, action="search", skill_id=query)
+
+    assert outcome.ok is True
+    assert any(expected_skill_id in line for line in outcome.lines)
+
+
+def test_update_all_updates_only_skills_that_need_updates(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root, settings = _load_temp_settings(
+        make_temp_project,
+        enabled_skill_ids=["weather"],
+        install_skill_bundles={
+            "weather": "# Weather\n\nOld weather.\n",
+            "notes": "# Notes\n\nStable notes.\n",
+            "custom": "# Custom\n\nLocal only.\n",
+        },
+    )
+    weather_dir = project_root / "skills" / "weather"
+    notes_dir = project_root / "skills" / "notes"
+    custom_dir = project_root / "skills" / "custom"
+    (weather_dir / "_meta.json").write_text('{"version": "0.9.0"}\n', encoding="utf-8")
+    (notes_dir / "_meta.json").write_text('{"version": "1.0.0"}\n', encoding="utf-8")
+    (custom_dir / "_meta.json").write_text('{"version": "dev-local"}\n', encoding="utf-8")
+
+    weather_entry = _catalog_entry(version="1.0.0")
+    notes_entry = _catalog_entry("notes", version="1.0.0")
+    base = catalog_base_url(
+        settings.catalog.url,
+        repository_owner=weather_entry.repository_owner or "",
+        repository_name=weather_entry.repository_name or "",
+    )
+    url_map = {f"{base}weather/SKILL.md": b"# Weather\n\nNew weather.\n"}
+
+    monkeypatch.setattr(
+        "unclaw.skills.manager.fetch_remote_catalog",
+        lambda url, **_: [weather_entry, notes_entry],
+    )
+
+    with _mock_urlopen(url_map):
+        outcome = run_skill_command(settings, action="update", skill_id="--all")
+
+    assert outcome.ok is True
+    assert outcome.refresh_runtime is True
+    assert "Updated (1)" in outcome.lines
+    assert any("weather" in line for line in outcome.lines)
+    assert "Already current (1)" in outcome.lines
+    assert any("notes" in line for line in outcome.lines)
+    assert "Skipped (1)" in outcome.lines
+    assert any("custom" in line for line in outcome.lines)
+    assert "Failed (0)" in outcome.lines
+    assert (weather_dir / "SKILL.md").read_text(encoding="utf-8") == "# Weather\n\nNew weather.\n"
+    assert json.loads((weather_dir / "_meta.json").read_text(encoding="utf-8"))["version"] == "1.0.0"
+    assert load_settings(project_root=project_root).skills.enabled_skill_ids == ("weather",)
+
+
+def test_update_all_continues_after_partial_failure(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root, settings = _load_temp_settings(
+        make_temp_project,
+        install_skill_bundles={
+            "weather": "# Weather\n\nOld weather.\n",
+            "notes": "# Notes\n\nOld notes.\n",
+        },
+    )
+    weather_dir = project_root / "skills" / "weather"
+    notes_dir = project_root / "skills" / "notes"
+    (weather_dir / "_meta.json").write_text('{"version": "0.9.0"}\n', encoding="utf-8")
+    (notes_dir / "_meta.json").write_text('{"version": "0.5.0"}\n', encoding="utf-8")
+
+    weather_entry = _catalog_entry(version="1.0.0")
+    notes_entry = _catalog_entry("notes", version="2.0.0")
+    base = catalog_base_url(
+        settings.catalog.url,
+        repository_owner=weather_entry.repository_owner or "",
+        repository_name=weather_entry.repository_name or "",
+    )
+    url_map = {f"{base}weather/SKILL.md": b"# Weather\n\nNew weather.\n"}
+
+    monkeypatch.setattr(
+        "unclaw.skills.manager.fetch_remote_catalog",
+        lambda url, **_: [weather_entry, notes_entry],
+    )
+
+    with _mock_urlopen(url_map):
+        outcome = run_skill_command(settings, action="update", skill_id="--all")
+
+    assert outcome.ok is False
+    assert "Updated (1)" in outcome.lines
+    assert "Failed (1)" in outcome.lines
+    assert any("notes" in line for line in outcome.lines)
+    assert (weather_dir / "SKILL.md").read_text(encoding="utf-8") == "# Weather\n\nNew weather.\n"
+    assert (notes_dir / "SKILL.md").read_text(encoding="utf-8") == "# Notes\n\nOld notes.\n"
 
 
 @pytest.mark.parametrize(
     ("raw_command", "expected_action", "expected_skill_id"),
     [
+        ("/skills search travel guide", "search", "travel guide"),
         ("/skills install weather", "install", "weather"),
         ("/skills enable weather", "enable", "weather"),
         ("/skills disable weather", "disable", "weather"),
         ("/skills remove weather", "remove", "weather"),
         ("/skills update weather", "update", "weather"),
+        ("/skills update --all", "update", "--all"),
     ],
 )
 def test_slash_skill_commands_delegate_to_shared_manager(
@@ -297,4 +439,3 @@ def test_slash_skill_commands_delegate_to_shared_manager(
 
     assert result.status is CommandStatus.OK
     assert captured == [(expected_action, expected_skill_id)]
-

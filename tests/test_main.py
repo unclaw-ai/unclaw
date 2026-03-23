@@ -212,6 +212,64 @@ def test_main_dispatches_skills_subcommand(monkeypatch, tmp_path: Path) -> None:
     assert captured["skill_id"] == "weather"
 
 
+def test_main_dispatches_skills_search(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_skills(
+        *,
+        project_root: Path | None = None,
+        action: str = "list",
+        skill_id: str | None = None,
+        output_func=print,
+    ) -> int:
+        del output_func
+        captured["project_root"] = project_root
+        captured["action"] = action
+        captured["skill_id"] = skill_id
+        return 90
+
+    monkeypatch.setattr(unclaw_main.skills_cli, "main", fake_skills)
+
+    assert (
+        unclaw_main.main(
+            ["--project-root", str(tmp_path), "skills", "search", "travel", "guide"]
+        )
+        == 90
+    )
+    assert captured["project_root"] == tmp_path
+    assert captured["action"] == "search"
+    assert captured["skill_id"] == "travel guide"
+
+
+def test_main_dispatches_skills_update_all(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_skills(
+        *,
+        project_root: Path | None = None,
+        action: str = "list",
+        skill_id: str | None = None,
+        output_func=print,
+    ) -> int:
+        del output_func
+        captured["project_root"] = project_root
+        captured["action"] = action
+        captured["skill_id"] = skill_id
+        return 91
+
+    monkeypatch.setattr(unclaw_main.skills_cli, "main", fake_skills)
+
+    assert (
+        unclaw_main.main(
+            ["--project-root", str(tmp_path), "skills", "update", "--all"]
+        )
+        == 91
+    )
+    assert captured["project_root"] == tmp_path
+    assert captured["action"] == "update"
+    assert captured["skill_id"] == "--all"
+
+
 def test_main_dispatches_update(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Path | None] = {}
 

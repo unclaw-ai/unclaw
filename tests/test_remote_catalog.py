@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import json
 import urllib.error
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from unclaw.core.command_handler import CommandHandler, CommandStatus
-from unclaw.settings import CatalogSettings, load_settings
+from unclaw.settings import load_settings
 from unclaw.skills.file_models import SkillBundle
 from unclaw.skills.manager import SkillCommandOutcome
 from unclaw.skills.remote_catalog import (
@@ -32,11 +31,12 @@ from unclaw.skills.remote_catalog import (
     SkillStatus,
     SkillStatusEntry,
     _compute_status,
-    _parse_catalog_payload,
     build_skill_status_report,
     fetch_remote_catalog,
     read_local_skill_version,
+    render_skill_search_results,
     render_skills_report,
+    search_skill_status_entries,
 )
 
 pytestmark = pytest.mark.unit
@@ -66,13 +66,16 @@ def _make_catalog_entry(
     skill_id: str,
     version: str = "1.0.0",
     display_name: str = "",
+    summary: str | None = None,
+    tags: tuple[str, ...] = (),
 ) -> RemoteCatalogEntry:
     return RemoteCatalogEntry(
         skill_id=skill_id,
         display_name=display_name or skill_id.replace("_", " ").title(),
         version=version,
-        summary=None,
+        summary=summary,
         repo_relative_path=f"skills/{skill_id}",
+        tags=tags,
     )
 
 
@@ -85,6 +88,8 @@ def _make_status_entry(
     available_in_catalog: bool = True,
     local_version: str | None = None,
     catalog_version: str | None = "1.0.0",
+    summary: str | None = None,
+    tags: tuple[str, ...] = (),
 ) -> SkillStatusEntry:
     return SkillStatusEntry(
         skill_id=skill_id,
@@ -96,6 +101,8 @@ def _make_status_entry(
         catalog_version=catalog_version,
         status=status,
         repo_relative_path=f"skills/{skill_id}",
+        summary=summary,
+        tags=tags,
     )
 
 
@@ -167,6 +174,27 @@ def test_fetch_parses_bare_list_format(monkeypatch) -> None:
     assert len(entries) == 1
     assert entries[0].skill_id == "git_repo"
     assert entries[0].version == "0.2.0"
+
+
+def test_fetch_parses_tags_for_search(monkeypatch) -> None:
+    payload = {
+        "skills": [
+            {
+                "skill_id": "travel_guide",
+                "display_name": "Travel Guide",
+                "version": "1.0.0",
+                "tags": ["maps", "planning"],
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "unclaw.skills.remote_catalog.urllib.request.urlopen",
+        _fake_urlopen(payload),
+    )
+
+    entries = fetch_remote_catalog("https://example.com/catalog.json")
+
+    assert entries[0].tags == ("maps", "planning")
 
 
 def test_fetch_raises_on_network_error(monkeypatch) -> None:
@@ -284,26 +312,27 @@ def test_read_version_strips_whitespace(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "installed,in_catalog,local_ver,catalog_ver,expected",
+    "installed,in_catalog,enabled,local_ver,catalog_ver,expected",
     [
-        (True, True, "1.0.0", "1.0.0", SkillStatus.INSTALLED),
-        (True, True, "1.0.0", "1.0.0", SkillStatus.INSTALLED),
-        (True, True, None, "1.0.0", SkillStatus.INSTALLED),   # no local ver → installed
-        (True, True, "1.0.0", None, SkillStatus.INSTALLED),   # no catalog ver → installed
-        (True, True, None, None, SkillStatus.INSTALLED),       # neither ver → installed
-        (True, True, "1.0.0", "2.0.0", SkillStatus.UPDATE),   # exact mismatch → update
-        (True, False, None, None, SkillStatus.LOCAL_UNTRACKED),
-        (True, False, "1.0.0", None, SkillStatus.LOCAL_UNTRACKED),
-        (False, True, None, "1.0.0", SkillStatus.AVAILABLE),
-        (False, True, None, None, SkillStatus.AVAILABLE),
+        (True, True, True, "1.0.0", "1.0.0", SkillStatus.ENABLED),
+        (True, True, False, "1.0.0", "1.0.0", SkillStatus.INSTALLED),
+        (True, True, False, None, "1.0.0", SkillStatus.INSTALLED),
+        (True, True, False, "1.0.0", None, SkillStatus.INSTALLED),
+        (True, True, False, "1.0.0", "2.0.0", SkillStatus.UPDATE),
+        (True, True, True, "1.0.0", "2.0.0", SkillStatus.UPDATE),
+        (True, False, False, None, None, SkillStatus.ORPHANED),
+        (True, False, True, "1.0.0", None, SkillStatus.ORPHANED),
+        (False, True, False, None, "1.0.0", SkillStatus.AVAILABLE),
+        (False, True, False, None, None, SkillStatus.AVAILABLE),
     ],
 )
 def test_compute_status_all_paths(
-    installed, in_catalog, local_ver, catalog_ver, expected
+    installed, in_catalog, enabled, local_ver, catalog_ver, expected
 ) -> None:
     result = _compute_status(
         installed_locally=installed,
         available_in_catalog=in_catalog,
+        enabled_locally=enabled,
         local_version=local_ver,
         catalog_version=catalog_ver,
     )
@@ -329,7 +358,7 @@ def test_build_report_installed_and_enabled(tmp_path: Path) -> None:
     assert r.installed_locally is True
     assert r.enabled_locally is True
     assert r.available_in_catalog is True
-    assert r.status is SkillStatus.INSTALLED
+    assert r.status is SkillStatus.ENABLED
     assert r.catalog_version == "0.1.0"
     assert r.local_version is None   # no _meta.json
 
@@ -377,7 +406,7 @@ def test_build_report_local_only_for_uncatalogued_skill(tmp_path: Path) -> None:
     r = report[0]
     assert r.installed_locally is True
     assert r.available_in_catalog is False
-    assert r.status is SkillStatus.LOCAL_UNTRACKED
+    assert r.status is SkillStatus.ORPHANED
 
 
 def test_build_report_update_when_versions_differ(tmp_path: Path) -> None:
@@ -416,6 +445,40 @@ def test_build_report_no_update_when_versions_match(tmp_path: Path) -> None:
     )
 
     assert report[0].status is SkillStatus.INSTALLED
+
+
+def test_build_report_no_update_when_local_version_is_newer(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path, "weather")
+    (tmp_path / "weather" / "_meta.json").write_text(
+        json.dumps({"version": "0.1.2"}),
+        encoding="utf-8",
+    )
+    entry = _make_catalog_entry("weather", version="0.1.1")
+
+    report = build_skill_status_report(
+        local_bundles=[bundle],
+        enabled_skill_ids=[],
+        catalog_entries=[entry],
+    )
+
+    assert report[0].status is SkillStatus.INSTALLED
+
+
+def test_build_report_tolerates_malformed_versions(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path, "weather")
+    (tmp_path / "weather" / "_meta.json").write_text(
+        json.dumps({"version": "dev-build"}),
+        encoding="utf-8",
+    )
+    entry = _make_catalog_entry("weather", version="1.0.0")
+
+    report = build_skill_status_report(
+        local_bundles=[bundle],
+        enabled_skill_ids=["weather"],
+        catalog_entries=[entry],
+    )
+
+    assert report[0].status is SkillStatus.ENABLED
 
 
 def test_build_report_union_covers_all_skill_ids(tmp_path: Path) -> None:
@@ -474,7 +537,7 @@ def test_build_report_uses_local_display_name_when_not_in_catalog(tmp_path: Path
 
 def test_render_shows_three_labeled_sections() -> None:
     entries = [
-        _make_status_entry("weather", status=SkillStatus.INSTALLED, enabled_locally=True),
+        _make_status_entry("weather", status=SkillStatus.ENABLED, enabled_locally=True),
         _make_status_entry(
             "new_skill",
             status=SkillStatus.AVAILABLE,
@@ -485,9 +548,11 @@ def test_render_shows_three_labeled_sections() -> None:
     lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
     text = "\n".join(lines)
 
+    assert "Enabled" in text
     assert "Installed" in text
     assert "Update" in text
     assert "Available" in text
+    assert "Orphaned" in text
     assert "weather" in text
     assert "new_skill" in text
     assert "https://example.com/catalog.json" in text
@@ -496,7 +561,7 @@ def test_render_shows_three_labeled_sections() -> None:
 def test_render_shows_none_in_empty_sections() -> None:
     lines = render_skills_report([], catalog_url="https://example.com/catalog.json")
     text = "\n".join(lines)
-    assert text.count("(none)") == 3
+    assert text.count("(none)") == 5
 
 
 def test_render_update_section_shows_both_versions() -> None:
@@ -520,7 +585,7 @@ def test_render_enabled_tag_present_when_enabled() -> None:
     entries = [
         _make_status_entry(
             "weather",
-            status=SkillStatus.INSTALLED,
+            status=SkillStatus.UPDATE,
             enabled_locally=True,
             local_version="0.1.0",
         )
@@ -545,7 +610,7 @@ def test_render_local_only_labelled() -> None:
     entries = [
         _make_status_entry(
             "custom",
-            status=SkillStatus.LOCAL_UNTRACKED,
+            status=SkillStatus.ORPHANED,
             available_in_catalog=False,
             catalog_version=None,
         )
@@ -553,8 +618,59 @@ def test_render_local_only_labelled() -> None:
     lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
     text = "\n".join(lines)
 
-    assert "[untracked]" in text
-    assert "Installed (1)" in text
+    assert "Orphaned (1)" in text
+
+
+def test_search_matches_skill_id_display_name_summary_and_tags() -> None:
+    entries = [
+        _make_status_entry(
+            "weather_plus",
+            status=SkillStatus.AVAILABLE,
+            installed_locally=False,
+            summary="Live weather forecasts.",
+            tags=("forecast", "weather"),
+        ),
+        _make_status_entry(
+            "calendar_sync",
+            status=SkillStatus.ENABLED,
+            enabled_locally=True,
+            summary="Calendar automation.",
+            tags=("productivity",),
+        ),
+    ]
+
+    assert [entry.skill_id for entry in search_skill_status_entries(entries, "weather_plus")] == [
+        "weather_plus"
+    ]
+    assert [entry.skill_id for entry in search_skill_status_entries(entries, "calendar")] == [
+        "calendar_sync"
+    ]
+    assert [entry.skill_id for entry in search_skill_status_entries(entries, "forecasts")] == [
+        "weather_plus"
+    ]
+    assert [entry.skill_id for entry in search_skill_status_entries(entries, "productivity")] == [
+        "calendar_sync"
+    ]
+
+
+def test_render_search_results_shows_status_and_summary() -> None:
+    entries = [
+        _make_status_entry(
+            "weather",
+            status=SkillStatus.UPDATE,
+            local_version="0.1.0",
+            catalog_version="0.2.0",
+            enabled_locally=True,
+            summary="Live weather forecasts.",
+        )
+    ]
+
+    lines = render_skill_search_results(entries, query="weather")
+    text = "\n".join(lines)
+
+    assert "Search results for 'weather' (1)" in text
+    assert "[update" in text
+    assert "Live weather forecasts." in text
 
 
 # ── unclaw skills CLI ─────────────────────────────────────────────────────────
@@ -570,7 +686,19 @@ def test_skills_cli_calls_output_and_returns_zero(monkeypatch) -> None:
         "unclaw.skills.cli.run_skill_command",
         lambda settings, action="list", skill_id=None: SkillCommandOutcome(
             ok=True,
-            lines=("Installed (0)", "", "Update (0)", "", "Available (1)"),
+            lines=(
+                "Skills Summary: 0 update, 0 enabled, 0 installed, 1 available, 0 orphaned",
+                "",
+                "Update (0)",
+                "",
+                "Enabled (0)",
+                "",
+                "Installed (0)",
+                "",
+                "Available (1)",
+                "",
+                "Orphaned (0)",
+            ),
         ),
     )
 
@@ -642,7 +770,19 @@ def test_slash_skills_returns_ok_and_three_sections(monkeypatch) -> None:
         "unclaw.skills.manager.run_skill_command",
         lambda settings, action="list", skill_id=None: SkillCommandOutcome(
             ok=True,
-            lines=("Installed (0)", "", "Update (0)", "", "Available (1)"),
+            lines=(
+                "Skills Summary: 0 update, 0 enabled, 0 installed, 1 available, 0 orphaned",
+                "",
+                "Update (0)",
+                "",
+                "Enabled (0)",
+                "",
+                "Installed (0)",
+                "",
+                "Available (1)",
+                "",
+                "Orphaned (0)",
+            ),
         ),
     )
 
@@ -655,9 +795,11 @@ def test_slash_skills_returns_ok_and_three_sections(monkeypatch) -> None:
 
     assert result.status is CommandStatus.OK
     combined = "\n".join(result.lines)
+    assert "Enabled" in combined
     assert "Installed" in combined
     assert "Update" in combined
     assert "Available" in combined
+    assert "Orphaned" in combined
 
 
 def test_slash_skills_returns_error_on_catalog_fetch_failure(monkeypatch) -> None:
@@ -709,7 +851,7 @@ def test_help_includes_skills_command() -> None:
     result = handler.handle("/help")
 
     assert result.status is CommandStatus.OK
-    assert "/skills  Show installed, available, and updatable skills." in result.lines
+    assert "/skills  Show enabled, installed, update, available, and orphaned skills." in result.lines
 
 
 # ── settings catalog defaults ─────────────────────────────────────────────────

@@ -42,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return skills_cli.main(
             project_root=project_root,
             action=args.skills_command or "list",
-            skill_id=getattr(args, "skill_id", None),
+            skill_id=_resolve_skills_argument(args),
         )
     if command_name == "update":
         return update_main(project_root=project_root)
@@ -64,8 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw logs\n"
             "  unclaw logs full\n"
             "  unclaw skills\n"
+            "  unclaw skills search weather\n"
             "  unclaw skills install weather\n"
             "  unclaw skills enable weather\n"
+            "  unclaw skills update --all\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
             "  unclaw telegram allow-latest\n"
@@ -154,9 +156,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills_parser = subparsers.add_parser(
         "skills",
-        help="List, install, enable, disable, remove, or update optional skills.",
+        help="Browse, search, install, enable, disable, remove, or update optional skills.",
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
+    search_parser = skills_subparsers.add_parser(
+        "search",
+        help="Search the skills hub by id, name, summary, or tags.",
+    )
+    search_parser.add_argument(
+        "query",
+        nargs="+",
+        help="Case-insensitive search query.",
+    )
     install_parser = skills_subparsers.add_parser(
         "install",
         help="Install one skill from the remote catalog into ./skills/<skill_id>.",
@@ -179,14 +190,34 @@ def build_parser() -> argparse.ArgumentParser:
     remove_parser.add_argument("skill_id", help="Installed skill id to remove.")
     update_parser = skills_subparsers.add_parser(
         "update",
-        help="Update one installed skill from the remote catalog.",
+        help="Update one installed skill, or every installed skill with --all.",
     )
-    update_parser.add_argument("skill_id", help="Installed skill id to update.")
+    update_parser.add_argument(
+        "skill_id",
+        nargs="?",
+        help="Installed skill id to update.",
+    )
+    update_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Update every installed skill that has a newer catalog version.",
+    )
     subparsers.add_parser(
         "update",
         help="Safely fetch and fast-forward this local checkout.",
     )
     return parser
+
+
+def _resolve_skills_argument(args: argparse.Namespace) -> str | None:
+    if getattr(args, "skills_command", None) == "search":
+        query_parts = getattr(args, "query", None)
+        if query_parts:
+            return " ".join(query_parts)
+        return None
+    if getattr(args, "skills_command", None) == "update" and getattr(args, "all", False):
+        return "--all"
+    return getattr(args, "skill_id", None)
 
 
 if __name__ == "__main__":

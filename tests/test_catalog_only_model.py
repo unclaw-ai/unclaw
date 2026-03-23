@@ -1,11 +1,4 @@
-"""Tests for the catalog-only skill status model.
-
-Covers:
-- SkillStatus enum values (no "bundled" status)
-- build_skill_status_report correctly computes status for all combinations
-- render_skills_report output matches the new model
-- /skills command output via command_handler
-"""
+"""Tests for the catalog-backed skills hub status model."""
 
 from __future__ import annotations
 
@@ -24,32 +17,24 @@ from unclaw.skills.remote_catalog import (
 pytestmark = pytest.mark.unit
 
 
-# ---------------------------------------------------------------------------
-# SkillStatus enum — no "bundled" status
-# ---------------------------------------------------------------------------
-
-
 def test_skill_status_enum_has_no_bundled_value() -> None:
-    names = {s.name for s in SkillStatus}
+    names = {status.name for status in SkillStatus}
     assert "BUNDLED" not in names
-    assert "LOCAL_ONLY" not in names  # renamed to LOCAL_UNTRACKED
+    assert "LOCAL_ONLY" not in names
 
 
 def test_skill_status_enum_has_required_values() -> None:
-    values = {s.value for s in SkillStatus}
+    values = {status.value for status in SkillStatus}
+    assert "enabled" in values
     assert "installed" in values
     assert "available" in values
     assert "update" in values
-    assert "local_untracked" in values
+    assert "orphaned" in values
 
-
-# ---------------------------------------------------------------------------
-# build_skill_status_report — status computation
-# ---------------------------------------------------------------------------
 
 def _make_bundle(skill_id: str, *, bundle_dir: Path) -> object:
-    """Create a minimal SkillBundle-like stub via file_loader for testing."""
     from unclaw.skills.file_loader import load_skill_bundle
+
     skill_md = bundle_dir / skill_id / "SKILL.md"
     skill_md.parent.mkdir(parents=True, exist_ok=True)
     skill_md.write_text(f"# {skill_id.title()}\n\nSkill.\n", encoding="utf-8")
@@ -66,18 +51,20 @@ def test_skill_in_catalog_but_not_installed_is_available(tmp_path: Path) -> None
             repo_relative_path="weather",
         )
     ]
+
     report = build_skill_status_report(
         local_bundles=[],
         enabled_skill_ids=[],
         catalog_entries=catalog,
     )
+
     assert len(report) == 1
     assert report[0].status is SkillStatus.AVAILABLE
     assert not report[0].installed_locally
     assert not report[0].enabled_locally
 
 
-def test_skill_installed_and_in_catalog_is_installed(tmp_path: Path) -> None:
+def test_enabled_skill_in_catalog_is_enabled(tmp_path: Path) -> None:
     bundle = _make_bundle("weather", bundle_dir=tmp_path)
     catalog = [
         RemoteCatalogEntry(
@@ -88,21 +75,23 @@ def test_skill_installed_and_in_catalog_is_installed(tmp_path: Path) -> None:
             repo_relative_path="weather",
         )
     ]
+
     report = build_skill_status_report(
         local_bundles=[bundle],  # type: ignore[list-item]
         enabled_skill_ids=["weather"],
         catalog_entries=catalog,
     )
-    assert report[0].status is SkillStatus.INSTALLED
+
+    assert report[0].status is SkillStatus.ENABLED
     assert report[0].installed_locally
     assert report[0].enabled_locally
 
 
 def test_skill_installed_with_different_version_is_update(tmp_path: Path) -> None:
-    # Write _meta.json with local version
     bundle = _make_bundle("weather", bundle_dir=tmp_path)
     (tmp_path / "weather" / "_meta.json").write_text(
-        '{"version": "0.9.0"}', encoding="utf-8"
+        '{"version": "0.9.0"}',
+        encoding="utf-8",
     )
     catalog = [
         RemoteCatalogEntry(
@@ -113,47 +102,56 @@ def test_skill_installed_with_different_version_is_update(tmp_path: Path) -> Non
             repo_relative_path="weather",
         )
     ]
+
     report = build_skill_status_report(
         local_bundles=[bundle],  # type: ignore[list-item]
         enabled_skill_ids=[],
         catalog_entries=catalog,
     )
+
     assert report[0].status is SkillStatus.UPDATE
     assert report[0].local_version == "0.9.0"
     assert report[0].catalog_version == "1.0.0"
 
 
-def test_skill_installed_but_not_in_catalog_is_local_untracked(tmp_path: Path) -> None:
+def test_skill_installed_but_not_in_catalog_is_orphaned(tmp_path: Path) -> None:
     bundle = _make_bundle("custom_skill", bundle_dir=tmp_path)
+
     report = build_skill_status_report(
         local_bundles=[bundle],  # type: ignore[list-item]
         enabled_skill_ids=[],
         catalog_entries=[],
     )
-    assert report[0].status is SkillStatus.LOCAL_UNTRACKED
+
+    assert report[0].status is SkillStatus.ORPHANED
     assert report[0].installed_locally
 
 
 def test_report_is_sorted_alphabetically(tmp_path: Path) -> None:
     catalog = [
         RemoteCatalogEntry(
-            skill_id="zebra", display_name="Zebra", version=None,
-            summary=None, repo_relative_path="zebra",
+            skill_id="zebra",
+            display_name="Zebra",
+            version=None,
+            summary=None,
+            repo_relative_path="zebra",
         ),
         RemoteCatalogEntry(
-            skill_id="alpha", display_name="Alpha", version=None,
-            summary=None, repo_relative_path="alpha",
+            skill_id="alpha",
+            display_name="Alpha",
+            version=None,
+            summary=None,
+            repo_relative_path="alpha",
         ),
     ]
+
     report = build_skill_status_report(
-        local_bundles=[], enabled_skill_ids=[], catalog_entries=catalog,
+        local_bundles=[],
+        enabled_skill_ids=[],
+        catalog_entries=catalog,
     )
-    assert [e.skill_id for e in report] == ["alpha", "zebra"]
 
-
-# ---------------------------------------------------------------------------
-# render_skills_report
-# ---------------------------------------------------------------------------
+    assert [entry.skill_id for entry in report] == ["alpha", "zebra"]
 
 
 def _make_status_entry(
@@ -167,9 +165,9 @@ def _make_status_entry(
     return SkillStatusEntry(
         skill_id=skill_id,
         display_name=skill_id.title(),
-        installed_locally=status in (SkillStatus.INSTALLED, SkillStatus.UPDATE, SkillStatus.LOCAL_UNTRACKED),
+        installed_locally=status is not SkillStatus.AVAILABLE,
         enabled_locally=enabled,
-        available_in_catalog=status in (SkillStatus.INSTALLED, SkillStatus.AVAILABLE, SkillStatus.UPDATE),
+        available_in_catalog=status is not SkillStatus.ORPHANED,
         local_version=local_version,
         catalog_version=catalog_version,
         status=status,
@@ -177,70 +175,41 @@ def _make_status_entry(
     )
 
 
-def test_render_report_installed_section() -> None:
-    entries = [_make_status_entry("weather", status=SkillStatus.INSTALLED, enabled=True)]
-    lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
-
-    installed_lines = [l for l in lines if "weather" in l.lower() and "installed" not in l.lower()]
-    assert any("weather" in l for l in lines)
-    assert any("[enabled]" in l for l in lines)
-    assert any("Installed (1)" in l for l in lines)
-
-
-def test_render_report_available_section() -> None:
-    entries = [_make_status_entry("weather", status=SkillStatus.AVAILABLE)]
-    lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
-
-    assert any("Available (1)" in l for l in lines)
-    assert any("weather" in l for l in lines)
-
-
-def test_render_report_update_section() -> None:
+def test_render_report_sections_cover_all_user_facing_groups() -> None:
     entries = [
-        _make_status_entry(
-            "weather",
-            status=SkillStatus.UPDATE,
-            local_version="0.9",
-            catalog_version="1.0",
-        )
+        _make_status_entry("weather", status=SkillStatus.ENABLED, enabled=True),
+        _make_status_entry("notes", status=SkillStatus.INSTALLED),
+        _make_status_entry("calendar", status=SkillStatus.UPDATE, local_version="1", catalog_version="2"),
+        _make_status_entry("maps", status=SkillStatus.AVAILABLE, catalog_version="1"),
+        _make_status_entry("custom", status=SkillStatus.ORPHANED),
     ]
+
     lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
+    text = "\n".join(lines)
 
-    assert any("Update (1)" in l for l in lines)
-    assert any("0.9" in l for l in lines)
-    assert any("1.0" in l for l in lines)
-
-
-def test_render_report_local_untracked_shows_untracked_label() -> None:
-    entries = [_make_status_entry("custom", status=SkillStatus.LOCAL_UNTRACKED)]
-    lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
-
-    assert any("[untracked]" in l for l in lines)
-    # No "bundled" label anywhere
-    assert not any("bundled" in l.lower() for l in lines)
+    assert "Enabled (1)" in text
+    assert "Installed (1)" in text
+    assert "Update (1)" in text
+    assert "Available (1)" in text
+    assert "Orphaned (1)" in text
 
 
 def test_render_report_no_bundled_wording_anywhere() -> None:
-    """The rendered report must not contain the word 'bundled'."""
-    entries = [
-        _make_status_entry("a", status=SkillStatus.INSTALLED, enabled=True),
-        _make_status_entry("b", status=SkillStatus.AVAILABLE),
-        _make_status_entry("c", status=SkillStatus.UPDATE, local_version="1", catalog_version="2"),
-        _make_status_entry("d", status=SkillStatus.LOCAL_UNTRACKED),
-    ]
-    lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
+    lines = render_skills_report([], catalog_url="https://example.com/catalog.json")
     full_text = "\n".join(lines).lower()
     assert "bundled" not in full_text
 
 
 def test_render_report_shows_catalog_url() -> None:
     lines = render_skills_report([], catalog_url="https://example.com/catalog.json")
-    assert any("https://example.com/catalog.json" in l for l in lines)
+    assert any("https://example.com/catalog.json" in line for line in lines)
 
 
 def test_render_report_empty_sections_show_none() -> None:
     lines = render_skills_report([], catalog_url="https://example.com/catalog.json")
-    assert any("(none)" in l for l in lines)
-    assert any("Installed (0)" in l for l in lines)
-    assert any("Available (0)" in l for l in lines)
-    assert any("Update (0)" in l for l in lines)
+    assert sum(1 for line in lines if "(none)" in line) == 5
+    assert any("Enabled (0)" in line for line in lines)
+    assert any("Installed (0)" in line for line in lines)
+    assert any("Available (0)" in line for line in lines)
+    assert any("Update (0)" in line for line in lines)
+    assert any("Orphaned (0)" in line for line in lines)

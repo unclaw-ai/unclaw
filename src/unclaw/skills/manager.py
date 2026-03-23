@@ -14,18 +14,22 @@ from unclaw.skills.bundle_tools import clear_skill_tool_module_cache
 from unclaw.skills.file_loader import discover_skill_bundles
 from unclaw.skills.file_models import SkillBundle, clear_skill_bundle_cache
 from unclaw.skills.installer import SkillInstallError, install_skill
-from unclaw.skills.remote_catalog import (
-    CatalogFetchError,
-    RemoteCatalogEntry,
+from unclaw.skills.remote_catalog import CatalogFetchError, RemoteCatalogEntry, fetch_remote_catalog
+from unclaw.skills.status import (
+    SkillStatus,
+    SkillStatusEntry,
     build_skill_status_report,
-    fetch_remote_catalog,
     read_local_skill_version,
+    render_skill_search_results,
     render_skills_report,
+    search_skill_status_entries,
 )
+from unclaw.skills.versioning import VersionComparison, compare_versions
 
 _SKILL_ACTIONS = frozenset(
-    {"list", "install", "enable", "disable", "remove", "update"}
+    {"list", "search", "install", "enable", "disable", "remove", "update"}
 )
+_BULK_UPDATE_SENTINEL = "--all"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,13 +42,22 @@ class SkillCommandOutcome:
     refresh_runtime: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _SkillCatalogSnapshot:
+    """Single-fetch view of catalog entries plus computed hub status."""
+
+    catalog_entries: tuple[RemoteCatalogEntry, ...]
+    status_entries: tuple[SkillStatusEntry, ...]
+
+
 def run_skill_command(
     settings: Settings,
     *,
     action: str = "list",
     skill_id: str | None = None,
 ) -> SkillCommandOutcome:
-    """Run one skill lifecycle command using the shared catalog-only model."""
+    """Run one skills hub command using the shared catalog-only model."""
+
     normalized_action = action.strip().lower()
     if normalized_action not in _SKILL_ACTIONS:
         return SkillCommandOutcome(
@@ -55,24 +68,29 @@ def run_skill_command(
     if normalized_action == "list":
         return _list_skills(settings)
 
-    normalized_skill_id = (skill_id or "").strip()
-    if not normalized_skill_id:
-        return SkillCommandOutcome(
-            ok=False,
-            lines=("A skill id is required.",),
-        )
+    normalized_argument = (skill_id or "").strip()
+    if normalized_action == "search":
+        if not normalized_argument:
+            return SkillCommandOutcome(ok=False, lines=("A search query is required.",))
+        return _search_skills(settings, normalized_argument)
+
+    if normalized_action == "update" and normalized_argument == _BULK_UPDATE_SENTINEL:
+        return _update_all_skills(settings)
+
+    if not normalized_argument:
+        return SkillCommandOutcome(ok=False, lines=("A skill id is required.",))
 
     match normalized_action:
         case "install":
-            return _install_skill(settings, normalized_skill_id)
+            return _install_skill(settings, normalized_argument)
         case "enable":
-            return _enable_skill(settings, normalized_skill_id)
+            return _enable_skill(settings, normalized_argument)
         case "disable":
-            return _disable_skill(settings, normalized_skill_id)
+            return _disable_skill(settings, normalized_argument)
         case "remove":
-            return _remove_skill(settings, normalized_skill_id)
+            return _remove_skill(settings, normalized_argument)
         case "update":
-            return _update_skill(settings, normalized_skill_id)
+            return _update_skill(settings, normalized_argument)
         case _:
             return SkillCommandOutcome(
                 ok=False,
@@ -81,20 +99,30 @@ def run_skill_command(
 
 
 def _list_skills(settings: Settings) -> SkillCommandOutcome:
-    try:
-        catalog_entries = fetch_remote_catalog(settings.catalog.url)
-    except CatalogFetchError as exc:
-        return SkillCommandOutcome(ok=False, lines=_catalog_fetch_error_lines(exc))
+    snapshot = _load_catalog_snapshot(settings)
+    if isinstance(snapshot, SkillCommandOutcome):
+        return snapshot
 
-    local_bundles = discover_skill_bundles(skills_root=_skills_root(settings))
-    entries = build_skill_status_report(
-        local_bundles=local_bundles,
-        enabled_skill_ids=settings.skills.enabled_skill_ids,
-        catalog_entries=catalog_entries,
-    )
     return SkillCommandOutcome(
         ok=True,
-        lines=tuple(render_skills_report(entries, catalog_url=settings.catalog.url)),
+        lines=tuple(
+            render_skills_report(
+                snapshot.status_entries,
+                catalog_url=settings.catalog.url,
+            )
+        ),
+    )
+
+
+def _search_skills(settings: Settings, query: str) -> SkillCommandOutcome:
+    snapshot = _load_catalog_snapshot(settings)
+    if isinstance(snapshot, SkillCommandOutcome):
+        return snapshot
+
+    matches = search_skill_status_entries(snapshot.status_entries, query)
+    return SkillCommandOutcome(
+        ok=True,
+        lines=tuple(render_skill_search_results(matches, query=query)),
     )
 
 
@@ -251,29 +279,29 @@ def _update_skill(settings: Settings, skill_id: str) -> SkillCommandOutcome:
         return entry
 
     local_version = read_local_skill_version(bundle.bundle_dir)
-    if not _update_is_needed(local_version, entry.version):
+    comparison = compare_versions(local_version, entry.version)
+    if comparison in {VersionComparison.EQUAL, VersionComparison.LOCAL_NEWER}:
         return SkillCommandOutcome(
             ok=True,
-            lines=(f"Skill '{skill_id}' is already up to date.",),
+            lines=(f"Skill '{skill_id}' is already current.",),
         )
 
-    skills_root = _skills_root(settings)
-    was_enabled = skill_id in settings.skills.enabled_skill_ids
     try:
         _replace_bundle_from_catalog(settings, entry)
-        _invalidate_skill_runtime_cache(skills_root, skill_id)
-    except SkillInstallError as exc:
-        return SkillCommandOutcome(
-            ok=False,
-            lines=(f"Could not update '{skill_id}'.", str(exc)),
-        )
-    except OSError as exc:
+        _invalidate_skill_runtime_cache(_skills_root(settings), skill_id)
+    except (SkillInstallError, OSError) as exc:
         return SkillCommandOutcome(
             ok=False,
             lines=(f"Could not update '{skill_id}'.", str(exc)),
         )
 
-    lines = [f"Updated '{skill_id}' to {entry.version or 'the catalog version'}."]
+    was_enabled = skill_id in settings.skills.enabled_skill_ids
+    if comparison is VersionComparison.UNKNOWN:
+        lines = [
+            f"Refreshed '{skill_id}' from the catalog because version comparison was inconclusive.",
+        ]
+    else:
+        lines = [f"Updated '{skill_id}' to {entry.version or 'the catalog version'}."]
     if was_enabled:
         lines.append(f"'{skill_id}' stayed enabled.")
     return SkillCommandOutcome(
@@ -283,16 +311,114 @@ def _update_skill(settings: Settings, skill_id: str) -> SkillCommandOutcome:
     )
 
 
+def _update_all_skills(settings: Settings) -> SkillCommandOutcome:
+    snapshot = _load_catalog_snapshot(settings)
+    if isinstance(snapshot, SkillCommandOutcome):
+        return snapshot
+
+    installed_entries = [
+        entry for entry in snapshot.status_entries if entry.installed_locally
+    ]
+    if not installed_entries:
+        return SkillCommandOutcome(
+            ok=True,
+            lines=("No installed skills found in ./skills/.",),
+        )
+
+    catalog_by_id = {entry.skill_id: entry for entry in snapshot.catalog_entries}
+    updated: list[str] = []
+    already_current: list[str] = []
+    skipped: list[str] = []
+    failed: list[str] = []
+    refresh_runtime = False
+
+    for entry in installed_entries:
+        if entry.status is SkillStatus.ORPHANED:
+            skipped.append(f"{entry.skill_id:<22}  not in current catalog")
+            continue
+
+        catalog_entry = catalog_by_id.get(entry.skill_id)
+        if catalog_entry is None:
+            skipped.append(f"{entry.skill_id:<22}  not in current catalog")
+            continue
+
+        if entry.version_comparison is VersionComparison.CATALOG_NEWER:
+            try:
+                _replace_bundle_from_catalog(settings, catalog_entry)
+                _invalidate_skill_runtime_cache(_skills_root(settings), entry.skill_id)
+            except (SkillInstallError, OSError) as exc:
+                failed.append(f"{entry.skill_id:<22}  {exc}")
+                continue
+
+            enabled_suffix = " [enabled]" if entry.enabled_locally else ""
+            updated.append(
+                f"{entry.skill_id:<22}  {entry.local_version or '?'} -> {catalog_entry.version or '?'}{enabled_suffix}"
+            )
+            refresh_runtime = refresh_runtime or entry.enabled_locally
+            continue
+
+        if entry.version_comparison in {
+            VersionComparison.EQUAL,
+            VersionComparison.LOCAL_NEWER,
+        }:
+            version_text = entry.local_version or entry.catalog_version or "?"
+            already_current.append(f"{entry.skill_id:<22}  {version_text}")
+            continue
+
+        skipped.append(
+            f"{entry.skill_id:<22}  could not compare local {entry.local_version or '?'} "
+            f"to catalog {catalog_entry.version or '?'}"
+        )
+
+    lines = _render_bulk_update_summary(
+        updated=updated,
+        already_current=already_current,
+        skipped=skipped,
+        failed=failed,
+    )
+    return SkillCommandOutcome(
+        ok=not failed,
+        lines=lines,
+        refresh_runtime=refresh_runtime,
+    )
+
+
+def _load_catalog_snapshot(
+    settings: Settings,
+) -> _SkillCatalogSnapshot | SkillCommandOutcome:
+    catalog_entries = _load_catalog_entries(settings)
+    if isinstance(catalog_entries, SkillCommandOutcome):
+        return catalog_entries
+
+    status_entries = build_skill_status_report(
+        local_bundles=discover_skill_bundles(skills_root=_skills_root(settings)),
+        enabled_skill_ids=settings.skills.enabled_skill_ids,
+        catalog_entries=catalog_entries,
+    )
+    return _SkillCatalogSnapshot(
+        catalog_entries=tuple(catalog_entries),
+        status_entries=tuple(status_entries),
+    )
+
+
+def _load_catalog_entries(
+    settings: Settings,
+) -> tuple[RemoteCatalogEntry, ...] | SkillCommandOutcome:
+    try:
+        return tuple(fetch_remote_catalog(settings.catalog.url))
+    except CatalogFetchError as exc:
+        return SkillCommandOutcome(ok=False, lines=_catalog_fetch_error_lines(exc))
+
+
 def _find_catalog_entry(
     settings: Settings,
     skill_id: str,
 ) -> RemoteCatalogEntry | SkillCommandOutcome:
-    try:
-        entries = fetch_remote_catalog(settings.catalog.url)
-    except CatalogFetchError as exc:
-        return SkillCommandOutcome(ok=False, lines=_catalog_fetch_error_lines(exc))
+    catalog_entries = _load_catalog_entries(settings)
+    if isinstance(catalog_entries, SkillCommandOutcome):
+        return catalog_entries
 
-    for entry in entries:
+    for entry in catalog_entries:
         if entry.skill_id == skill_id:
             return entry
 
@@ -434,10 +560,29 @@ def _already_installed_message(skill_id: str, version: str | None) -> str:
     return f"Skill '{skill_id}' is already installed."
 
 
-def _update_is_needed(local_version: str | None, catalog_version: str | None) -> bool:
-    if local_version is None or catalog_version is None:
-        return False
-    return local_version != catalog_version
+def _render_bulk_update_summary(
+    *,
+    updated: list[str],
+    already_current: list[str],
+    skipped: list[str],
+    failed: list[str],
+) -> tuple[str, ...]:
+    lines = ["Bulk update summary", ""]
+    sections = (
+        ("Updated", updated),
+        ("Already current", already_current),
+        ("Skipped", skipped),
+        ("Failed", failed),
+    )
+    for index, (label, items) in enumerate(sections):
+        lines.append(f"{label} ({len(items)})")
+        if items:
+            lines.extend(f"  {item}" for item in items)
+        else:
+            lines.append("  (none)")
+        if index != len(sections) - 1:
+            lines.append("")
+    return tuple(lines)
 
 
 def _skills_root(settings: Settings) -> Path:

@@ -336,6 +336,9 @@ class CommandHandler:
         if not arguments:
             action = "list"
             skill_id = None
+        elif arguments[0] == "search" and len(arguments) >= 2:
+            action = "search"
+            skill_id = " ".join(arguments[1:])
         elif len(arguments) == 2 and arguments[0] in {
             "install",
             "enable",
@@ -344,8 +347,13 @@ class CommandHandler:
             "update",
         }:
             action, skill_id = arguments
+        elif arguments == ("update", "--all"):
+            action = "update"
+            skill_id = "--all"
         else:
-            return self._usage("/skills [install|enable|disable|remove|update] <skill_id>")
+            return self._usage(
+                "/skills [search <query>|install|enable|disable|remove|update <skill_id>|update --all]"
+            )
 
         outcome = run_skill_command(self.settings, action=action, skill_id=skill_id)
         if outcome.updated_settings is not None:
@@ -402,12 +410,14 @@ class CommandHandler:
             "/search <query>  Search the public web, ground the answer, and append compact sources.",
             "",
             "Skills:",
-            "/skills  Show installed, available, and updatable skills.",
+            "/skills  Show enabled, installed, update, available, and orphaned skills.",
+            "/skills search <query>  Search skills by id, name, summary, or tags.",
             "/skills install <skill_id>  Install one skill from the catalog.",
             "/skills enable <skill_id>  Enable one installed skill.",
             "/skills disable <skill_id>  Disable one enabled skill.",
             "/skills remove <skill_id>  Remove one installed skill bundle.",
             "/skills update <skill_id>  Update one installed skill.",
+            "/skills update --all  Update every installed skill that has a newer catalog version.",
             "",
             "Memory:",
             "/session  Show the current session state.",
