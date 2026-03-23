@@ -131,6 +131,7 @@ def _run_iterative_retrieval(
     query: _SearchQuery,
     timeout_seconds: float,
     budget: _RetrievalBudget,
+    page_text_collector: dict[str, tuple[str, str]] | None = None,
 ) -> _RetrievalOutcome:
     queue: list[_SearchCandidate] = []
     considered_candidate_urls: set[str] = set()
@@ -217,6 +218,10 @@ def _run_iterative_retrieval(
             page_key = candidate_key
 
         source_title = _select_source_title(page.title, candidate.title, candidate.anchor_text)
+
+        # Collect page text for research pipeline when requested.
+        if page_text_collector is not None and page.text:
+            page_text_collector[page.resolved_url] = (source_title, page.text)
         evidence_candidates = _extract_page_evidence(
             text=page.text,
             title=source_title,

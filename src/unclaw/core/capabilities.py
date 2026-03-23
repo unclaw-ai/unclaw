@@ -30,7 +30,11 @@ from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
-from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+from unclaw.tools.web_tools import (
+    FAST_WEB_SEARCH_DEFINITION,
+    FETCH_URL_TEXT_DEFINITION,
+    SEARCH_WEB_DEFINITION,
+)
 
 _LONG_TERM_MEMORY_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -77,6 +81,7 @@ class RuntimeCapabilitySummary:
     session_history_recall_available: bool = False
     long_term_memory_available: bool = False
     shell_command_execution_available: bool = False
+    fast_web_search_available: bool = False
 
     @property
     def enabled_builtin_tool_count(self) -> int:
@@ -119,6 +124,9 @@ def build_runtime_capability_summary(
         ),
         long_term_memory_available=bool(
             _LONG_TERM_MEMORY_TOOL_NAMES & available_tool_name_set
+        ),
+        fast_web_search_available=(
+            FAST_WEB_SEARCH_DEFINITION.name in available_tool_name_set
         ),
     )
 

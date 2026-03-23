@@ -200,7 +200,24 @@ class SearchEvidencePayload(TypedDict):
     supporting_titles: list[str]
 
 
-class SearchWebPayload(TypedDict):
+class ResearchSourceNotePayload(TypedDict, total=False):
+    """One per-source condensed note in the research pipeline payload."""
+
+    url: str
+    title: str
+    condensed_text: str
+    model_generated: bool
+
+
+class ResearchMergedNotePayload(TypedDict, total=False):
+    """The merged research note in the research pipeline payload."""
+
+    text: str
+    source_count: int
+    model_generated: bool
+
+
+class SearchWebPayload(TypedDict, total=False):
     """Formal schema for the search_web tool result payload.
 
     Produced by web_tools.search_web(), consumed by search_grounding
@@ -223,9 +240,25 @@ class SearchWebPayload(TypedDict):
     synthesized_findings: list[SearchFindingPayload]
     results: list[SearchResultSourcePayload]
     evidence: list[SearchEvidencePayload]
+    # Research pipeline enrichment (present when research pipeline runs)
+    research_source_notes: list[ResearchSourceNotePayload]
+    research_merged_note: ResearchMergedNotePayload
+    research_model_driven: bool
+
+
+class FastSearchWebPayload(TypedDict, total=False):
+    """Payload for the fast_web_search entity grounding tool."""
+
+    query: str
+    provider: str
+    result_count: int
+    grounding_note: str
 
 
 __all__ = [
+    "FastSearchWebPayload",
+    "ResearchMergedNotePayload",
+    "ResearchSourceNotePayload",
     "SearchDisplaySourcePayload",
     "SearchEvidencePayload",
     "SearchFindingPayload",

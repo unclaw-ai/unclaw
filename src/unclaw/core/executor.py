@@ -33,6 +33,7 @@ from unclaw.tools.terminal_tools import (
     register_terminal_tools,
 )
 from unclaw.tools.web_tools import (
+    FAST_WEB_SEARCH_DEFINITION,
     FETCH_URL_TEXT_DEFINITION,
     SEARCH_WEB_DEFINITION,
     register_web_tools,
@@ -84,9 +85,36 @@ def create_default_tool_registry(
                 settings.app.security.tools.files.allow_destructive_file_overwrite
             ),
         )
+        from unclaw.tools.web_research import (
+            MAIN_RESEARCH_BUDGET,
+            ResearchConfig,
+            resolve_research_budget,
+        )
+
+        # Resolve research budget from active model pack.
+        _active_pack = getattr(settings, "active_model_pack", "")
+        _profile_ctx = 8192  # safe default
+        try:
+            from unclaw.model_packs import get_model_pack_profiles
+
+            _pack_profiles = get_model_pack_profiles(_active_pack)
+            _main_profile = _pack_profiles.get("main")
+            if _main_profile and _main_profile.num_ctx:
+                _profile_ctx = _main_profile.num_ctx
+        except (ValueError, KeyError):
+            pass
+
+        _research_budget = resolve_research_budget(
+            effective_context=_profile_ctx,
+            profile_name="main",
+        )
+        _research_config = ResearchConfig(settings=settings)
+
         register_web_tools(
             registry,
             allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
+            research_config=_research_config,
+            research_budget=_research_budget,
         )
         register_active_skill_tools(
             registry,
@@ -158,6 +186,7 @@ def execute_tool_call(
 __all__ = [
     "BUILTIN_TOOL_COMMANDS",
     "DELETE_FILE_DEFINITION",
+    "FAST_WEB_SEARCH_DEFINITION",
     "FORGET_LONG_TERM_MEMORY_DEFINITION",
     "INSPECT_SESSION_HISTORY_DEFINITION",
     "LIST_LONG_TERM_MEMORY_DEFINITION",

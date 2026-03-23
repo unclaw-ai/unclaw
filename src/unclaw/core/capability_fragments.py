@@ -27,7 +27,11 @@ from unclaw.tools.long_term_memory_tools import (
 from unclaw.tools.session_tools import INSPECT_SESSION_HISTORY_DEFINITION
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.terminal_tools import RUN_TERMINAL_COMMAND_DEFINITION
-from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+from unclaw.tools.web_tools import (
+    FAST_WEB_SEARCH_DEFINITION,
+    FETCH_URL_TEXT_DEFINITION,
+    SEARCH_WEB_DEFINITION,
+)
 
 _MODULE_REFERENCE = "unclaw.core.capability_fragments"
 _LONG_TERM_MEMORY_TOOL_NAMES = (
@@ -59,6 +63,7 @@ class CapabilitySummaryLike(Protocol):
     local_file_write_available: bool
     session_history_recall_available: bool
     long_term_memory_available: bool
+    fast_web_search_available: bool
 
 
 class CapabilityFragmentKind(StrEnum):
@@ -100,6 +105,7 @@ class CapabilitySummaryFlag(StrEnum):
     LOCAL_FILE_WRITE_AVAILABLE = "local_file_write_available"
     SESSION_HISTORY_RECALL_AVAILABLE = "session_history_recall_available"
     LONG_TERM_MEMORY_AVAILABLE = "long_term_memory_available"
+    FAST_WEB_SEARCH_AVAILABLE = "fast_web_search_available"
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,6 +519,13 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "available.session_memory_summary",
             "Session memory and summary access.",
         ),
+        "available.fast_web_search": _static_prompt(
+            "available.fast_web_search",
+            "fast_web_search <query>: quick lightweight web grounding probe. "
+            "Use before full search_web when unsure about a person, place, "
+            "organization, or product name. Returns a tiny grounding note, "
+            "not a full answer.",
+        ),
         "unavailable.local_file_read": _static_prompt(
             "unavailable.local_file_read",
             "Local file read via /read <path>.",
@@ -614,14 +627,27 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "guidance.model_callable.web_choice.full",
             "Use search_web for up-to-date external information. Use fetch_url_text "
             "for a specific public URL.",
+            "For live public facts (events, people, news, weather, scores), prefer "
+            "search_web over run_terminal_command with curl/wget.",
         ),
         "guidance.model_callable.web_choice.search_only": _static_prompt(
             "guidance.model_callable.web_choice.search_only",
             "Use search_web for up-to-date external information.",
+            "For live public facts (events, people, news, weather, scores), prefer "
+            "search_web over run_terminal_command with curl/wget.",
         ),
         "guidance.model_callable.web_choice.fetch_only": _static_prompt(
             "guidance.model_callable.web_choice.fetch_only",
             "Use fetch_url_text for a specific public URL.",
+        ),
+        "guidance.model_callable.fast_web_grounding": _static_prompt(
+            "guidance.model_callable.fast_web_grounding",
+            "When unsure about a person, place, organization, or product name, "
+            "use fast_web_search first for a quick grounding probe before "
+            "launching a full search_web. This prevents silently substituting "
+            "an unknown entity with a more famous wrong one.",
+            "fast_web_search is very fast and cheap — use it liberally for "
+            "entity resolution before committing to a full research flow.",
         ),
         "guidance.model_callable.session_history": _static_prompt(
             "guidance.model_callable.session_history",
@@ -899,6 +925,22 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
         ),
         related_builtin_tool_names=_LONG_TERM_MEMORY_TOOL_NAMES,
         related_summary_flags=(CapabilitySummaryFlag.LONG_TERM_MEMORY_AVAILABLE,),
+    ),
+    _fragment(
+        fragment_id="available.fast_web_search",
+        capability_id="fast_web_search",
+        name="Available fast_web_search tool line",
+        kind=CapabilityFragmentKind.AVAILABLE_TOOL,
+        prompt_symbol="_build_available_tool_lines",
+        prompt_detail="fast_web_search",
+        availability=CapabilityAvailability(
+            required_summary_flags=(
+                CapabilitySummaryFlag.FAST_WEB_SEARCH_AVAILABLE,
+            ),
+        ),
+        related_builtin_tool_names=(FAST_WEB_SEARCH_DEFINITION.name,),
+        related_summary_flags=(CapabilitySummaryFlag.FAST_WEB_SEARCH_AVAILABLE,),
+        description="Expose fast_web_search when registered.",
     ),
     _fragment(
         fragment_id="available.session_memory_summary",
@@ -1263,6 +1305,26 @@ _BUILTIN_CAPABILITY_FRAGMENTS: tuple[CapabilityFragment, ...] = (
             CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
             CapabilitySummaryFlag.WEB_SEARCH_AVAILABLE,
             CapabilitySummaryFlag.URL_FETCH_AVAILABLE,
+        ),
+    ),
+    _fragment(
+        fragment_id="guidance.model_callable.fast_web_grounding",
+        capability_id="fast_web_search",
+        name="Model-callable fast web grounding guidance block",
+        kind=CapabilityFragmentKind.GUIDANCE,
+        prompt_symbol="build_runtime_capability_context",
+        prompt_detail="fast_web_grounding_guidance",
+        availability=CapabilityAvailability(
+            required_summary_flags=(
+                CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
+                CapabilitySummaryFlag.FAST_WEB_SEARCH_AVAILABLE,
+            ),
+        ),
+        tool_mode_relevance=CapabilityToolModeRelevance.MODEL_CALLABLE_ONLY,
+        related_builtin_tool_names=(FAST_WEB_SEARCH_DEFINITION.name,),
+        related_summary_flags=(
+            CapabilitySummaryFlag.MODEL_CAN_CALL_TOOLS,
+            CapabilitySummaryFlag.FAST_WEB_SEARCH_AVAILABLE,
         ),
     ),
     _fragment(
