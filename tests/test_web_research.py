@@ -206,6 +206,25 @@ class TestCondenseSource:
         assert note.condensed_text  # Should not be empty
         assert not note.model_generated
 
+    def test_deterministic_source_note_is_dense_and_header_free(self) -> None:
+        artifact = _make_artifact(
+            text=(
+                "Marine Leleu is a French endurance athlete. "
+                "She creates fitness content. "
+                "She completes long-distance challenges."
+            )
+        )
+        note = condense_source(
+            artifact=artifact,
+            query="Marine Leleu",
+            budget=MAIN_RESEARCH_BUDGET,
+        )
+
+        assert "Source:" not in note.condensed_text
+        assert "URL:" not in note.condensed_text
+        assert "\n" not in note.condensed_text
+        assert ";" in note.condensed_text or len(note.condensed_text.split()) <= 12
+
     @patch("unclaw.tools.web_research._call_condensation_model")
     def test_model_driven_condensation_when_provider_available(
         self, mock_call: MagicMock
@@ -260,7 +279,7 @@ class TestMergeSourceNotes:
         assert merged.source_count == 0
         assert not merged.model_generated
 
-    def test_deterministic_merge_concatenates_notes(self) -> None:
+    def test_deterministic_merge_uses_compact_source_refs(self) -> None:
         notes = [
             _make_source_note(title="Source A", text="Fact A about quantum computing."),
             _make_source_note(title="Source B", text="Fact B about quantum computing."),
@@ -272,8 +291,10 @@ class TestMergeSourceNotes:
         )
         assert merged.source_count == 2
         assert not merged.model_generated
-        assert "Source A" in merged.text
-        assert "Source B" in merged.text
+        assert "[1]" in merged.text
+        assert "[2]" in merged.text
+        assert "Fact A about quantum computing" in merged.text
+        assert "Fact B about quantum computing" in merged.text
 
     def test_deterministic_merge_respects_budget(self) -> None:
         notes = [
@@ -305,8 +326,11 @@ class TestMergeSourceNotes:
             query="solar energy cost",
             budget=MAIN_RESEARCH_BUDGET,
         )
-        assert "Pro Source" in merged.text
-        assert "Con Source" in merged.text
+        assert "!=" in merged.text
+        assert "cost effective" in merged.text
+        assert "expensive to install" in merged.text
+        assert "[1]" in merged.text
+        assert "[2]" in merged.text
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +469,22 @@ class TestBuildFastGroundingNote:
         # letting the model decide whether the entity matches
         assert "fitness" in note_correct or "athlete" in note_correct or "sports" in note_correct
         assert "politician" in note_wrong or "Rassemblement" in note_wrong or "Le Pen" in note_wrong
+
+    def test_marks_when_no_exact_entity_match_is_found(self) -> None:
+        note = build_fast_grounding_note(
+            query="Marine Leleu",
+            snippets=[
+                (
+                    "Marine Le Pen",
+                    "https://example.com/le-pen",
+                    "French politician and leader of Rassemblement National.",
+                ),
+            ],
+            max_chars=300,
+        )
+
+        assert "no exact top match" in note
+        assert "!=" in note
 
 
 # ---------------------------------------------------------------------------

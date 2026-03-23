@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
@@ -49,6 +50,21 @@ _MAX_KEPT_EVIDENCE_ITEMS = 8
 _MAX_SOURCE_NOTE_CHARS = 220
 _MAX_OUTPUT_SOURCES = 8
 _MAX_SUMMARY_POINTS = 5
+_SEO_PAGE_CUES = frozenset(
+    {
+        "age",
+        "biography",
+        "dating",
+        "family",
+        "height",
+        "husband",
+        "married",
+        "net worth",
+        "salary",
+        "wife",
+        "wiki",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +94,7 @@ class _PageScores:
     usefulness: float
     hub_score: float
     terminal_score: float
+    hygiene_penalty: float
     informative_passage_count: int
     internal_link_count: int
 
@@ -122,6 +139,7 @@ class _RetrievedSource:
     density: float = 0.0
     novelty: float = 0.0
     hub_score: float = 0.0
+    hygiene_penalty: float = 0.0
     child_link_count: int = 0
 
 
@@ -293,6 +311,7 @@ def _run_iterative_retrieval(
             density=page_scores.density,
             novelty=page_scores.novelty,
             hub_score=page_scores.hub_score,
+            hygiene_penalty=page_scores.hygiene_penalty,
         )
 
         if candidate_key != page_key and candidate_key in sources_by_url:
@@ -615,7 +634,21 @@ def _score_fetched_page(
     if _url_looks_live_or_streaming(page.resolved_url):
         terminal_score -= 2.0
 
-    usefulness = relevance * 3.0 + density * 1.5 + novelty * 2.0 + terminal_score - hub_score
+    hygiene_penalty = _page_hygiene_penalty(
+        url=page.resolved_url,
+        text=page.text,
+        title=title,
+        link_count=internal_link_count,
+        informative_passage_count=informative_passage_count,
+    )
+    usefulness = (
+        relevance * 3.0
+        + density * 1.5
+        + novelty * 2.0
+        + terminal_score
+        - hub_score
+        - hygiene_penalty * 2.0
+    )
     return _PageScores(
         relevance=relevance,
         density=density,
@@ -623,6 +656,7 @@ def _score_fetched_page(
         usefulness=usefulness,
         hub_score=hub_score,
         terminal_score=terminal_score,
+        hygiene_penalty=hygiene_penalty,
         informative_passage_count=informative_passage_count,
         internal_link_count=internal_link_count,
     )
@@ -820,3 +854,55 @@ def _looks_low_value_page(
     if _passage_has_noise_signals(text) and token_count < 100:
         return True
     return False
+
+
+def _page_hygiene_penalty(
+    *,
+    url: str,
+    text: str,
+    title: str,
+    link_count: int,
+    informative_passage_count: int,
+) -> float:
+    if not text:
+        return 2.0
+
+    penalty = 0.0
+    folded_metadata = _fold_for_match(f"{title}\n{text}\n{url}")
+    cue_hits = sum(1 for cue in _SEO_PAGE_CUES if cue in folded_metadata)
+    if cue_hits >= 4:
+        penalty += 2.5
+    elif cue_hits >= 3:
+        penalty += 1.5
+
+    if "\ufffd" in text:
+        penalty += 1.5
+
+    token_count = len(_text_tokens(text))
+    unique_ratio = len(set(_text_tokens(text))) / max(token_count, 1)
+    if informative_passage_count == 0:
+        penalty += 2.0
+    elif informative_passage_count == 1 and token_count < 120:
+        penalty += 1.0
+    if unique_ratio < 0.42 and token_count < 220:
+        penalty += 1.0
+
+    short_lines = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and len(line.split()) <= 10
+    ]
+    repeated_short_lines = sum(
+        count - 1
+        for count in Counter(line.casefold() for line in short_lines).values()
+        if count > 1
+    )
+    if repeated_short_lines >= 4:
+        penalty += 1.5
+
+    if _passage_has_noise_signals(text) and token_count < 160:
+        penalty += 1.0
+    if link_count >= 8 and token_count < 180:
+        penalty += 1.0
+
+    return penalty

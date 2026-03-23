@@ -63,9 +63,12 @@ from unclaw.tools.web_search import (
     _MAX_SEARCH_RESULTS,
     _SEARCH_PROVIDER_NAME,
     _build_search_query,
+    _build_staged_search_queries,
+    _canonicalize_url,
     _deduplicate_search_results,
     _parse_duckduckgo_html_results,
     _rank_search_results,
+    _search_results_look_weak,
     _search_public_web,
 )
 from unclaw.tools.web_synthesis import (
@@ -168,6 +171,72 @@ def register_web_tools(
     registry.register(FETCH_URL_TEXT_DEFINITION, fetch_handler)
     registry.register(SEARCH_WEB_DEFINITION, search_handler)
     registry.register(FAST_WEB_SEARCH_DEFINITION, fast_search_handler)
+
+
+def _run_bounded_staged_search(
+    *,
+    query: str,
+    max_results: int,
+    timeout_seconds: float,
+    fast_mode: bool,
+) -> tuple[Any, list[dict[str, str]]]:
+    search_query = _build_search_query(query)
+    staged_queries = _build_staged_search_queries(query, fast_mode=fast_mode)
+    collected_results: list[dict[str, str]] = []
+
+    for pass_number, staged_query in enumerate(staged_queries, start=1):
+        response_text = _search_public_web(
+            query=staged_query,
+            timeout_seconds=timeout_seconds,
+        )
+        raw_results = _parse_duckduckgo_html_results(
+            response_text,
+            max_results=max_results,
+        )
+        for result in raw_results:
+            annotated_result = dict(result)
+            annotated_result["_pass_number"] = str(pass_number)
+            collected_results.append(annotated_result)
+
+        ranked_results = _rank_search_results(
+            _deduplicate_search_results(collected_results),
+            query=search_query,
+        )
+        if not _search_results_look_weak(ranked_results[:max_results], query=search_query):
+            break
+
+    ranked_results = _rank_search_results(
+        _deduplicate_search_results(collected_results),
+        query=search_query,
+    )
+    return search_query, ranked_results[:max_results]
+
+
+def _prioritize_research_pages(
+    pages: dict[str, tuple[str, str]] | None,
+    *,
+    outcome,
+) -> dict[str, tuple[str, str]] | None:
+    if not pages:
+        return pages
+
+    ordered_pages: dict[str, tuple[str, str]] = {}
+    by_canonical_url: dict[str, tuple[str, tuple[str, str]]] = {}
+    for url, payload in pages.items():
+        by_canonical_url[_canonicalize_url(url) or url] = (url, payload)
+
+    for source in outcome.sources:
+        canonical_source_url = _canonicalize_url(source.url) or source.url
+        match = by_canonical_url.get(canonical_source_url)
+        if match is None:
+            continue
+        page_url, payload = match
+        ordered_pages[page_url] = payload
+
+    for page_url, payload in pages.items():
+        ordered_pages.setdefault(page_url, payload)
+
+    return ordered_pages
 
 
 def fetch_url_text(
@@ -306,9 +375,11 @@ def search_web(
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
     try:
-        response_text = _search_public_web(
+        search_query, ranked_results = _run_bounded_staged_search(
             query=query,
+            max_results=max_results,
             timeout_seconds=timeout_seconds,
+            fast_mode=False,
         )
     except _BlockedFetchTargetError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
@@ -332,13 +403,6 @@ def search_web(
         )
     except ValueError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
-
-    search_query = _build_search_query(query)
-    raw_results = _parse_duckduckgo_html_results(response_text, max_results=max_results)
-    ranked_results = _rank_search_results(
-        _deduplicate_search_results(raw_results),
-        query=search_query,
-    )
 
     # Collect page texts for the research pipeline when config is available.
     page_text_collector: dict[str, tuple[str, str]] | None = (
@@ -369,9 +433,13 @@ def search_web(
     effective_budget = research_budget or MAIN_RESEARCH_BUDGET
     if research_config is not None and page_text_collector:
         try:
+            prioritized_pages = _prioritize_research_pages(
+                page_text_collector,
+                outcome=outcome,
+            )
             workspace = run_research_pipeline(
                 query=query,
-                fetched_pages=page_text_collector,
+                fetched_pages=prioritized_pages or page_text_collector,
                 budget=effective_budget,
                 config=research_config,
             )
@@ -561,9 +629,11 @@ def fast_web_search(
     max_chars = effective_budget.fast_grounding_max_chars
 
     try:
-        response_text = _search_public_web(
+        _search_query, ranked_results = _run_bounded_staged_search(
             query=query,
+            max_results=max_results,
             timeout_seconds=_FAST_SEARCH_TIMEOUT_SECONDS,
+            fast_mode=True,
         )
     except (_BlockedFetchTargetError, HTTPError, URLError, OSError, ValueError) as exc:
         return ToolResult.failure(
@@ -571,14 +641,9 @@ def fast_web_search(
             error=f"Could not search for '{query}': {exc}",
         )
 
-    raw_results = _parse_duckduckgo_html_results(
-        response_text,
-        max_results=max_results,
-    )
-
     snippets: list[tuple[str, str, str]] = [
         (result.get("title", ""), result.get("url", ""), result.get("snippet", ""))
-        for result in raw_results
+        for result in ranked_results
         if result.get("title") and result.get("snippet")
     ]
 
