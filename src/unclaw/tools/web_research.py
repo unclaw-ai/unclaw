@@ -219,6 +219,7 @@ class _NoteClause:
     signature_tokens: tuple[str, ...]
     content_tokens: tuple[str, ...]
     subject_tokens: tuple[str, ...]
+    is_anchor_source: bool = False  # True for source indices 1-2 (highest ranked)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +231,7 @@ class _NoteCluster:
     signature_tokens: tuple[str, ...]
     content_tokens: tuple[str, ...]
     subject_tokens: tuple[str, ...]
+    anchor_source_count: int = 0  # Number of anchor-source members in this cluster
 
 
 # ---------------------------------------------------------------------------
@@ -238,16 +240,24 @@ class _NoteCluster:
 
 _SOURCE_CONDENSATION_SYSTEM_PROMPT = (
     "You are a factual research assistant. Read the source text and output "
-    "only a dense note body. Keep only facts relevant to the query. Prefer "
+    "only a dense note body. Keep only facts directly stated in the source "
+    "text. Do not infer, combine, or introduce identity claims (profession, "
+    "birthplace, education) that are not explicitly stated here. Prefer "
     "short semicolon-separated clauses. Do not repeat the source title or "
     "URL. Use '? ' only when uncertainty materially matters."
 )
 
 _MERGE_SYSTEM_PROMPT = (
     "You are a factual research assistant. Merge source notes into a very "
-    "compact final note. Output only note lines. Use '[1,2] claim' for "
-    "supported claims and '!= variant [1] / other variant [2]' for clear "
-    "disagreements. Keep uncertainty compact. No commentary or headers."
+    "compact final note. Output only note lines. Source [1] is the "
+    "highest-ranked and serves as the identity anchor — prefer its identity "
+    "facts (name, role, profession, nationality) as the main spine. "
+    "Use '[1,2] claim' for claims supported by anchor sources. "
+    "Use '!= variant [1] / other variant [2]' for clear disagreements "
+    "between anchor sources. "
+    "Use '? claim [N]' for claims found only in a single non-anchor source "
+    "(N >= 3) that no other source confirms. "
+    "Keep uncertainty compact. No commentary or headers."
 )
 
 
@@ -627,10 +637,14 @@ def _sanitize_model_note_output(
     return _clip_text(compact_text, limit=max_chars)
 
 
+_ANCHOR_SOURCE_MAX_INDEX = 2  # Sources 1-2 are "anchor" (highest-ranked, most trusted)
+
+
 def _extract_note_clauses(source_notes: Sequence[SourceNote]) -> tuple[_NoteClause, ...]:
     clauses: list[_NoteClause] = []
 
     for source_index, note in enumerate(source_notes, start=1):
+        is_anchor = source_index <= _ANCHOR_SOURCE_MAX_INDEX
         for candidate in _iter_note_units(note.condensed_text):
             body = _note_unit_body(candidate)
             content_tokens = _content_tokens(body)
@@ -643,6 +657,7 @@ def _extract_note_clauses(source_notes: Sequence[SourceNote]) -> tuple[_NoteClau
                     signature_tokens=_build_signature_tokens(body),
                     content_tokens=content_tokens,
                     subject_tokens=_extract_subject_tokens(body),
+                    is_anchor_source=is_anchor,
                 )
             )
 
@@ -695,6 +710,9 @@ def _cluster_note_clauses(clauses: Sequence[_NoteClause]) -> tuple[_NoteCluster,
             ),
             (),
         )
+        anchor_source_count = sum(
+            1 for member in ordered_members if member.is_anchor_source
+        )
         clusters.append(
             _NoteCluster(
                 text=representative.text,
@@ -702,6 +720,7 @@ def _cluster_note_clauses(clauses: Sequence[_NoteClause]) -> tuple[_NoteCluster,
                 signature_tokens=representative.signature_tokens,
                 content_tokens=representative.content_tokens,
                 subject_tokens=subject_tokens,
+                anchor_source_count=anchor_source_count,
             )
         )
 
@@ -733,6 +752,10 @@ def _build_merged_note_lines(clusters: Sequence[_NoteCluster]) -> list[str]:
     lines: list[str] = []
     conflict_indexes: set[int] = set()
 
+    # Detect whether any anchor-source data is present.
+    # Only apply weak-claim isolation when there are anchor sources to anchor against.
+    has_anchor_data = any(c.anchor_source_count >= 1 for c in clusters)
+
     for index, cluster in enumerate(clusters):
         if index in conflict_indexes or not cluster.subject_tokens:
             continue
@@ -757,7 +780,17 @@ def _build_merged_note_lines(clusters: Sequence[_NoteCluster]) -> list[str]:
     for index, cluster in enumerate(clusters):
         if index in conflict_indexes:
             continue
-        lines.append(f"{_format_source_refs(cluster.source_indices)} {cluster.text}")
+        # Isolate weak claims: single non-anchor source when anchor data exists.
+        # These get a '? ' prefix so they don't pollute the identity spine.
+        is_weak_claim = (
+            has_anchor_data
+            and len(cluster.source_indices) == 1
+            and cluster.anchor_source_count == 0
+        )
+        if is_weak_claim:
+            lines.append(f"? {_format_source_refs(cluster.source_indices)} {cluster.text}")
+        else:
+            lines.append(f"{_format_source_refs(cluster.source_indices)} {cluster.text}")
 
     return lines
 
@@ -901,7 +934,23 @@ def build_fast_grounding_note(
             break
 
     if search_query.entity_tokens and not exact_match_found:
-        warning_line = "!= no exact top match"
+        # Determine whether results are completely mismatched (zero entity token hits)
+        # vs merely lacking the exact string (partial mismatch).
+        all_mismatched = all(
+            sum(
+                1
+                for token in search_query.entity_tokens
+                if token in _fold_for_match(f"{t} {s} {u}").split()
+            )
+            == 0
+            for t, u, s in snippets
+            if t or s
+        )
+        warning_line = (
+            "!= results appear to be for a different entity"
+            if all_mismatched
+            else "!= no exact top match"
+        )
         if len(warning_line) + 1 <= remaining:
             parts.append(warning_line)
             remaining -= len(warning_line) + 1

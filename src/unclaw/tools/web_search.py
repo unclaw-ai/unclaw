@@ -189,6 +189,32 @@ _SEO_PROFILE_CUES = frozenset(
         "wiki",
     }
 )
+# Encyclopedic/reference domains with strong biographical authority.
+_REFERENCE_DOMAINS = frozenset(
+    {
+        "wikipedia.org",
+        "wikidata.org",
+        "britannica.com",
+        "larousse.fr",
+        "universalis.fr",
+        "enciclopedia.cat",
+    }
+)
+# Social network domains where a short path means a profile landing page
+# with almost no extractable biographical text.
+_SOCIAL_PROFILE_SHELL_DOMAINS = frozenset(
+    {
+        "instagram.com",
+        "tiktok.com",
+        "twitter.com",
+        "x.com",
+        "facebook.com",
+        "youtube.com",
+        "threads.net",
+        "snapchat.com",
+        "pinterest.com",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -757,6 +783,11 @@ def _score_search_result(
         score -= 2.0
     score -= _result_hygiene_penalty(title=title, snippet=snippet, url=url)
 
+    if _url_looks_reference_like(url):
+        score += 3.0
+    if _url_looks_social_profile_shell(url):
+        score -= 3.5
+
     return score
 
 
@@ -880,6 +911,32 @@ def _is_internal_link(*, parent_url: str, child_url: str) -> bool:
     if parent_hostname is None or child_hostname is None:
         return False
     return _registered_domain(parent_hostname) == _registered_domain(child_hostname)
+
+
+def _url_looks_reference_like(url: str) -> bool:
+    """True for encyclopedic/reference sources with strong biographical authority."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    if any(hostname == domain or hostname.endswith("." + domain) for domain in _REFERENCE_DOMAINS):
+        return True
+    # /wiki/ path pattern covers most Wikipedia language variants.
+    if "/wiki/" in parsed.path.lower():
+        return True
+    return False
+
+
+def _url_looks_social_profile_shell(url: str) -> bool:
+    """True for social network profile landing pages with little extractable biography text."""
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    # Strip leading www.
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
+    if hostname not in _SOCIAL_PROFILE_SHELL_DOMAINS:
+        return False
+    # Profile shell: root or single user-slug segment (e.g. /username or /username/).
+    path_segments = _url_path_segments(url)
+    return len(path_segments) <= 1
 
 
 def _source_title_looks_weak(title: str) -> bool:

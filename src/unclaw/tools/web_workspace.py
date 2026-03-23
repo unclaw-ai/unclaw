@@ -99,6 +99,7 @@ def persist_research_workspace(
     workspace_dir: Path,
     workspace: ResearchWorkspace,
     query: str,
+    executed_queries: tuple[str, ...] = (),
 ) -> None:
     """Write all research pipeline artifacts to *workspace_dir*.
 
@@ -125,6 +126,7 @@ def persist_research_workspace(
             "query": query,
             "source_count": workspace.source_count,
             "model_driven": model_driven,
+            "executed_staged_queries": list(executed_queries),
             "budget": {
                 "max_sources": budget.max_sources,
                 "max_source_chars": budget.max_source_chars,

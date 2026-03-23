@@ -173,16 +173,23 @@ def register_web_tools(
     registry.register(FAST_WEB_SEARCH_DEFINITION, fast_search_handler)
 
 
-def _run_bounded_staged_search(
+def _run_bounded_staged_search_full(
     *,
     query: str,
     max_results: int,
     timeout_seconds: float,
     fast_mode: bool,
-) -> tuple[Any, list[dict[str, str]]]:
+) -> tuple[Any, list[dict[str, str]], tuple[str, ...]]:
+    """Run staged search and return (search_query, ranked_results, executed_queries).
+
+    This variant collects executed staged queries for observability/debugging.
+    Calls search-layer functions through the imported names in this module so
+    that test patches applied to unclaw.tools.web_tools.* continue to work.
+    """
     search_query = _build_search_query(query)
     staged_queries = _build_staged_search_queries(query, fast_mode=fast_mode)
     collected_results: list[dict[str, str]] = []
+    executed_queries: list[str] = []
 
     for pass_number, staged_query in enumerate(staged_queries, start=1):
         response_text = _search_public_web(
@@ -197,6 +204,7 @@ def _run_bounded_staged_search(
             annotated_result = dict(result)
             annotated_result["_pass_number"] = str(pass_number)
             collected_results.append(annotated_result)
+        executed_queries.append(staged_query)
 
         ranked_results = _rank_search_results(
             _deduplicate_search_results(collected_results),
@@ -209,7 +217,27 @@ def _run_bounded_staged_search(
         _deduplicate_search_results(collected_results),
         query=search_query,
     )
-    return search_query, ranked_results[:max_results]
+    return search_query, ranked_results[:max_results], tuple(executed_queries)
+
+
+def _run_bounded_staged_search(
+    *,
+    query: str,
+    max_results: int,
+    timeout_seconds: float,
+    fast_mode: bool,
+) -> tuple[Any, list[dict[str, str]]]:
+    """Run staged search and return (search_query, ranked_results).
+
+    Backward-compatible 2-tuple wrapper around _run_bounded_staged_search_full.
+    """
+    search_query, ranked_results, _executed = _run_bounded_staged_search_full(
+        query=query,
+        max_results=max_results,
+        timeout_seconds=timeout_seconds,
+        fast_mode=fast_mode,
+    )
+    return search_query, ranked_results
 
 
 def _prioritize_research_pages(
@@ -375,7 +403,7 @@ def search_web(
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
     try:
-        search_query, ranked_results = _run_bounded_staged_search(
+        search_query, ranked_results, executed_queries = _run_bounded_staged_search_full(
             query=query,
             max_results=max_results,
             timeout_seconds=timeout_seconds,
@@ -462,6 +490,7 @@ def search_web(
                 workspace_dir=ws_path,
                 workspace=workspace,
                 query=query,
+                executed_queries=executed_queries,
             )
             prune_old_workspaces(workspace_base_dir)
             from unclaw.tools.web_workspace import SearchWorkspaceRef

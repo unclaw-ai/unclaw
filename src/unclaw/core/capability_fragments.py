@@ -600,6 +600,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "ambiguous or could match multiple real entities, do not silently "
             "substitute a different entity. Ask for clarification or explicitly "
             "state which entity you identified and why before proceeding.",
+            "When calling fast_web_search or search_web, pass the entity name "
+            "exactly as the user wrote it. Do not 'correct', normalize, or "
+            "substitute the user-supplied name with a more famous alternative "
+            "before evidence from tool output confirms a correction is warranted.",
         ),
         "guidance.user_initiated.core_rules": _static_prompt(
             "guidance.user_initiated.core_rules",
@@ -643,9 +647,11 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         "guidance.model_callable.fast_web_grounding": _static_prompt(
             "guidance.model_callable.fast_web_grounding",
             "When unsure about a person, place, organization, or product name, "
-            "use fast_web_search first for a quick grounding probe before "
-            "launching a full search_web. This prevents silently substituting "
-            "an unknown entity with a more famous wrong one.",
+            "use fast_web_search first with the exact name as written by the user. "
+            "This prevents silently substituting an unknown entity with a more "
+            "famous wrong one.",
+            "If fast_web_search results are clearly for a different entity, say "
+            "so explicitly instead of presenting the wrong entity's information.",
             "fast_web_search is very fast and cheap — use it liberally for "
             "entity resolution before committing to a full research flow.",
         ),

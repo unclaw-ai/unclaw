@@ -59,7 +59,9 @@ _MINIMAL_GUIDANCE_FRAGMENT_IDS: frozenset[str] = frozenset(
     }
 )
 _COMPACT_GUIDANCE_LINE_SELECTIONS: dict[str, tuple[int, ...]] = {
-    "guidance.model_callable.core_rules": (0, 1, 3, 7, 8),
+    # 0: use listed tools  1: direct answer when complete  3: use tools only when needed
+    # 7: file write honesty  9: entity ambiguity guard  10: exact entity in tool calls
+    "guidance.model_callable.core_rules": (0, 1, 3, 7, 9, 10),
     "guidance.model_callable.long_term_memory": (0, 2, 4, 5, 8, 9),
 }
 _COMPACT_TOOL_LABELS_PER_LINE = 4
