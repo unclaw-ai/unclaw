@@ -115,6 +115,7 @@ def create_default_tool_registry(
             allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
             research_config=_research_config,
             research_budget=_research_budget,
+            workspace_base_dir=settings.paths.data_dir / "web_search",
         )
         register_active_skill_tools(
             registry,

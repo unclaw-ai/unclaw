@@ -244,6 +244,9 @@ class SearchWebPayload(TypedDict, total=False):
     research_source_notes: list[ResearchSourceNotePayload]
     research_merged_note: ResearchMergedNotePayload
     research_model_driven: bool
+    # File-backed workspace reference (present when persistence succeeds)
+    workspace_id: str
+    workspace_dir: str
 
 
 class FastSearchWebPayload(TypedDict, total=False):

@@ -19,6 +19,8 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.error import HTTPError, URLError
 
+from pathlib import Path
+
 from unclaw.async_utils import run_blocking
 from unclaw.tools.contracts import (
     FastSearchWebPayload,
@@ -133,11 +135,15 @@ def register_web_tools(
     allow_private_networks: bool = False,
     research_config: ResearchConfig | None = None,
     research_budget: ResearchBudget | None = None,
+    workspace_base_dir: Path | None = None,
 ) -> None:
     """Register the built-in lightweight web tools.
 
     When ``research_config`` is provided, the search_web tool uses the
     3-layer model-driven research pipeline for condensation.
+
+    When ``workspace_base_dir`` is provided, search_web persists research
+    artifacts under that directory (file-backed workspace).
     """
     effective_budget = research_budget or MAIN_RESEARCH_BUDGET
     effective_config = research_config
@@ -153,6 +159,7 @@ def register_web_tools(
             call,
             research_config=effective_config,
             research_budget=effective_budget,
+            workspace_base_dir=workspace_base_dir,
         )
 
     def fast_search_handler(call: ToolCall) -> ToolResult:
@@ -266,6 +273,7 @@ def search_web(
     *,
     research_config: ResearchConfig | None = None,
     research_budget: ResearchBudget | None = None,
+    workspace_base_dir: Path | None = None,
 ) -> ToolResult:
     """Search the public web, iteratively fetch bounded sources, and summarize evidence.
 
@@ -273,6 +281,11 @@ def search_web(
     Layer A — discovery + bounded fetch (existing retrieval)
     Layer B — model-driven per-source condensation
     Layer C — model-driven merged research note
+
+    When workspace_base_dir is provided, research artifacts are persisted to
+    disk under a timestamped directory.  The payload includes workspace_id
+    and workspace_dir for callers to locate and reuse the artifacts.
+    Persistence failures are silently swallowed — they never break the tool.
     """
     tool_name = SEARCH_WEB_DEFINITION.name
 
@@ -365,6 +378,33 @@ def search_web(
         except Exception:
             # Research pipeline failure must not break the tool.
             workspace = None
+
+    # --- File-backed workspace persistence ---
+    workspace_ref = None
+    if workspace is not None and workspace_base_dir is not None:
+        try:
+            from unclaw.tools.web_workspace import (
+                create_workspace_dir,
+                persist_research_workspace,
+                prune_old_workspaces,
+            )
+
+            ws_path, ws_id = create_workspace_dir(workspace_base_dir, query)
+            persist_research_workspace(
+                workspace_dir=ws_path,
+                workspace=workspace,
+                query=query,
+            )
+            prune_old_workspaces(workspace_base_dir)
+            from unclaw.tools.web_workspace import SearchWorkspaceRef
+
+            workspace_ref = SearchWorkspaceRef(
+                workspace_id=ws_id,
+                workspace_dir=str(ws_path),
+            )
+        except Exception:
+            # Persistence failure must never break the tool.
+            workspace_ref = None
 
     # --- Build output text ---
     # Use research note format only when model-driven condensation produced
@@ -479,6 +519,11 @@ def search_web(
             workspace.merged_note is not None
             and workspace.merged_note.model_generated
         )
+
+    # Include file-backed workspace reference when persistence succeeded.
+    if workspace_ref is not None:
+        payload["workspace_id"] = workspace_ref.workspace_id
+        payload["workspace_dir"] = workspace_ref.workspace_dir
 
     return ToolResult.ok(
         tool_name=tool_name,
