@@ -1,9 +1,16 @@
-"""Filesystem discovery and activation for file-first optional skill bundles."""
+"""Filesystem discovery and activation for locally-installed skill bundles.
+
+Skills are installed into ``./skills/`` from the remote catalog.  This module
+treats ``./skills/`` as the local runtime install directory — it never assumes
+any skill is bundled with the main repo.
+
+The directory may be empty in a fresh checkout.  All functions handle that
+gracefully and return empty results without raising.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from functools import lru_cache
 from pathlib import Path
 import re
 
@@ -16,7 +23,15 @@ _ASTERISK_EMPHASIS_PATTERN = re.compile(r"\*{1,2}([^*]+)\*{1,2}")
 _LIST_PREFIX_PATTERN = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)")
 
 
-def shipped_skill_bundle_root(project_root: Path | None = None) -> Path:
+def local_skill_install_root(project_root: Path | None = None) -> Path:
+    """Return the path to the local skill install directory (``./skills/``).
+
+    When *project_root* is given it is used directly.  Otherwise the function
+    walks up from this module's location until it finds the repo root, then
+    returns ``<repo_root>/skills``.
+
+    The directory may not exist yet or may be empty — callers must handle that.
+    """
     if project_root is not None:
         return project_root.expanduser().resolve() / "skills"
 
@@ -29,15 +44,15 @@ def shipped_skill_bundle_root(project_root: Path | None = None) -> Path:
 
 
 def get_skill_bundle_roots(project_root: Path | None = None) -> tuple[Path, ...]:
-    return (shipped_skill_bundle_root(project_root),)
-
-
-@lru_cache(maxsize=1)
-def discover_internal_skill_bundles() -> tuple[SkillBundle, ...]:
-    return discover_skill_bundles(skills_root=shipped_skill_bundle_root())
+    return (local_skill_install_root(project_root),)
 
 
 def discover_skill_bundles(*, skills_root: Path | None = None) -> tuple[SkillBundle, ...]:
+    """Discover all valid skill bundles in *skills_root*.
+
+    A bundle is any subdirectory that contains a ``SKILL.md`` file.
+    Returns an empty tuple when the directory does not exist or is empty.
+    """
     resolved_skills_root = _resolve_skills_root(skills_root)
     if not resolved_skills_root.is_dir():
         return ()
@@ -98,8 +113,6 @@ def load_active_skill_bundles(
         discovered_skill_bundles=discovered_skill_bundles,
     )
     bundles_by_id = {bundle.skill_id: bundle for bundle in bundles}
-    # Derive known IDs directly from the dict we already built — avoids a
-    # second iteration through _resolve_discovered_bundles via list_known_skill_ids.
     known_skill_ids = tuple(bundles_by_id.keys())
 
     active_bundles: list[SkillBundle] = []
@@ -135,13 +148,11 @@ def _resolve_discovered_bundles(
 ) -> tuple[SkillBundle, ...]:
     if discovered_skill_bundles is not None:
         return tuple(discovered_skill_bundles)
-    if skills_root is None:
-        return discover_internal_skill_bundles()
     return discover_skill_bundles(skills_root=skills_root)
 
 
 def _resolve_skills_root(skills_root: Path | None) -> Path:
-    return (skills_root or shipped_skill_bundle_root()).expanduser().resolve()
+    return (skills_root or local_skill_install_root()).expanduser().resolve()
 
 
 def _looks_like_repo_root(path: Path) -> bool:
@@ -248,11 +259,10 @@ def _ensure_terminal_punctuation(text: str) -> str:
 
 
 __all__ = [
-    "discover_internal_skill_bundles",
     "discover_skill_bundles",
     "get_skill_bundle_roots",
     "list_known_skill_ids",
     "load_active_skill_bundles",
     "load_skill_bundle",
-    "shipped_skill_bundle_root",
+    "local_skill_install_root",
 ]

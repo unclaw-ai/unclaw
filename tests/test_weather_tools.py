@@ -6,6 +6,10 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+# Skip this entire module when the weather skill is not installed locally.
+# Skills are no longer bundled; install via `unclaw onboard` to run these tests.
+pytest.importorskip("skills.weather.tool", reason="weather skill not installed locally")
+
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.settings import load_settings
 from skills.weather import tool as weather_tool_module

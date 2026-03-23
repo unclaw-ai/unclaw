@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable
+from typing import Any
 
 from unclaw.channels.telegram_bot import TelegramConfig, load_telegram_config
 from unclaw.errors import ConfigurationError, UnclawError
@@ -305,35 +306,52 @@ def prompt_telegram_bot_token(
     )
 
 
-def prompt_skill_selection(
+def prompt_catalog_skill_selection(
     settings: Settings,
     *,
     prompt_ui: PromptUI,
+    catalog_entries: "list[Any]",
 ) -> tuple[str, ...]:
-    """Discover available skill bundles and let the user choose which to enable.
+    """Present catalog skills to the user and return the selected skill IDs.
 
-    Returns the current enabled_skill_ids unchanged when no bundles are found
-    in the project's skills/ directory (preserves existing config on template
-    projects and test fixtures that have no skills/ folder).
+    Skills already installed locally keep their install status shown in the
+    prompt.  The user decides which to install / keep enabled.
+
+    Returns an empty tuple when the catalog is empty.
     """
-    from unclaw.skills.file_loader import discover_skill_bundles, shipped_skill_bundle_root
+    if not catalog_entries:
+        return ()
 
-    skills_root = shipped_skill_bundle_root(settings.paths.project_root)
-    available_bundles = discover_skill_bundles(skills_root=skills_root)
+    from unclaw.skills.file_loader import discover_skill_bundles, local_skill_install_root
+    from unclaw.skills.remote_catalog import RemoteCatalogEntry
 
-    if not available_bundles:
-        return settings.skills.enabled_skill_ids
-
+    skills_root = local_skill_install_root(settings.paths.project_root)
+    installed_ids = {
+        bundle.skill_id
+        for bundle in discover_skill_bundles(skills_root=skills_root)
+    }
     current_enabled = set(settings.skills.enabled_skill_ids)
+
     selected: list[str] = []
-    for bundle in available_bundles:
+    for entry in catalog_entries:
+        if not isinstance(entry, RemoteCatalogEntry):
+            continue
+        label = entry.display_name
+        summary = entry.summary or label
+        if entry.skill_id in installed_ids:
+            help_text = f"[installed]  {summary}"
+        else:
+            help_text = summary
+
+        default = entry.skill_id in current_enabled or entry.skill_id in installed_ids
         enabled = prompt_ui.confirm(
-            f"Enable the {bundle.display_name} skill?",
-            default=bundle.skill_id in current_enabled,
-            help_text=bundle.summary,
+            f"Install / enable the {label} skill?",
+            default=default,
+            help_text=help_text,
         )
         if enabled:
-            selected.append(bundle.skill_id)
+            selected.append(entry.skill_id)
+
     return tuple(selected)
 
 
@@ -714,9 +732,9 @@ __all__ = [
     "load_existing_telegram_config",
     "post_configure_ollama",
     "print_plan_summary",
+    "prompt_catalog_skill_selection",
     "prompt_model_pack",
     "prompt_channel_preset",
     "prompt_model_profiles",
-    "prompt_skill_selection",
     "prompt_telegram_bot_token",
 ]

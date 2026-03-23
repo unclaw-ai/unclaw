@@ -318,7 +318,7 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
     from unclaw.skills.file_loader import (
         discover_skill_bundles,
         load_active_skill_bundles,
-        shipped_skill_bundle_root,
+        local_skill_install_root,
     )
     from unclaw.skills.file_models import UnknownSkillIdError
 
@@ -326,8 +326,8 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
         getattr(settings, "skills", None), "enabled_skill_ids", ()
     )
 
-    # Detect skill bundles present in ./skills/ that are not yet configured.
-    skills_root = shipped_skill_bundle_root(settings.paths.project_root)
+    # Detect skill bundles installed in ./skills/ that are not yet enabled.
+    skills_root = local_skill_install_root(settings.paths.project_root)
     available_bundles = discover_skill_bundles(skills_root=skills_root)
     available_ids = {bundle.skill_id for bundle in available_bundles}
     enabled_ids = set(enabled_skill_ids)
@@ -339,26 +339,35 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
             return StartupCheck(
                 status=CheckStatus.WARN,
                 label="Skills",
-                detail=f"New skill bundle(s) found but not enabled: {new_label}.",
-                guidance="Run `unclaw onboard` to activate them.",
+                detail=f"Installed skill(s) not yet enabled: {new_label}.",
+                guidance="Run `unclaw onboard` to enable them.",
             )
         return None
 
     try:
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=enabled_skill_ids,
+            skills_root=skills_root,
+        )
     except UnknownSkillIdError as exc:
         unknown = ", ".join(exc.unknown_skill_ids)
         return StartupCheck(
             status=CheckStatus.ERROR,
             label="Skills",
             detail=f"Unknown skill id(s): {unknown}.",
-            guidance="Check skills.enabled_skill_ids in config/app.yaml.",
+            guidance=(
+                "Check skills.enabled_skill_ids in config/app.yaml, or run "
+                "`unclaw onboard` to install the missing skills from the catalog."
+            ),
         )
 
     if not active_bundles:
         return None
 
-    probe_results = probe_skill_tool_loading(enabled_skill_ids=enabled_skill_ids)
+    probe_results = probe_skill_tool_loading(
+        enabled_skill_ids=enabled_skill_ids,
+        skills_root=skills_root,
+    )
 
     skill_parts: list[str] = []
     any_failed = False
@@ -373,12 +382,12 @@ def _build_skills_check(settings: Settings) -> StartupCheck | None:
     detail = "Active: " + ", ".join(skill_parts)
     if new_skill_ids:
         new_label = ", ".join(new_skill_ids)
-        detail += f". New bundles not yet enabled: {new_label}."
+        detail += f". Installed but not enabled: {new_label}."
         return StartupCheck(
             status=CheckStatus.WARN,
             label="Skills",
             detail=detail,
-            guidance="Run `unclaw onboard` to enable new skill bundles.",
+            guidance="Run `unclaw onboard` to enable the additional installed skills.",
         )
 
     return StartupCheck(

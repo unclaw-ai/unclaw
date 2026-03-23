@@ -207,14 +207,27 @@ def test_unknown_skill_id_silently_produces_no_catalog(monkeypatch) -> None:
     assert catalog_msgs == []
 
 
-def test_catalog_uses_real_shipped_weather_bundle() -> None:
-    """Integration smoke: the real skills/weather/SKILL.md produces a valid compact entry."""
+def test_catalog_uses_synthetic_bundle_in_tmp_path(tmp_path: Path) -> None:
+    """Integration smoke: a synthetic installed bundle produces a valid compact entry."""
     from unclaw.skills.catalog import build_active_skill_catalog
 
-    catalog = build_active_skill_catalog(enabled_skill_ids=("weather",))
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    bundle_dir = skills_root / "weather"
+    bundle_dir.mkdir()
+    (bundle_dir / "SKILL.md").write_text(
+        "# Weather\n\n"
+        "Live weather and short forecasts.\n\n"
+        "Tool hints: Prefer `get_weather`.\n",
+        encoding="utf-8",
+    )
+
+    catalog = build_active_skill_catalog(
+        enabled_skill_ids=("weather",),
+        skills_root=skills_root,
+    )
 
     assert catalog.startswith("Active optional skills:")
     assert "- weather:" in catalog
     assert "get_weather" in catalog
-    # Must be compact — much shorter than a typical SKILL.md
     assert len(catalog) < 300

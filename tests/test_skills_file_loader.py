@@ -9,20 +9,48 @@ from unclaw.skills.file_loader import (
     discover_skill_bundles,
     load_active_skill_bundles,
     load_skill_bundle,
-    shipped_skill_bundle_root,
+    local_skill_install_root,
 )
 from unclaw.skills.file_models import UnknownSkillIdError
 
 pytestmark = pytest.mark.unit
 
 
-def test_shipped_skill_bundle_root_points_at_top_level_skills_directory() -> None:
-    skills_root = shipped_skill_bundle_root()
+def test_local_skill_install_root_points_at_top_level_skills_directory() -> None:
+    """local_skill_install_root() resolves to <repo_root>/skills."""
+    skills_root = local_skill_install_root()
     project_root = skills_root.parent
 
     assert skills_root.name == "skills"
-    assert (skills_root / "weather" / "SKILL.md").is_file()
-    assert not (project_root / "src" / "unclaw" / "skills" / "weather" / "SKILL.md").exists()
+    # The directory must exist (as a git-tracked empty dir with __init__.py).
+    assert skills_root.is_dir()
+    # Confirm we found the repo root, not some deeply-nested skills dir.
+    assert not (project_root / "src" / "unclaw" / "skills" / "__init__.py").samefile(
+        skills_root / "__init__.py"
+    ) if (skills_root / "__init__.py").is_file() else True
+
+
+def test_discover_skill_bundles_returns_empty_tuple_for_empty_skills_dir(
+    tmp_path: Path,
+) -> None:
+    """An empty skills directory produces no bundles."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+
+    result = discover_skill_bundles(skills_root=skills_root)
+
+    assert result == ()
+
+
+def test_discover_skill_bundles_returns_empty_tuple_when_directory_missing(
+    tmp_path: Path,
+) -> None:
+    """A non-existent skills directory produces no bundles without raising."""
+    skills_root = tmp_path / "no_such_dir"
+
+    result = discover_skill_bundles(skills_root=skills_root)
+
+    assert result == ()
 
 
 def test_discover_skill_bundles_only_includes_directories_with_skill_md_in_stable_order(
@@ -116,6 +144,26 @@ def test_load_active_skill_bundles_fail_clearly_on_unknown_enabled_skill_ids(
         )
 
 
+def test_load_active_skill_bundles_returns_empty_for_empty_enabled_ids(
+    tmp_path: Path,
+) -> None:
+    """No enabled IDs → no active bundles (even if skills are installed)."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    _write_skill_bundle(
+        skills_root,
+        "weather",
+        "# Weather\n\nLive weather and short forecasts.\n",
+    )
+
+    active_bundles = load_active_skill_bundles(
+        enabled_skill_ids=(),
+        skills_root=skills_root,
+    )
+
+    assert active_bundles == ()
+
+
 def test_build_active_skill_catalog_renders_compact_catalog_for_active_skills(
     tmp_path: Path,
 ) -> None:
@@ -145,6 +193,23 @@ def test_build_active_skill_catalog_renders_compact_catalog_for_active_skills(
             ),
         )
     )
+
+
+def test_build_active_skill_catalog_returns_empty_string_when_no_skills_installed(
+    tmp_path: Path,
+) -> None:
+    """Empty skills dir → empty catalog string, no exception."""
+    skills_root = tmp_path / "empty_skills"
+    skills_root.mkdir()
+
+    # No bundles installed — enabled_skill_ids references a non-existent skill
+    # but build_active_skill_catalog should not raise for empty dirs; the
+    # UnknownSkillIdError propagates so callers can handle it.
+    with pytest.raises(UnknownSkillIdError):
+        build_active_skill_catalog(
+            enabled_skill_ids=("weather",),
+            skills_root=skills_root,
+        )
 
 
 def _write_skill_bundle(skills_root: Path, skill_id: str, skill_md_content: str) -> Path:

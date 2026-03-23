@@ -291,8 +291,8 @@ def test_read_version_strips_whitespace(tmp_path: Path) -> None:
         (True, True, "1.0.0", None, SkillStatus.INSTALLED),   # no catalog ver → installed
         (True, True, None, None, SkillStatus.INSTALLED),       # neither ver → installed
         (True, True, "1.0.0", "2.0.0", SkillStatus.UPDATE),   # exact mismatch → update
-        (True, False, None, None, SkillStatus.LOCAL_ONLY),
-        (True, False, "1.0.0", None, SkillStatus.LOCAL_ONLY),
+        (True, False, None, None, SkillStatus.LOCAL_UNTRACKED),
+        (True, False, "1.0.0", None, SkillStatus.LOCAL_UNTRACKED),
         (False, True, None, "1.0.0", SkillStatus.AVAILABLE),
         (False, True, None, None, SkillStatus.AVAILABLE),
     ],
@@ -376,7 +376,7 @@ def test_build_report_local_only_for_uncatalogued_skill(tmp_path: Path) -> None:
     r = report[0]
     assert r.installed_locally is True
     assert r.available_in_catalog is False
-    assert r.status is SkillStatus.LOCAL_ONLY
+    assert r.status is SkillStatus.LOCAL_UNTRACKED
 
 
 def test_build_report_update_when_versions_differ(tmp_path: Path) -> None:
@@ -544,7 +544,7 @@ def test_render_local_only_labelled() -> None:
     entries = [
         _make_status_entry(
             "custom",
-            status=SkillStatus.LOCAL_ONLY,
+            status=SkillStatus.LOCAL_UNTRACKED,
             available_in_catalog=False,
             catalog_version=None,
         )
@@ -552,7 +552,7 @@ def test_render_local_only_labelled() -> None:
     lines = render_skills_report(entries, catalog_url="https://example.com/catalog.json")
     text = "\n".join(lines)
 
-    assert "[local only]" in text
+    assert "[untracked]" in text
     assert "Installed (1)" in text
 
 

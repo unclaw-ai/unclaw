@@ -16,8 +16,8 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-# Ensure the project root is on sys.path so that skill bundles under ./skills/
-# are importable as top-level packages (e.g. skills.weather.tool).
+# Ensure the project root is on sys.path so that locally-installed skill bundles
+# under ./skills/ are importable as top-level packages (e.g. skills.weather.tool).
 _repo_root_str = str(_repo_root())
 if _repo_root_str not in sys.path:
     sys.path.insert(0, _repo_root_str)
@@ -63,9 +63,40 @@ def make_temp_project(tmp_path: Path):
         *,
         allowed_chat_ids: list[int] | None = None,
         remove_secrets: bool = False,
+        enabled_skill_ids: list[str] | None = None,
+        install_skill_bundles: dict[str, str] | None = None,
     ) -> Path:
+        """Create a temporary project directory for tests.
+
+        Args:
+            allowed_chat_ids: Override ``allowed_chat_ids`` in telegram.yaml.
+            remove_secrets: Remove secrets.yaml from the temp project.
+            enabled_skill_ids: Override ``skills.enabled_skill_ids`` in app.yaml.
+                Defaults to ``[]`` so tests are isolated from the developer's
+                local config (which may have skills enabled that are not installed
+                in the temp project).
+            install_skill_bundles: Mapping of ``skill_id → SKILL.md content`` to
+                write synthetic skill bundles into ``project/skills/<skill_id>/``.
+        """
         project_root = tmp_path / "project"
         shutil.copytree(_repo_root() / "config", project_root / "config")
+
+        # Always patch out enabled_skill_ids so tests are not tied to the
+        # developer's personal config/app.yaml.  Pass enabled_skill_ids explicitly
+        # when a test needs specific skills enabled.
+        app_config_path = project_root / "config" / "app.yaml"
+        app_payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+        if isinstance(app_payload, dict):
+            if not isinstance(app_payload.get("skills"), dict):
+                app_payload["skills"] = {}
+            app_payload["skills"]["enabled_skill_ids"] = list(
+                enabled_skill_ids if enabled_skill_ids is not None else []
+            )
+            app_config_path.write_text(
+                yaml.safe_dump(app_payload, sort_keys=False),
+                encoding="utf-8",
+            )
+
         if allowed_chat_ids is not None:
             telegram_config_path = project_root / "config" / "telegram.yaml"
             payload = yaml.safe_load(telegram_config_path.read_text(encoding="utf-8"))
@@ -79,6 +110,16 @@ def make_temp_project(tmp_path: Path):
             secrets_path = project_root / "config" / "secrets.yaml"
             if secrets_path.exists():
                 secrets_path.unlink()
+
+        if install_skill_bundles:
+            skills_root = project_root / "skills"
+            skills_root.mkdir(exist_ok=True)
+            (skills_root / "__init__.py").write_text("", encoding="utf-8")
+            for skill_id, skill_md_content in install_skill_bundles.items():
+                bundle_dir = skills_root / skill_id
+                bundle_dir.mkdir(parents=True, exist_ok=True)
+                (bundle_dir / "SKILL.md").write_text(skill_md_content, encoding="utf-8")
+
         return project_root
 
     return _make_temp_project

@@ -20,10 +20,14 @@ from unclaw.onboarding import (
     run_onboarding,
 )
 from unclaw.settings import load_settings
+from unclaw.skills.remote_catalog import RemoteCatalogEntry
 from unclaw.startup import OllamaStatus
 from unclaw.terminal_styles import onboarding_questionary_style_entries
 
 EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
+
+# Reusable monkeypatch helper: suppress catalog fetch so no skill prompts appear.
+_NO_CATALOG = lambda url, output_func: ([], None)  # noqa: E731
 
 
 def test_recommended_onboarding_writes_terminal_and_telegram_preset(
@@ -52,6 +56,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "2", "", EXAMPLE_TELEGRAM_TOKEN, ""])
     outputs: list[str] = []
@@ -131,6 +136,7 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 64.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(
         [
@@ -274,6 +280,7 @@ def test_onboarding_can_keep_existing_local_telegram_token(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "2", "", "", ""])
     prompts: list[str] = []
@@ -311,6 +318,7 @@ def test_channel_preset_writes_telegram_only_to_app_config(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "3", "", EXAMPLE_TELEGRAM_TOKEN, ""])
 
@@ -368,6 +376,7 @@ def test_onboarding_creates_backups_before_overwriting_existing_files(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "2", "", "", ""])
     result = run_onboarding(
@@ -419,6 +428,7 @@ def test_onboarding_restricts_secret_backup_permissions_to_owner_only(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "2", "", "", ""])
     result = run_onboarding(
@@ -464,6 +474,7 @@ def test_onboarding_allows_manual_power_pack_selection(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 8.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
     responses = iter(["", "", "1", "3", "", ""])
 
@@ -548,16 +559,20 @@ def test_onboarding_skill_section_discovers_bundles_and_writes_enabled_skill_ids
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """When a skills/ dir with a valid bundle exists, onboarding presents it and writes the selection."""
+    """Catalog skill presented during onboarding; user accepts; config written with skill id."""
     project_root = make_temp_project(remove_secrets=True)
-    skills_dir = project_root / "skills"
-    skills_dir.mkdir()
-    weather_dir = skills_dir / "weather"
-    weather_dir.mkdir()
-    (weather_dir / "SKILL.md").write_text(
-        "# Weather\n\nLive weather and short forecasts.\n", encoding="utf-8"
-    )
     settings = load_settings(project_root=project_root)
+
+    _fake_weather_entry = RemoteCatalogEntry(
+        skill_id="weather",
+        display_name="Weather",
+        version="1.0.0",
+        summary="Live weather and short forecasts.",
+        repo_relative_path="weather",
+        public_entry_files=("SKILL.md", "tool.py"),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
 
     monkeypatch.setattr(
         "unclaw.onboarding.inspect_ollama",
@@ -570,10 +585,24 @@ def test_onboarding_skill_section_discovers_bundles_and_writes_enabled_skill_ids
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr(
+        "unclaw.onboarding._fetch_onboarding_catalog",
+        lambda url, output_func: ([_fake_weather_entry], None),
+    )
+    def _fake_install(_s, *, plan, catalog_entries, output_func):
+        skills_root = _s.paths.project_root / "skills"
+        skills_root.mkdir(exist_ok=True)
+        for sid in plan.enabled_skill_ids:
+            bundle = skills_root / sid
+            bundle.mkdir(exist_ok=True)
+            (bundle / "SKILL.md").write_text(f"# {sid}\n\nFake.\n", encoding="utf-8")
+        return tuple(plan.enabled_skill_ids)
+
+    monkeypatch.setattr("unclaw.onboarding._install_onboarding_skills", _fake_install)
 
     # 1. setup mode (recommended)  2. logging  3. channel (terminal only)
-    # 4. Enable Weather skill? (yes, default)  5. model pack  6. write config
-    responses = iter(["", "", "1", "", "", ""])
+    # 4. Install / enable Weather skill? (yes)  5. model pack  6. write config
+    responses = iter(["", "", "1", "y", "", ""])
     outputs: list[str] = []
 
     result = run_onboarding(
@@ -594,16 +623,20 @@ def test_onboarding_writes_empty_skill_ids_when_user_disables_all_skills(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """User can deselect all skills; onboarding writes an empty enabled_skill_ids list."""
+    """User can deselect all catalog skills; onboarding writes an empty enabled_skill_ids list."""
     project_root = make_temp_project(remove_secrets=True)
-    skills_dir = project_root / "skills"
-    skills_dir.mkdir()
-    weather_dir = skills_dir / "weather"
-    weather_dir.mkdir()
-    (weather_dir / "SKILL.md").write_text(
-        "# Weather\n\nLive weather and short forecasts.\n", encoding="utf-8"
-    )
     settings = load_settings(project_root=project_root)
+
+    _fake_weather_entry = RemoteCatalogEntry(
+        skill_id="weather",
+        display_name="Weather",
+        version="1.0.0",
+        summary="Live weather and short forecasts.",
+        repo_relative_path="weather",
+        public_entry_files=("SKILL.md", "tool.py"),
+        repository_owner="unclaw-ai",
+        repository_name="skills",
+    )
 
     monkeypatch.setattr(
         "unclaw.onboarding.inspect_ollama",
@@ -616,6 +649,10 @@ def test_onboarding_writes_empty_skill_ids_when_user_disables_all_skills(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr(
+        "unclaw.onboarding._fetch_onboarding_catalog",
+        lambda url, output_func: ([_fake_weather_entry], None),
+    )
 
     # "n" disables the Weather skill
     responses = iter(["", "", "1", "n", "", ""])
@@ -635,7 +672,7 @@ def test_onboarding_preserves_existing_skill_ids_when_no_skills_dir_found(
     monkeypatch,
     make_temp_project,
 ) -> None:
-    """With no skills/ directory in the project, onboarding skips the skill section and preserves config."""
+    """When catalog is empty (unavailable), no skill prompts appear and existing config is preserved."""
     project_root = make_temp_project(remove_secrets=True)
     settings = load_settings(project_root=project_root)
     original_enabled = list(settings.skills.enabled_skill_ids)
@@ -651,8 +688,9 @@ def test_onboarding_preserves_existing_skill_ids_when_no_skills_dir_found(
         ),
     )
     monkeypatch.setattr("unclaw.onboarding._detect_system_ram_gib", lambda: 24.0)
+    monkeypatch.setattr("unclaw.onboarding._fetch_onboarding_catalog", _NO_CATALOG)
 
-    # No skill section prompts since no skills/ dir exists
+    # No skill section prompts since catalog returned empty
     responses = iter(["", "", "1", "", ""])
 
     result = run_onboarding(

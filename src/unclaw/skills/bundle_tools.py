@@ -22,6 +22,7 @@ import importlib
 import sys
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from unclaw.skills.file_loader import load_active_skill_bundles
 from unclaw.skills.file_models import SkillBundle, UnknownSkillIdError
@@ -52,6 +53,7 @@ def register_active_skill_tools(
     registry: ToolRegistry,
     *,
     enabled_skill_ids: Collection[str],
+    skills_root: Path | None = None,
 ) -> tuple[str, ...]:
     """Register tools exposed by active skill bundle backends.
 
@@ -59,13 +61,19 @@ def register_active_skill_tools(
     ``register_skill_tools(registry)`` callable, that function is called to
     add the bundle's tools to *registry*.
 
+    Pass *skills_root* to restrict discovery to a specific directory; when
+    omitted the default local install root (``./skills/``) is used.
+
     Returns the ``skill_id``s whose tools were successfully registered.
     Bundles without the hook are silently skipped and not included in the
     return value.  Raises nothing on import failure — the bundle is skipped
     with a warning-level note (callers should surface this at startup).
     """
     try:
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=enabled_skill_ids)
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=enabled_skill_ids,
+            skills_root=skills_root,
+        )
     except UnknownSkillIdError:
         return ()
 
@@ -80,6 +88,7 @@ def register_active_skill_tools(
 def probe_skill_tool_loading(
     *,
     enabled_skill_ids: Collection[str],
+    skills_root: Path | None = None,
     discovered_skill_bundles: Sequence[SkillBundle] | None = None,
 ) -> dict[str, str | None]:
     """Probe tool-loading for active skill bundles without side effects.
@@ -97,6 +106,7 @@ def probe_skill_tool_loading(
     try:
         active_bundles = load_active_skill_bundles(
             enabled_skill_ids=enabled_skill_ids,
+            skills_root=skills_root,
             discovered_skill_bundles=discovered_skill_bundles,
         )
     except UnknownSkillIdError as exc:

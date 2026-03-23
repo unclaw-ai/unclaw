@@ -31,9 +31,7 @@ runtime:
   max_tool_calls_per_turn: 8
 skills:
   enabled_skill_ids:
-  - weather
-catalog:
-  url: https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.json
+  - git_repo
 security:
   tools:
     files:

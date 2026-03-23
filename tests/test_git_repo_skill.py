@@ -18,6 +18,10 @@ from pathlib import Path
 
 import pytest
 
+# Skip this entire module when the git_repo skill is not installed locally.
+# Skills are no longer bundled; install via `unclaw onboard` to run these tests.
+pytest.importorskip("skills.git_repo.tool", reason="git_repo skill not installed locally")
+
 from skills.git_repo.tool import (
     GIT_DIFF_SUMMARY_DEFINITION,
     GIT_RECENT_COMMITS_DEFINITION,

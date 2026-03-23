@@ -24,7 +24,7 @@ import json
 import urllib.error
 import urllib.request
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
@@ -43,11 +43,8 @@ class SkillStatus(StrEnum):
     UPDATE = "update"
     """Installed locally and in the catalog with a differing version."""
 
-    LOCAL_ONLY = "local_only"
+    LOCAL_UNTRACKED = "local_untracked"
     """Installed locally but absent from the catalog (custom/dev skill)."""
-
-    CATALOG_ONLY = "catalog_only"
-    """Reserved; semantically equivalent to AVAILABLE in this release."""
 
 
 class CatalogFetchError(Exception):
@@ -67,6 +64,12 @@ class RemoteCatalogEntry:
     version: str | None
     summary: str | None
     repo_relative_path: str | None
+    public_entry_files: tuple[str, ...] = field(default_factory=tuple)
+    """File names within *repo_relative_path* that must be downloaded to install this skill."""
+    repository_owner: str | None = None
+    """GitHub organisation / user that owns the skills repository."""
+    repository_name: str | None = None
+    """GitHub repository name (e.g. ``"skills"``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,20 +236,20 @@ def render_skills_report(
     """Render a terminal-friendly skills status report as a list of lines.
 
     Three primary sections are emitted in order: Installed, Update, Available.
-    Skills that are installed locally but absent from the catalog appear at the
-    bottom of the Installed section labelled ``[local only]``.
+    Skills installed locally but absent from the catalog appear at the bottom
+    of the Installed section labelled ``[untracked]``.
     """
     installed = [e for e in entries if e.status is SkillStatus.INSTALLED]
-    local_only = [e for e in entries if e.status is SkillStatus.LOCAL_ONLY]
+    local_untracked = [e for e in entries if e.status is SkillStatus.LOCAL_UNTRACKED]
     updates = [e for e in entries if e.status is SkillStatus.UPDATE]
     available = [e for e in entries if e.status is SkillStatus.AVAILABLE]
 
     lines: list[str] = []
 
     # ── Installed ──────────────────────────────────────────────────────────
-    installed_count = len(installed) + len(local_only)
+    installed_count = len(installed) + len(local_untracked)
     lines.append(f"Installed ({installed_count})")
-    if installed or local_only:
+    if installed or local_untracked:
         for entry in installed:
             enabled_tag = " [enabled]" if entry.enabled_locally else ""
             version_str = entry.local_version or "?"
@@ -254,11 +257,11 @@ def render_skills_report(
                 f"  {entry.skill_id:<22}  {version_str:<8}  "
                 f"{entry.display_name}{enabled_tag}"
             )
-        for entry in local_only:
+        for entry in local_untracked:
             enabled_tag = " [enabled]" if entry.enabled_locally else ""
             lines.append(
                 f"  {entry.skill_id:<22}  {'?':<8}  "
-                f"{entry.display_name}{enabled_tag}  [local only]"
+                f"{entry.display_name}{enabled_tag}  [untracked]"
             )
     else:
         lines.append("  (none)")
@@ -309,12 +312,27 @@ def _parse_catalog_payload(
     """Extract a list of catalog entries from a parsed JSON payload."""
     if isinstance(payload, list):
         skills_data = payload
-    elif isinstance(payload, dict) and "skills" in payload:
+        repo_owner_default: str | None = None
+        repo_name_default: str | None = None
+    elif isinstance(payload, dict):
+        if "skills" not in payload:
+            raise CatalogFetchError(
+                f"Unrecognised catalog format from {source_url!r}: "
+                "expected a JSON list or an object with a 'skills' key."
+            )
         skills_data = payload["skills"]
         if not isinstance(skills_data, list):
             raise CatalogFetchError(
                 f"Catalog from {source_url!r}: 'skills' field must be a list."
             )
+        # Top-level repository metadata (optional)
+        repo_section = payload.get("repository", {})
+        repo_owner_default = _nullable_str(
+            repo_section.get("owner") if isinstance(repo_section, dict) else None
+        )
+        repo_name_default = _nullable_str(
+            repo_section.get("name") if isinstance(repo_section, dict) else None
+        )
     else:
         raise CatalogFetchError(
             f"Unrecognised catalog format from {source_url!r}: "
@@ -328,6 +346,24 @@ def _parse_catalog_payload(
         skill_id = item.get("skill_id")
         if not isinstance(skill_id, str) or not skill_id.strip():
             continue
+
+        # Per-entry repository metadata overrides the top-level default.
+        item_repo = item.get("repository", {})
+        if isinstance(item_repo, dict):
+            repo_owner = _nullable_str(item_repo.get("owner")) or repo_owner_default
+            repo_name = _nullable_str(item_repo.get("name")) or repo_name_default
+        else:
+            repo_owner = repo_owner_default
+            repo_name = repo_name_default
+
+        raw_files = item.get("public_entry_files")
+        if isinstance(raw_files, list):
+            entry_files = tuple(
+                f for f in raw_files if isinstance(f, str) and f.strip()
+            )
+        else:
+            entry_files = ()
+
         entries.append(
             RemoteCatalogEntry(
                 skill_id=skill_id.strip(),
@@ -335,6 +371,9 @@ def _parse_catalog_payload(
                 version=_nullable_str(item.get("version")),
                 summary=_nullable_str(item.get("summary")),
                 repo_relative_path=_nullable_str(item.get("repo_relative_path")),
+                public_entry_files=entry_files,
+                repository_owner=repo_owner,
+                repository_name=repo_name,
             )
         )
 
@@ -355,7 +394,7 @@ def _compute_status(
     up-to-date (INSTALLED).
     """
     if installed_locally and not available_in_catalog:
-        return SkillStatus.LOCAL_ONLY
+        return SkillStatus.LOCAL_UNTRACKED
     if not installed_locally and available_in_catalog:
         return SkillStatus.AVAILABLE
     if installed_locally and available_in_catalog:
@@ -367,7 +406,7 @@ def _compute_status(
             return SkillStatus.UPDATE
         return SkillStatus.INSTALLED
     # Defensive: both False (should not occur in practice).
-    return SkillStatus.LOCAL_ONLY
+    return SkillStatus.LOCAL_UNTRACKED
 
 
 def _coerce_str(value: object, *, fallback: str) -> str:

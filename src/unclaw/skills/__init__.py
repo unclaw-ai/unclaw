@@ -12,10 +12,6 @@ _EXPORTED_MEMBERS = {
         "unclaw.skills.catalog",
         "build_active_skill_catalog",
     ),
-    "discover_internal_skill_bundles": (
-        "unclaw.skills.file_loader",
-        "discover_internal_skill_bundles",
-    ),
     "discover_skill_bundles": ("unclaw.skills.file_loader", "discover_skill_bundles"),
     "get_skill_bundle_roots": ("unclaw.skills.file_loader", "get_skill_bundle_roots"),
     "list_known_skill_ids": ("unclaw.skills.file_loader", "list_known_skill_ids"),
@@ -24,9 +20,9 @@ _EXPORTED_MEMBERS = {
         "load_active_skill_bundles",
     ),
     "load_skill_bundle": ("unclaw.skills.file_loader", "load_skill_bundle"),
-    "shipped_skill_bundle_root": (
+    "local_skill_install_root": (
         "unclaw.skills.file_loader",
-        "shipped_skill_bundle_root",
+        "local_skill_install_root",
     ),
 }
 

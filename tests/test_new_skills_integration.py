@@ -1,22 +1,21 @@
-"""Integration tests for the git_repo and local_text_search skill bundles.
+"""Integration tests for the catalog-only skill architecture.
 
-Covers:
-- Both new skills are discoverable under ./skills/ alongside weather
-- Both can be activated (tools registered) alongside weather in one registry
-- All new tools are callable via ToolDispatcher and return ToolResults
-- Tools return structured payloads
-- Tools fail honestly on invalid inputs (via dispatcher)
+Skills are no longer bundled with the main repo.  These tests verify the
+runtime behaviour with synthetic skill bundles installed in a temp directory,
+simulating what happens after catalog installation.
 """
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from unclaw.skills.bundle_tools import register_active_skill_tools
-from unclaw.skills.file_loader import discover_skill_bundles, shipped_skill_bundle_root
-from unclaw.tools.contracts import ToolCall
+from unclaw.skills.file_loader import discover_skill_bundles, local_skill_install_root
+from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.registry import ToolRegistry
 
@@ -28,212 +27,152 @@ pytestmark = pytest.mark.unit
 # ---------------------------------------------------------------------------
 
 
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+def _write_skill_bundle(
+    skills_root: Path,
+    skill_id: str,
+    skill_md: str,
+    *,
+    tool_py: str | None = None,
+) -> Path:
+    bundle_dir = skills_root / skill_id
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    (bundle_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+    if tool_py is not None:
+        (bundle_dir / "tool.py").write_text(tool_py, encoding="utf-8")
+    return bundle_dir
 
 
 # ---------------------------------------------------------------------------
-# Discovery: both new skills exist in ./skills/
+# Empty install root
 # ---------------------------------------------------------------------------
 
 
-def test_git_repo_skill_bundle_is_discoverable_in_shipped_skills_root() -> None:
-    skills_root = shipped_skill_bundle_root()
+def test_local_skill_install_root_exists_in_repo() -> None:
+    """The skills/ directory must exist (even if empty after a fresh checkout)."""
+    root = local_skill_install_root()
+    assert root.is_dir()
+
+
+def test_discover_skill_bundles_returns_empty_for_empty_root(tmp_path: Path) -> None:
+    """Empty install directory → no bundles discovered."""
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    assert discover_skill_bundles(skills_root=skills_root) == ()
+
+
+def test_discover_skill_bundles_returns_empty_when_root_missing(tmp_path: Path) -> None:
+    assert discover_skill_bundles(skills_root=tmp_path / "nonexistent") == ()
+
+
+# ---------------------------------------------------------------------------
+# Synthetic skill bundles — simulates post-catalog-install state
+# ---------------------------------------------------------------------------
+
+
+def test_installed_skill_is_discovered(tmp_path: Path) -> None:
+    """A skill installed into skills_root is discovered correctly."""
+    skills_root = tmp_path / "skills"
+    _write_skill_bundle(skills_root, "alpha", "# Alpha\n\nAlpha skill.\n")
+
     bundles = discover_skill_bundles(skills_root=skills_root)
-    skill_ids = {b.skill_id for b in bundles}
+    assert len(bundles) == 1
+    assert bundles[0].skill_id == "alpha"
 
-    assert "git_repo" in skill_ids
 
+def test_multiple_installed_skills_all_discovered(tmp_path: Path) -> None:
+    skills_root = tmp_path / "skills"
+    for sid in ("bravo", "alpha", "charlie"):
+        _write_skill_bundle(skills_root, sid, f"# {sid.title()}\n\nSummary.\n")
 
-def test_local_text_search_skill_bundle_is_discoverable_in_shipped_skills_root() -> None:
-    skills_root = shipped_skill_bundle_root()
     bundles = discover_skill_bundles(skills_root=skills_root)
-    skill_ids = {b.skill_id for b in bundles}
-
-    assert "local_text_search" in skill_ids
-
-
-def test_all_three_skills_discoverable_alongside_each_other() -> None:
-    skills_root = shipped_skill_bundle_root()
-    bundles = discover_skill_bundles(skills_root=skills_root)
-    skill_ids = {b.skill_id for b in bundles}
-
-    assert "weather" in skill_ids
-    assert "git_repo" in skill_ids
-    assert "local_text_search" in skill_ids
+    # Sorted alphabetically
+    assert tuple(b.skill_id for b in bundles) == ("alpha", "bravo", "charlie")
 
 
-def test_skill_bundles_have_valid_skill_md_content() -> None:
-    skills_root = shipped_skill_bundle_root()
-    bundles = {b.skill_id: b for b in discover_skill_bundles(skills_root=skills_root)}
+def test_skill_bundle_with_tool_registers_its_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synthetic skill with a valid register_skill_tools hook registers cleanly."""
+    skills_root = tmp_path / "skills"
+    _write_skill_bundle(
+        skills_root,
+        "synth",
+        "# Synth\n\nSynthetic skill.\nTool hints: Use synth_action.\n",
+        tool_py="# placeholder",
+    )
 
-    for skill_id in ("git_repo", "local_text_search"):
-        bundle = bundles[skill_id]
-        assert bundle.display_name, f"{skill_id} has no display_name"
-        assert bundle.summary, f"{skill_id} has no summary"
-        assert bundle.tool_hints, f"{skill_id} has no tool hints"
+    # Inject a fake module implementing the hook
+    module_name = "skills.synth.tool"
+    fake_mod = types.ModuleType(module_name)
+    _def = ToolDefinition(
+        name="synth_action",
+        description="synthetic tool",
+        permission_level=ToolPermissionLevel.NETWORK,
+        arguments={},
+    )
 
+    def _register(registry) -> None:
+        registry.register(_def, lambda call: None)
 
-# ---------------------------------------------------------------------------
-# Activation: all three skills register cleanly together
-# ---------------------------------------------------------------------------
+    fake_mod.register_skill_tools = _register  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, module_name, fake_mod)
 
-
-def test_all_three_skills_activate_in_one_registry() -> None:
     registry = ToolRegistry()
     registered = register_active_skill_tools(
         registry,
-        enabled_skill_ids=("weather", "git_repo", "local_text_search"),
+        enabled_skill_ids=("synth",),
+        skills_root=skills_root,
     )
 
-    assert "weather" in registered
-    assert "git_repo" in registered
-    assert "local_text_search" in registered
+    assert "synth" in registered
+    assert any(t.name == "synth_action" for t in registry.list_tools())
 
 
-def test_git_repo_tools_present_after_activation() -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("git_repo",))
+def test_skill_ownership_tracked_per_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skills_root = tmp_path / "skills"
+    _write_skill_bundle(skills_root, "s1", "# S1\n\nSkill 1.\n", tool_py="# s1")
+    _write_skill_bundle(skills_root, "s2", "# S2\n\nSkill 2.\n", tool_py="# s2")
 
-    tool_names = {t.name for t in registry.list_tools()}
-    assert "git_status" in tool_names
-    assert "git_recent_commits" in tool_names
-    assert "git_diff_summary" in tool_names
+    def _make_module(module_name: str, tool_name: str) -> types.ModuleType:
+        mod = types.ModuleType(module_name)
+        _d = ToolDefinition(
+            name=tool_name,
+            description="x",
+            permission_level=ToolPermissionLevel.NETWORK,
+            arguments={},
+        )
 
+        def _register(registry) -> None:
+            registry.register(_d, lambda call: None)
 
-def test_local_text_search_tool_present_after_activation() -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("local_text_search",))
+        mod.register_skill_tools = _register  # type: ignore[attr-defined]
+        return mod
 
-    tool_names = {t.name for t in registry.list_tools()}
-    assert "search_local_text" in tool_names
+    monkeypatch.setitem(sys.modules, "skills.s1.tool", _make_module("skills.s1.tool", "tool_s1"))
+    monkeypatch.setitem(sys.modules, "skills.s2.tool", _make_module("skills.s2.tool", "tool_s2"))
 
-
-def test_skill_ownership_is_tracked_correctly() -> None:
     registry = ToolRegistry()
     register_active_skill_tools(
         registry,
-        enabled_skill_ids=("git_repo", "local_text_search"),
+        enabled_skill_ids=("s1", "s2"),
+        skills_root=skills_root,
     )
 
-    assert registry.get_owner_skill_id("git_status") == "git_repo"
-    assert registry.get_owner_skill_id("git_recent_commits") == "git_repo"
-    assert registry.get_owner_skill_id("git_diff_summary") == "git_repo"
-    assert registry.get_owner_skill_id("search_local_text") == "local_text_search"
+    assert registry.get_owner_skill_id("tool_s1") == "s1"
+    assert registry.get_owner_skill_id("tool_s2") == "s2"
 
 
-# ---------------------------------------------------------------------------
-# Callability: tools execute via ToolDispatcher
-# ---------------------------------------------------------------------------
-
-
-def test_git_status_callable_via_dispatcher() -> None:
+def test_runtime_works_with_zero_installed_skills(tmp_path: Path) -> None:
+    """Registry creation with empty skills dir and no enabled IDs raises nothing."""
     registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("git_repo",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="git_status",
-            arguments={"repo_path": str(_repo_root())},
-        )
+    registered = register_active_skill_tools(
+        registry,
+        enabled_skill_ids=(),
+        skills_root=tmp_path / "empty_skills",
     )
-
-    assert result.tool_name == "git_status"
-    assert result.success is True
-    assert result.payload is not None
-
-
-def test_git_recent_commits_callable_via_dispatcher() -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("git_repo",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="git_recent_commits",
-            arguments={"repo_path": str(_repo_root()), "limit": 3},
-        )
-    )
-
-    assert result.tool_name == "git_recent_commits"
-    assert result.success is True
-    assert result.payload is not None
-    assert isinstance(result.payload["commits"], list)
-
-
-def test_git_diff_summary_callable_via_dispatcher() -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("git_repo",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="git_diff_summary",
-            arguments={"repo_path": str(_repo_root()), "target": "HEAD"},
-        )
-    )
-
-    assert result.tool_name == "git_diff_summary"
-    assert result.success is True
-    assert result.payload is not None
-
-
-def test_search_local_text_callable_via_dispatcher(tmp_path: Path) -> None:
-    (tmp_path / "sample.txt").write_text("integration test content\n", encoding="utf-8")
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("local_text_search",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="search_local_text",
-            arguments={"query": "integration test", "root": str(tmp_path)},
-        )
-    )
-
-    assert result.tool_name == "search_local_text"
-    assert result.success is True
-    assert result.payload is not None
-    assert result.payload["total_matches_found"] == 1
-
-
-# ---------------------------------------------------------------------------
-# Honest failure via dispatcher
-# ---------------------------------------------------------------------------
-
-
-def test_git_status_fails_honestly_on_invalid_path_via_dispatcher() -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("git_repo",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="git_status",
-            arguments={"repo_path": "/absolutely/nonexistent/path/xyz"},
-        )
-    )
-
-    assert result.tool_name == "git_status"
-    assert result.success is False
-    assert result.error is not None
-
-
-def test_search_local_text_fails_honestly_on_empty_query_via_dispatcher(
-    tmp_path: Path,
-) -> None:
-    registry = ToolRegistry()
-    register_active_skill_tools(registry, enabled_skill_ids=("local_text_search",))
-    dispatcher = ToolDispatcher(registry=registry)
-
-    result = dispatcher.dispatch(
-        ToolCall(
-            tool_name="search_local_text",
-            arguments={"query": "", "root": str(tmp_path)},
-        )
-    )
-
-    assert result.tool_name == "search_local_text"
-    assert result.success is False
-    assert result.error is not None
+    assert registered == ()
+    assert registry.list_tools() == []

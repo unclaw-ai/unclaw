@@ -91,6 +91,7 @@ def create_default_tool_registry(
         register_active_skill_tools(
             registry,
             enabled_skill_ids=settings.skills.enabled_skill_ids,
+            skills_root=settings.paths.project_root / "skills",
         )
         register_system_tools(registry)
         register_terminal_tools(

@@ -23,10 +23,10 @@ from unclaw.onboarding_flow import (
     load_existing_telegram_config as _load_existing_telegram_config,
     post_configure_ollama as _post_configure_ollama,
     print_plan_summary as _print_plan_summary,
+    prompt_catalog_skill_selection as _prompt_catalog_skill_selection,
     prompt_channel_preset as _prompt_channel_preset,
     prompt_model_pack as _prompt_model_pack,
     prompt_model_profiles as _prompt_model_profiles,
-    prompt_skill_selection as _prompt_skill_selection,
     prompt_telegram_bot_token as _prompt_telegram_bot_token,
 )
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
@@ -214,9 +214,17 @@ def run_onboarding(
 
     prompt_ui.section(
         "🔌 Optional skills",
-        "Skills extend built-in tools with optional domain-specific capabilities.",
+        "Skills extend built-in tools with optional domain-specific capabilities. "
+        "Selected skills are installed from the official catalog.",
     )
-    enabled_skill_ids = _prompt_skill_selection(settings, prompt_ui=prompt_ui)
+    _catalog_entries, _catalog_error = _fetch_onboarding_catalog(
+        settings.catalog.url, output_func=output_func
+    )
+    selected_skill_ids = _prompt_catalog_skill_selection(
+        settings,
+        prompt_ui=prompt_ui,
+        catalog_entries=_catalog_entries,
+    )
 
     prompt_ui.section(
         "🧠 Model profiles",
@@ -261,7 +269,7 @@ def run_onboarding(
         automatic_configuration=automatic_configuration,
         logging_mode=logging_mode,
         enabled_channels=enabled_channels,
-        enabled_skill_ids=enabled_skill_ids,
+        enabled_skill_ids=selected_skill_ids,
         default_profile="main",
         model_pack=selected_pack,
         model_profiles=model_profiles,
@@ -283,6 +291,29 @@ def run_onboarding(
     if not should_write_config:
         output_func("No files were changed.")
         return 1
+
+    # Install selected skills from the remote catalog before writing config.
+    installed_skill_ids = _install_onboarding_skills(
+        settings,
+        plan=plan,
+        catalog_entries=_catalog_entries,
+        output_func=output_func,
+    )
+    # Only enable skills that were actually installed.
+    plan = OnboardingPlan(
+        beginner_mode=plan.beginner_mode,
+        automatic_configuration=plan.automatic_configuration,
+        logging_mode=plan.logging_mode,
+        enabled_channels=plan.enabled_channels,
+        enabled_skill_ids=installed_skill_ids,
+        default_profile=plan.default_profile,
+        model_pack=plan.model_pack,
+        model_profiles=plan.model_profiles,
+        telegram_bot_token=plan.telegram_bot_token,
+        telegram_bot_token_env_var=plan.telegram_bot_token_env_var,
+        telegram_allowed_chat_ids=plan.telegram_allowed_chat_ids,
+        telegram_polling_timeout_seconds=plan.telegram_polling_timeout_seconds,
+    )
 
     write_onboarding_files(settings, plan)
     configured_settings = bootstrap(project_root=settings.paths.project_root)
@@ -338,6 +369,79 @@ def run_onboarding(
             output_func("- Pull the remaining missing models before heavier use.")
 
     return 0
+
+
+def _fetch_onboarding_catalog(
+    catalog_url: str,
+    *,
+    output_func: OutputFunc,
+) -> "tuple[list, str | None]":
+    """Fetch the remote catalog for onboarding skill selection.
+
+    Returns ``(entries, error_message)``.  On failure, entries is empty and
+    error_message describes the problem.  The caller should surface the error
+    to the user but continue onboarding without skill installation.
+    """
+    from unclaw.skills.remote_catalog import CatalogFetchError, fetch_remote_catalog
+
+    try:
+        entries = fetch_remote_catalog(catalog_url)
+        return entries, None
+    except CatalogFetchError as exc:
+        msg = (
+            f"Could not reach the skills catalog ({exc}). "
+            "Skill installation will be skipped — you can run `unclaw onboard` "
+            "again once the network is available."
+        )
+        output_func(msg)
+        return [], msg
+
+
+def _install_onboarding_skills(
+    settings: "Settings",
+    *,
+    plan: "OnboardingPlan",
+    catalog_entries: "list",
+    output_func: OutputFunc,
+) -> "tuple[str, ...]":
+    """Install skills selected during onboarding from the remote catalog.
+
+    Downloads each selected skill into ``./skills/`` and returns the IDs of
+    skills that were successfully installed.  Skills that fail to install are
+    reported to *output_func* and excluded from the returned tuple.
+    """
+    if not plan.enabled_skill_ids:
+        return ()
+
+    from unclaw.skills.installer import SkillInstallError, install_skill
+    from unclaw.skills.remote_catalog import RemoteCatalogEntry
+
+    catalog_by_id: dict[str, RemoteCatalogEntry] = {
+        e.skill_id: e
+        for e in catalog_entries
+        if isinstance(e, RemoteCatalogEntry)
+    }
+    skills_root = settings.paths.project_root / "skills"
+    installed: list[str] = []
+
+    for skill_id in plan.enabled_skill_ids:
+        entry = catalog_by_id.get(skill_id)
+        if entry is None:
+            # Skill was selected but not found in catalog — skip silently.
+            continue
+        output_func(f"Installing {entry.display_name}...")
+        try:
+            install_skill(
+                entry,
+                skills_root=skills_root,
+                catalog_url=settings.catalog.url,
+            )
+            output_func(f"  ✓ {entry.display_name} installed.")
+            installed.append(skill_id)
+        except SkillInstallError as exc:
+            output_func(f"  ✗ Could not install {entry.display_name}: {exc}")
+
+    return tuple(installed)
 
 
 def _build_prompt_ui(

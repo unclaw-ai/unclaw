@@ -21,6 +21,13 @@ from pathlib import Path
 
 import pytest
 
+# Skip this entire module when the local_text_search skill is not installed locally.
+# Skills are no longer bundled; install via `unclaw onboard` to run these tests.
+pytest.importorskip(
+    "skills.local_text_search.tool",
+    reason="local_text_search skill not installed locally",
+)
+
 from skills.local_text_search.tool import (
     SEARCH_LOCAL_TEXT_DEFINITION,
     _DEFAULT_MAX_RESULTS,

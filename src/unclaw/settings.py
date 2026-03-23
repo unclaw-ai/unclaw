@@ -236,7 +236,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
             f"'{app_settings.default_model_profile}' is not defined in "
             f"{models_config_path}."
         )
-    _validate_enabled_skill_ids(skill_settings)
+    _validate_enabled_skill_ids(skill_settings, project_root=resolved_project_root)
 
     return Settings(
         app=app_settings,
@@ -603,13 +603,18 @@ def _resolve_path(base_path: Path, raw_value: str) -> Path:
     return path.resolve()
 
 
-def _validate_enabled_skill_ids(skill_settings: SkillSettings) -> None:
+def _validate_enabled_skill_ids(
+    skill_settings: SkillSettings,
+    *,
+    project_root: Path,
+) -> None:
     if not skill_settings.enabled_skill_ids:
         return
 
     from unclaw.skills.file_loader import list_known_skill_ids
 
-    known_skill_ids = frozenset(list_known_skill_ids())
+    skills_root = project_root / "skills"
+    known_skill_ids = frozenset(list_known_skill_ids(skills_root=skills_root))
     unknown_skill_ids = tuple(
         skill_id
         for skill_id in skill_settings.enabled_skill_ids
@@ -619,7 +624,9 @@ def _validate_enabled_skill_ids(skill_settings: SkillSettings) -> None:
         unknown_labels = ", ".join(unknown_skill_ids)
         raise ConfigurationError(
             "Configuration key 'skills.enabled_skill_ids' contains unknown skill id(s): "
-            f"{unknown_labels}."
+            f"{unknown_labels}. "
+            "Run `unclaw skills` to see what is installed, or "
+            "`unclaw onboard` to install skills from the catalog."
         )
 
 

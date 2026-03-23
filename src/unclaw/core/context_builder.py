@@ -292,8 +292,8 @@ def _resolve_file_first_skill_catalog_for_context(
 
     try:
         # Pass pre-loaded bundles as discovered_skill_bundles so the catalog
-        # builder skips the internal re-discovery step (uses provided bundles
-        # instead of calling discover_internal_skill_bundles again).
+        # builder skips the local directory scan (uses provided bundles
+        # instead of calling discover_skill_bundles again).
         return build_active_skill_catalog(
             enabled_skill_ids=settings.skills.enabled_skill_ids,
             discovered_skill_bundles=active_bundles,

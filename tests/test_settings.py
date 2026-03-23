@@ -167,7 +167,10 @@ def test_load_settings_reads_runtime_guardrail_config(
 def test_load_settings_reads_enabled_skill_ids_from_config(
     make_temp_project,
 ) -> None:
-    project_root = make_temp_project()
+    project_root = make_temp_project(
+        enabled_skill_ids=["weather"],
+        install_skill_bundles={"weather": "# Weather\n\nWeather skill.\n"},
+    )
 
     settings = load_settings(project_root=project_root)
 
@@ -177,7 +180,9 @@ def test_load_settings_reads_enabled_skill_ids_from_config(
 def test_load_settings_accepts_file_first_enabled_skill_ids_from_config(
     make_temp_project,
 ) -> None:
-    project_root = make_temp_project()
+    project_root = make_temp_project(
+        install_skill_bundles={"weather": "# Weather\n\nWeather skill.\n"},
+    )
     app_config_path = project_root / "config" / "app.yaml"
     app_payload = _read_yaml(app_config_path)
     app_payload["skills"]["enabled_skill_ids"] = ["weather"]
@@ -200,9 +205,8 @@ def test_load_settings_errors_when_enabled_skill_id_is_unknown(
     with pytest.raises(ConfigurationError) as exc_info:
         load_settings(project_root=project_root)
 
-    assert (
-        str(exc_info.value)
-        == "Configuration key 'skills.enabled_skill_ids' contains unknown skill id(s): ghost.skill."
+    assert str(exc_info.value).startswith(
+        "Configuration key 'skills.enabled_skill_ids' contains unknown skill id(s): ghost.skill."
     )
 
 

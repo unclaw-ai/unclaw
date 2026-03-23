@@ -297,46 +297,70 @@ class TestFullSkillInjectionInContext:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests: real shipped skill bundles
+# Integration tests: synthetic skill bundles (skills are not shipped in the repo)
 # ---------------------------------------------------------------------------
 
 
 class TestOnDemandIntegration:
-    def test_weather_bundle_selected_for_weather_query(self) -> None:
+    """Validates on-demand loading using synthetic bundles in a temp directory.
+
+    Skills are no longer bundled in the repository — these tests create minimal
+    synthetic skill bundles to exercise the same runtime code paths.
+    """
+
+    def test_weather_bundle_selected_for_weather_query(self, tmp_path: Path) -> None:
         from unclaw.skills.file_loader import load_active_skill_bundles
 
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=("weather",))
+        _make_bundle("weather", tmp_path, summary="Live weather and short forecasts.")
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=("weather",), skills_root=tmp_path
+        )
         result = select_skill_for_turn("What is the weather in Paris?", active_bundles)
         assert result is not None
         assert result.skill_id == "weather"
 
-    def test_weather_bundle_not_selected_for_unrelated_query(self) -> None:
+    def test_weather_bundle_not_selected_for_unrelated_query(self, tmp_path: Path) -> None:
         from unclaw.skills.file_loader import load_active_skill_bundles
 
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=("weather",))
+        _make_bundle("weather", tmp_path, summary="Live weather and short forecasts.")
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=("weather",), skills_root=tmp_path
+        )
         result = select_skill_for_turn("Tell me a joke.", active_bundles)
         assert result is None
 
-    def test_selected_weather_bundle_raw_content_loads(self) -> None:
+    def test_selected_weather_bundle_raw_content_loads(self, tmp_path: Path) -> None:
         from unclaw.skills.file_loader import load_active_skill_bundles
 
-        active_bundles = load_active_skill_bundles(enabled_skill_ids=("weather",))
+        _make_bundle("weather", tmp_path, summary="Live weather and short forecasts.")
+        active_bundles = load_active_skill_bundles(
+            enabled_skill_ids=("weather",), skills_root=tmp_path
+        )
         result = select_skill_for_turn("What is the weather in Paris?", active_bundles)
         assert result is not None
         content = result.load_raw_content()
         assert content.strip()
         assert "# Weather" in content
 
-    def test_full_skill_md_injected_for_unrelated_message(self, monkeypatch) -> None:
+    def test_full_skill_md_injected_for_unrelated_message(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
         """Full SKILL.md is injected unconditionally — no keyword matching gate.
 
         This validates the fix: even a message with no weather-related keywords
         still receives the full weather SKILL.md so the model can choose
         skill-owned tools regardless of message language or phrasing.
         """
+        weather_bundle = _make_bundle(
+            "weather", tmp_path, summary="Live weather and short forecasts."
+        )
         monkeypatch.setattr(
             "unclaw.core.context_builder.build_active_skill_catalog",
             lambda **kwargs: "Active optional skills:\n- weather: Live weather.",
+        )
+        monkeypatch.setattr(
+            "unclaw.core.context_builder.load_active_skill_bundles",
+            lambda *, enabled_skill_ids: (weather_bundle,),
         )
         session_manager = _make_session_manager(enabled_skill_ids=("weather",))
         messages = build_context_messages(

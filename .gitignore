@@ -67,3 +67,7 @@ temp/
 # Docs FR
 docs/tree_structure_FR.txt
 audit/
+
+# Catalog-installed skills (local runtime, never committed)
+# skills/__init__.py is intentionally tracked; skill subdirs are not.
+skills/*/

@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
+# Skip this entire module when the weather skill is not installed locally.
+# Skills are no longer bundled; install via `unclaw onboard` to run these tests.
+pytest.importorskip("skills.weather.tool", reason="weather skill not installed locally")
+
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
