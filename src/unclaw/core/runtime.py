@@ -303,6 +303,7 @@ def run_user_turn(
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
+                        user_input=user_input,
                     )
                 elif assistant_reply is None:
                     assistant_reply = (
@@ -443,8 +444,15 @@ def _run_agent_loop(
     max_steps: int,
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None,
+    user_input: str = "",
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
+    from unclaw.tools.web_entity_guard import (
+        apply_entity_guard_to_tool_calls,
+        extract_user_entity_surface,
+    )
+
+    user_entity_surface = extract_user_entity_surface(user_input)
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
 
@@ -469,13 +477,19 @@ def _run_agent_loop(
             )
         )
 
+        # Apply pre-tool entity guard: restore literal entity if model drifted.
+        guarded_tool_calls = apply_entity_guard_to_tool_calls(
+            tool_calls,
+            user_entity_surface,
+        )
+
         # Execute tool calls concurrently, then replay results in model order.
         tool_results = _execute_runtime_tool_calls(
             session_manager=session_manager,
             session_id=session_id,
             tracer=tracer,
             tool_registry=tool_registry,
-            tool_calls=tool_calls,
+            tool_calls=guarded_tool_calls,
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
         )

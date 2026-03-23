@@ -70,8 +70,8 @@ class ResearchBudget:
 FAST_RESEARCH_BUDGET = ResearchBudget(
     max_sources=3,
     max_source_chars=1500,
-    max_source_note_chars=250,
-    max_merged_note_chars=400,
+    max_source_note_chars=300,
+    max_merged_note_chars=500,
     condensation_timeout_seconds=6.0,
     fast_grounding_max_results=2,
     fast_grounding_max_chars=200,
@@ -112,11 +112,15 @@ def resolve_research_budget(
     normalized_profile = profile_name.strip().lower()
 
     if normalized_profile in {"fast", "codex"}:
+        # Small models (4B class): allocate more room to per-source extraction
+        # so the structured fact extraction step has enough output budget.
+        # Fewer sources but denser notes improves final quality more than
+        # spreading thin across many sources.
         return ResearchBudget(
             max_sources=3,
             max_source_chars=_clamp(int(available * 0.30), 800, 2500),
-            max_source_note_chars=_clamp(int(available * 0.08), 150, 400),
-            max_merged_note_chars=_clamp(int(available * 0.12), 200, 600),
+            max_source_note_chars=_clamp(int(available * 0.12), 200, 500),
+            max_merged_note_chars=_clamp(int(available * 0.15), 250, 700),
             condensation_timeout_seconds=6.0,
             fast_grounding_max_results=2,
             fast_grounding_max_chars=_clamp(int(available * 0.06), 120, 250),
@@ -239,12 +243,13 @@ class _NoteCluster:
 # ---------------------------------------------------------------------------
 
 _SOURCE_CONDENSATION_SYSTEM_PROMPT = (
-    "You are a factual research assistant. Read the source text and output "
-    "only a dense note body. Keep only facts directly stated in the source "
-    "text. Do not infer, combine, or introduce identity claims (profession, "
-    "birthplace, education) that are not explicitly stated here. Prefer "
-    "short semicolon-separated clauses. Do not repeat the source title or "
-    "URL. Use '? ' only when uncertainty materially matters."
+    "You are a research extractor. From the source text, extract facts about "
+    "the query subject as dense semicolon-separated clauses. No headers, no "
+    "prose, no category labels. Include: full names, name variants, dates, "
+    "locations, roles, professions, achievements, affiliations, metrics, and "
+    "direct claims explicitly written in the source. Do not infer, combine, "
+    "or introduce identity claims not in the source. "
+    "Use '? ' prefix only for genuinely uncertain claims."
 )
 
 _MERGE_SYSTEM_PROMPT = (
@@ -258,6 +263,17 @@ _MERGE_SYSTEM_PROMPT = (
     "Use '? claim [N]' for claims found only in a single non-anchor source "
     "(N >= 3) that no other source confirms. "
     "Keep uncertainty compact. No commentary or headers."
+)
+
+_ITERATIVE_REFINE_SYSTEM_PROMPT = (
+    "You are a research note refiner. You are given a current global note and "
+    "a new source note. Refine the global note by integrating new facts from "
+    "the source. Rules: (1) Remove near-duplicate claims — keep the more "
+    "specific version. (2) Preserve complementary facts — if the new source "
+    "adds different facts about the same subject, keep both. (3) Mark clear "
+    "contradictions with '!= claim_A / claim_B'. (4) Do not drop facts from "
+    "the global note unless they are exact duplicates of something already "
+    "kept. (5) Output only the refined note body — no headers, no commentary."
 )
 
 
@@ -299,6 +315,26 @@ def _build_merge_prompt(
         f"Source notes:\n{notes_block}\n\n"
         "Write the merged note body only using compact claim lines and "
         "numeric source refs."
+    )
+
+
+def _build_iterative_refine_prompt(
+    *,
+    global_note: str,
+    new_source_note: SourceNote,
+    new_source_index: int,
+    query: str,
+    max_chars: int,
+) -> str:
+    return (
+        f"Query: {query}\n"
+        f"Max refined note length: {max_chars} characters\n\n"
+        f"Current global note:\n{global_note}\n\n"
+        f"New source [{new_source_index}]: {new_source_note.title}\n"
+        f"{new_source_note.condensed_text}\n\n"
+        "Refine the global note by integrating facts from the new source. "
+        "Remove near-duplicates. Keep complementary facts. "
+        "Mark contradictions with '!= '. Output refined note only."
     )
 
 
@@ -479,8 +515,14 @@ def merge_source_notes(
 ) -> MergedResearchNote:
     """Merge per-source notes into one final compact research note.
 
-    Uses model-driven synthesis when a provider is available, otherwise
-    falls back to deterministic concatenation.
+    When a provider is available and multiple sources exist, uses iterative
+    refinement: starts from the anchor source (highest-ranked) and integrates
+    each subsequent source note one step at a time, preserving complementary
+    facts and marking contradictions at each step.
+
+    For a single source, uses a single condensation call.
+
+    Falls back to deterministic concatenation if all model calls fail.
     """
     if not source_notes:
         return MergedResearchNote(
@@ -489,35 +531,106 @@ def merge_source_notes(
             model_generated=False,
         )
 
-    if provider is not None and profile is not None and len(source_notes) > 0:
-        user_prompt = _build_merge_prompt(
-            source_notes=source_notes,
+    if provider is not None and profile is not None:
+        if len(source_notes) > 1:
+            # Iterative refine: anchor → integrate each subsequent source.
+            merged = _merge_source_notes_iterative(
+                source_notes=source_notes,
+                query=query,
+                budget=budget,
+                provider=provider,
+                profile=profile,
+            )
+            if merged is not None:
+                return merged
+        else:
+            # Single source: direct condensation call.
+            user_prompt = _build_merge_prompt(
+                source_notes=source_notes,
+                query=query,
+                max_chars=budget.max_merged_note_chars,
+            )
+            model_output = _call_condensation_model(
+                provider=provider,
+                profile=profile,
+                system_prompt=_MERGE_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                timeout_seconds=budget.condensation_timeout_seconds,
+                max_output_chars=budget.max_merged_note_chars,
+            )
+            if model_output:
+                return MergedResearchNote(
+                    text=_sanitize_model_note_output(
+                        model_output,
+                        max_chars=budget.max_merged_note_chars,
+                        multiline=True,
+                    ),
+                    source_count=1,
+                    model_generated=True,
+                )
+
+    # Deterministic fallback: cluster + merge source clauses.
+    return _build_deterministic_merged_note(
+        source_notes=source_notes,
+        max_chars=budget.max_merged_note_chars,
+    )
+
+
+def _merge_source_notes_iterative(
+    *,
+    source_notes: Sequence[SourceNote],
+    query: str,
+    budget: ResearchBudget,
+    provider: Any,
+    profile: Any,
+) -> MergedResearchNote | None:
+    """Iteratively refine a global note by integrating source notes one by one.
+
+    Starts from the anchor source (index 0 — highest-ranked), then for each
+    subsequent source note asks the model to integrate new facts while:
+    - removing near-duplicates
+    - preserving complementary facts
+    - keeping contradictions visible with '!= '
+
+    Returns None if all model calls failed (caller falls back to deterministic).
+    The anchor source defines the identity spine; weaker sources extend it.
+    """
+    # Anchor: first (highest-ranked) source initialises the global note.
+    global_note_text = source_notes[0].condensed_text
+    model_generated = False
+
+    for idx, source_note in enumerate(source_notes[1:], start=2):
+        user_prompt = _build_iterative_refine_prompt(
+            global_note=global_note_text,
+            new_source_note=source_note,
+            new_source_index=idx,
             query=query,
             max_chars=budget.max_merged_note_chars,
         )
-        model_output = _call_condensation_model(
+        refined = _call_condensation_model(
             provider=provider,
             profile=profile,
-            system_prompt=_MERGE_SYSTEM_PROMPT,
+            system_prompt=_ITERATIVE_REFINE_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             timeout_seconds=budget.condensation_timeout_seconds,
             max_output_chars=budget.max_merged_note_chars,
         )
-        if model_output:
-            return MergedResearchNote(
-                text=_sanitize_model_note_output(
-                    model_output,
-                    max_chars=budget.max_merged_note_chars,
-                    multiline=True,
-                ),
-                source_count=len(source_notes),
-                model_generated=True,
+        if refined:
+            global_note_text = _sanitize_model_note_output(
+                refined,
+                max_chars=budget.max_merged_note_chars,
+                multiline=True,
             )
+            model_generated = True
+        # On failure keep the current global note unchanged for this step.
 
-    # Deterministic fallback: concatenate source notes
-    return _build_deterministic_merged_note(
-        source_notes=source_notes,
-        max_chars=budget.max_merged_note_chars,
+    if not model_generated:
+        return None  # All model calls failed; caller uses deterministic path.
+
+    return MergedResearchNote(
+        text=global_note_text,
+        source_count=len(source_notes),
+        model_generated=True,
     )
 
 

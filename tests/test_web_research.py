@@ -785,3 +785,304 @@ class TestPayloadContracts:
             "grounding_note": "Quick grounding for: test",
         }
         assert payload["result_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Iterative refine merge (model-driven Layer C)
+# ---------------------------------------------------------------------------
+
+
+class TestMergeSourceNotesIterative:
+    """Tests for the iterative refinement path in merge_source_notes."""
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_iterative_refine_called_for_multiple_sources(
+        self, mock_call: MagicMock
+    ) -> None:
+        """With N sources, the model should be called N-1 times (one per integration step)."""
+        mock_call.return_value = "Refined global note."
+        notes = [
+            _make_source_note(title="S1", text="Alice born 1990 in Paris."),
+            _make_source_note(title="S2", text="Alice is a biologist."),
+            _make_source_note(title="S3", text="Alice won an award in 2020."),
+        ]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="Alice",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        # 3 sources → 2 refine steps
+        assert mock_call.call_count == 2
+        assert merged.model_generated
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_iterative_refine_preserves_anchor_note_on_first_failure(
+        self, mock_call: MagicMock
+    ) -> None:
+        """If the model call fails for a step, the current global note is kept unchanged."""
+        # First refine call fails, second succeeds
+        mock_call.side_effect = [None, "Refined note with S3."]
+        notes = [
+            _make_source_note(title="S1", text="Alice born 1990 in Paris."),
+            _make_source_note(title="S2", text="Alice is a biologist."),
+            _make_source_note(title="S3", text="Alice won an award in 2020."),
+        ]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="Alice",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        # Second call succeeded → model_generated is True
+        assert merged.model_generated
+        assert "S3" in merged.text or "award" in merged.text.lower() or "Refined" in merged.text
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_all_model_calls_fail_falls_back_to_deterministic(
+        self, mock_call: MagicMock
+    ) -> None:
+        """When all iterative refine calls fail, deterministic fallback is used."""
+        mock_call.return_value = None
+        notes = [
+            _make_source_note(title="S1", text="Alice born 1990 in Paris."),
+            _make_source_note(title="S2", text="Alice is a biologist."),
+        ]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="Alice",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        assert not merged.model_generated
+        assert merged.source_count == 2
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_iterative_refine_conflicts_visible(
+        self, mock_call: MagicMock
+    ) -> None:
+        """The iterative refine prompt explicitly requests conflict marking."""
+        # Track the prompt to verify it contains '!= ' instruction
+        captured_prompts: list[str] = []
+
+        def capture(*, provider, profile, system_prompt, user_prompt, **kwargs):  # type: ignore[override]
+            captured_prompts.append(system_prompt + "\n" + user_prompt)
+            return "!= claim_A / claim_B"
+
+        mock_call.side_effect = capture
+
+        notes = [
+            _make_source_note(title="S1", text="Solar energy is cost effective."),
+            _make_source_note(title="S2", text="Solar energy is expensive to install."),
+        ]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="solar energy cost",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        assert "!=" in merged.text
+        # Ensure the system prompt instructed conflict marking
+        assert any("!= " in p or "contradict" in p.lower() for p in captured_prompts)
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_single_source_uses_direct_condensation_not_iterative(
+        self, mock_call: MagicMock
+    ) -> None:
+        """With exactly one source, no iterative step is needed."""
+        mock_call.return_value = "Single source note."
+        notes = [_make_source_note(title="S1", text="Alice born 1990 in Paris.")]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="Alice",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        assert mock_call.call_count == 1
+        assert merged.model_generated
+
+    def test_iterative_refine_source_count_matches_input(self) -> None:
+        """MergedResearchNote.source_count should equal the number of source notes."""
+        notes = [
+            _make_source_note(title="S1", text="Alice born 1990 in Paris."),
+            _make_source_note(title="S2", text="Alice is a biologist."),
+            _make_source_note(title="S3", text="Alice won an award in 2020."),
+        ]
+        merged = merge_source_notes(
+            source_notes=notes,
+            query="Alice",
+            budget=MAIN_RESEARCH_BUDGET,
+            # No provider → deterministic path, but count should still be right
+        )
+        assert merged.source_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Structured extraction density tests (Layer B)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredExtractionDensity:
+    """Verify the new extraction system prompt produces denser, header-free output."""
+
+    def test_extraction_prompt_requests_no_headers(self) -> None:
+        from unclaw.tools.web_research import _SOURCE_CONDENSATION_SYSTEM_PROMPT
+
+        prompt = _SOURCE_CONDENSATION_SYSTEM_PROMPT.lower()
+        assert "no headers" in prompt or "no header" in prompt
+
+    def test_extraction_prompt_requests_semicolons(self) -> None:
+        from unclaw.tools.web_research import _SOURCE_CONDENSATION_SYSTEM_PROMPT
+
+        assert "semicolon" in _SOURCE_CONDENSATION_SYSTEM_PROMPT.lower()
+
+    def test_extraction_prompt_lists_fact_categories(self) -> None:
+        from unclaw.tools.web_research import _SOURCE_CONDENSATION_SYSTEM_PROMPT
+
+        prompt = _SOURCE_CONDENSATION_SYSTEM_PROMPT.lower()
+        # Should mention at least some specific fact categories
+        category_hints = {"date", "location", "role", "name", "profession", "affiliation"}
+        found = sum(1 for c in category_hints if c in prompt)
+        assert found >= 3, f"Expected ≥3 fact category hints, found {found}"
+
+    def test_deterministic_extraction_no_metadata_headers(self) -> None:
+        """Deterministic source note should contain no 'Source:', 'URL:' headers."""
+        artifact = _make_artifact(
+            text=(
+                "Marine Leleu is a French endurance athlete born in 1990. "
+                "She has completed multiple Iron Man triathlons. "
+                "She posts fitness content online."
+            )
+        )
+        note = condense_source(
+            artifact=artifact,
+            query="Marine Leleu",
+            budget=MAIN_RESEARCH_BUDGET,
+        )
+        assert "Source:" not in note.condensed_text
+        assert "URL:" not in note.condensed_text
+        assert "Title:" not in note.condensed_text
+
+    @patch("unclaw.tools.web_research._call_condensation_model")
+    def test_model_extraction_preserves_specific_facts(
+        self, mock_call: MagicMock
+    ) -> None:
+        """Model extraction should be called with source text and return facts."""
+        mock_call.return_value = (
+            "Marine Leleu; born 1990; French endurance athlete; "
+            "Iron Man finisher; fitness content creator"
+        )
+        artifact = _make_artifact(
+            text=(
+                "Marine Leleu, born in 1990, is a French endurance athlete who "
+                "has finished multiple Iron Man triathlons and creates fitness content."
+            )
+        )
+        note = condense_source(
+            artifact=artifact,
+            query="Marine Leleu",
+            budget=MAIN_RESEARCH_BUDGET,
+            provider=MagicMock(),
+            profile=MagicMock(),
+        )
+        assert note.model_generated
+        # Core facts should survive sanitization
+        assert "Marine Leleu" in note.condensed_text or "1990" in note.condensed_text
+
+    def test_fast_budget_source_note_chars_adequate_for_extraction(self) -> None:
+        """FAST_RESEARCH_BUDGET max_source_note_chars should be ≥ 200."""
+        from unclaw.tools.web_research import FAST_RESEARCH_BUDGET
+
+        assert FAST_RESEARCH_BUDGET.max_source_note_chars >= 200
+
+    def test_fast_budget_merged_note_chars_adequate(self) -> None:
+        """FAST_RESEARCH_BUDGET max_merged_note_chars should be ≥ 250."""
+        from unclaw.tools.web_research import FAST_RESEARCH_BUDGET
+
+        assert FAST_RESEARCH_BUDGET.max_merged_note_chars >= 250
+
+    def test_resolve_fast_budget_note_chars_adequate(self) -> None:
+        """Dynamic fast budget for a 4096-ctx model should give ≥ 200 chars per note."""
+        budget = resolve_research_budget(effective_context=4096, profile_name="fast")
+        assert budget.max_source_note_chars >= 200
+
+    def test_resolve_fast_budget_larger_than_old_floor(self) -> None:
+        """New fast budget note chars floor (200) is higher than the old floor (150)."""
+        budget = resolve_research_budget(effective_context=4096, profile_name="fast")
+        assert budget.max_source_note_chars >= 200  # was 150 before
+
+
+# ---------------------------------------------------------------------------
+# Workspace: fast_web_search stays memory-only, search_web stays file-backed
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspacePersistenceBoundary:
+    """Ensure memory-only vs file-backed boundary is respected."""
+
+    @patch("unclaw.tools.web_tools._search_public_web")
+    @patch("unclaw.tools.web_tools._parse_duckduckgo_html_results")
+    def test_fast_web_search_has_no_workspace_dir(
+        self, mock_parse: MagicMock, mock_search: MagicMock
+    ) -> None:
+        """fast_web_search should never produce a workspace_dir in its payload."""
+        from unclaw.tools.web_tools import fast_web_search
+
+        mock_search.return_value = "<html></html>"
+        mock_parse.return_value = [
+            {"title": "T", "url": "https://example.com", "snippet": "s"}
+        ]
+        call = ToolCall(tool_name="fast_web_search", arguments={"query": "Marine Leleu"})
+        result = fast_web_search(call)
+
+        assert result.success
+        assert result.payload is not None
+        assert "workspace_dir" not in result.payload
+        assert "workspace_id" not in result.payload
+
+    @patch("unclaw.tools.web_tools._search_public_web")
+    @patch("unclaw.tools.web_tools._parse_duckduckgo_html_results")
+    @patch("unclaw.tools.web_tools._rank_search_results")
+    @patch("unclaw.tools.web_tools._run_iterative_retrieval")
+    @patch("unclaw.tools.web_tools._synthesize_search_knowledge")
+    def test_search_web_without_workspace_dir_has_no_workspace(
+        self,
+        mock_synth: MagicMock,
+        mock_retrieval: MagicMock,
+        mock_rank: MagicMock,
+        mock_parse: MagicMock,
+        mock_search: MagicMock,
+    ) -> None:
+        """search_web without workspace_base_dir should have no workspace_id."""
+        from unclaw.tools.web_tools import search_web
+
+        mock_search.return_value = "<html></html>"
+        mock_parse.return_value = []
+        mock_rank.return_value = []
+
+        mock_outcome = MagicMock()
+        mock_outcome.sources = ()
+        mock_outcome.evidence_items = ()
+        mock_outcome.initial_result_count = 0
+        mock_outcome.considered_candidate_count = 0
+        mock_outcome.fetch_attempt_count = 0
+        mock_outcome.fetch_success_count = 0
+        mock_retrieval.return_value = mock_outcome
+
+        mock_synth_result = MagicMock()
+        mock_synth_result.fact_clusters = ()
+        mock_synth_result.findings = ()
+        mock_synth_result.statements = ()
+        mock_synth.return_value = mock_synth_result
+
+        call = ToolCall(tool_name="search_web", arguments={"query": "test"})
+        result = search_web(call, workspace_base_dir=None)
+
+        assert result.success
+        assert result.payload is not None
+        assert "workspace_id" not in result.payload
