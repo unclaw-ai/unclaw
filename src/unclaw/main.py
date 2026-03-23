@@ -11,6 +11,7 @@ from unclaw.channels import cli as cli_channel
 from unclaw.channels import telegram_bot
 from unclaw.logs import cli as logs_cli
 from unclaw.onboarding import main as onboarding_main
+from unclaw.skills import cli as skills_cli
 from unclaw.update import main as update_main
 
 
@@ -37,6 +38,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if command_name == "logs":
         return logs_cli.main(project_root=project_root, mode=args.mode)
+    if command_name == "skills":
+        return skills_cli.main(project_root=project_root)
     if command_name == "update":
         return update_main(project_root=project_root)
 
@@ -56,6 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw help\n"
             "  unclaw logs\n"
             "  unclaw logs full\n"
+            "  unclaw skills\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
             "  unclaw telegram allow-latest\n"
@@ -141,6 +145,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional log view. Leave empty for the simple view, or use "
             "`full` for raw JSON. `simple` remains accepted as a compatibility alias."
         ),
+    )
+    subparsers.add_parser(
+        "skills",
+        help="Show skill catalog status: installed, available, and updates.",
     )
     subparsers.add_parser(
         "update",

@@ -32,6 +32,8 @@ runtime:
 skills:
   enabled_skill_ids:
   - weather
+catalog:
+  url: https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.json
 security:
   tools:
     files:

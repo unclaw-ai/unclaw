@@ -52,6 +52,11 @@ SESSION_SUMMARY_RETAINED_FACT_LIMIT = 3
 SESSION_SUMMARY_RETAINED_UNCERTAINTY_LIMIT = 2
 SESSION_SUMMARY_FINDING_CHARACTER_LIMIT = 120
 
+# External skills catalog.
+DEFAULT_SKILLS_CATALOG_URL = (
+    "https://raw.githubusercontent.com/unclaw-ai/skills/main/catalog.json"
+)
+
 # Fallback reply strings shared between runtime.py and research_flow.py.
 EMPTY_RESPONSE_REPLY = "The local model returned an empty response."
 RUNTIME_ERROR_REPLY = (

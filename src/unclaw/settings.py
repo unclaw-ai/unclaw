@@ -21,6 +21,7 @@ from unclaw.constants import (
     DEFAULT_OLLAMA_REQUEST_TIMEOUT_SECONDS,
     DEFAULT_RUNTIME_TOOL_CALL_LIMIT,
     DEFAULT_RUNTIME_TOOL_TIMEOUT_SECONDS,
+    DEFAULT_SKILLS_CATALOG_URL,
     DISPLAY_NAME,
     FILES_DIRECTORY_NAME,
     LOG_FILE_NAME,
@@ -75,6 +76,11 @@ class ThinkingSettings:
 @dataclass(frozen=True, slots=True)
 class SkillSettings:
     enabled_skill_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSettings:
+    url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +186,7 @@ class Settings:
     app: AppSettings
     model_pack: str
     skills: SkillSettings
+    catalog: CatalogSettings
     models: dict[str, ModelProfile]
     dev_profiles: dict[str, ModelProfile]
     paths: RuntimePaths
@@ -205,6 +212,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
     )
     model_pack = _resolve_model_pack_name(models_payload)
     skill_settings = _build_skill_settings(app_payload)
+    catalog_settings = _build_catalog_settings(app_payload)
     dev_model_profiles = _build_dev_model_profiles(models_payload)
     model_profiles = _build_active_model_profiles(
         model_pack=model_pack,
@@ -234,6 +242,7 @@ def load_settings(project_root: Path | None = None) -> Settings:
         app=app_settings,
         model_pack=model_pack,
         skills=skill_settings,
+        catalog=catalog_settings,
         models=model_profiles,
         dev_profiles=dev_model_profiles,
         paths=runtime_paths,
@@ -421,6 +430,12 @@ def _build_skill_settings(payload: Mapping[str, Any]) -> SkillSettings:
     return SkillSettings(
         enabled_skill_ids=_deduplicate_strings(enabled_skill_ids),
     )
+
+
+def _build_catalog_settings(payload: Mapping[str, Any]) -> CatalogSettings:
+    catalog_section = _get_mapping(payload, "catalog")
+    url = _get_str(catalog_section, "url", DEFAULT_SKILLS_CATALOG_URL)
+    return CatalogSettings(url=url)
 
 
 def _resolve_model_pack_name(payload: Mapping[str, Any]) -> str:

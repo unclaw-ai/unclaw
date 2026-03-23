@@ -139,6 +139,8 @@ class CommandHandler:
                         parsed_command,
                         usage_line="/search <query>",
                     )
+                case "skills":
+                    return self._handle_skills(parsed_command.arguments)
                 case "memory-status":
                     return self._handle_memory_status(parsed_command.arguments)
                 case "help":
@@ -326,6 +328,42 @@ class CommandHandler:
             ),
         )
 
+    def _handle_skills(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/skills")
+
+        from unclaw.skills.file_loader import discover_skill_bundles
+        from unclaw.skills.remote_catalog import (
+            CatalogFetchError,
+            build_skill_status_report,
+            fetch_remote_catalog,
+            render_skills_report,
+        )
+
+        catalog_url = self.settings.catalog.url
+
+        try:
+            catalog_entries = fetch_remote_catalog(catalog_url)
+        except CatalogFetchError as exc:
+            return self._error(
+                "Could not fetch the skills catalog.",
+                str(exc),
+                "Local skill runtime is not affected.",
+            )
+
+        local_bundles = discover_skill_bundles(
+            skills_root=self.settings.paths.project_root / "skills"
+        )
+
+        entries = build_skill_status_report(
+            local_bundles=local_bundles,
+            enabled_skill_ids=self.settings.skills.enabled_skill_ids,
+            catalog_entries=catalog_entries,
+        )
+
+        lines = render_skills_report(entries, catalog_url=catalog_url)
+        return self._ok(*lines)
+
     def _handle_memory_status(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/memory-status")
@@ -362,6 +400,9 @@ class CommandHandler:
             "/ls [path]        List one local directory inside allowed roots. Defaults to the current directory.",
             "/fetch <url>      Fetch one public URL.",
             "/search <query>  Search the public web, ground the answer, and append compact sources.",
+            "",
+            "Skills:",
+            "/skills  Show installed, available, and updatable skills.",
             "",
             "Memory:",
             "/session  Show the current session state.",
