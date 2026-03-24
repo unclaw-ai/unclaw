@@ -980,6 +980,11 @@ def _reply_needs_rewrite(
             _contains_unconfirmed_handle_claim(reply_text, grounding=grounding),
             _contains_unsupported_age_claim(reply_text, grounding=grounding),
             _contains_unqualified_uncertain_finding(reply_text, grounding=grounding),
+            _contains_unsupported_profile_expansion(
+                reply_text,
+                grounding=grounding,
+                query=query,
+            ),
             _query_is_person_profile(query) and _contains_low_value_filler(reply_text),
             _contains_unnecessary_hedging(reply_text),
         )
@@ -1039,6 +1044,42 @@ def _contains_unnecessary_hedging(reply_text: str) -> bool:
             flags=re.IGNORECASE,
         )
     )
+
+
+def _contains_unsupported_profile_expansion(
+    reply_text: str,
+    *,
+    grounding: SearchGroundingContext,
+    query: str,
+) -> bool:
+    if not _query_is_person_profile(query) or not grounding.supported_findings:
+        return False
+
+    supported_tokens = set(
+        _content_tokens(" ".join(finding.text for finding in grounding.supported_findings))
+    )
+    if not supported_tokens:
+        return False
+
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", reply_text)
+        if sentence.strip()
+    ]
+    if not sentences:
+        return False
+
+    if len(grounding.supported_findings) <= 1 and len(sentences) > 1:
+        return True
+
+    for sentence in sentences:
+        sentence_tokens = set(_content_tokens(sentence))
+        if len(sentence_tokens) < 4:
+            continue
+        if _overlap_ratio(sentence_tokens, supported_tokens) < 0.45:
+            return True
+
+    return False
 
 
 def _has_uncertainty_language(reply_text: str) -> bool:

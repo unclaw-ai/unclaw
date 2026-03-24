@@ -265,6 +265,32 @@ class TestBiographySourcePrioritization:
         )
         assert ranked[0]["title"] == "Marine Leleu"
 
+    def test_multi_entity_query_tokens_ignore_conjunction_words(self) -> None:
+        """Duo names should match on salient names, not fail on 'et' or 'and'."""
+        search_query = _build_search_query("McFly et Carlito")
+        assert search_query.entity_tokens == ("mcfly", "carlito")
+
+    def test_multi_entity_duo_result_ranks_above_single_name_result(self) -> None:
+        """A result about the duo must outrank results about only one famous name."""
+        search_query = _build_search_query("McFly et Carlito")
+        ranked = _rank_search_results(
+            [
+                {
+                    "title": "Marty McFly - fictional character",
+                    "url": "https://example.com/marty-mcfly",
+                    "snippet": "Marty McFly is the main character from Back to the Future.",
+                },
+                {
+                    "title": "McFly & Carlito - duo YouTube francais",
+                    "url": "https://example.com/mcfly-carlito",
+                    "snippet": "McFly & Carlito sont un duo de createurs video francais.",
+                },
+            ],
+            query=search_query,
+        )
+
+        assert ranked[0]["url"] == "https://example.com/mcfly-carlito"
+
 
 # ---------------------------------------------------------------------------
 # 3. Identity-consistent merge — weak-source pollution resistance
@@ -621,3 +647,177 @@ class TestExecutedQueriesObservability:
         # Must unpack as a 2-tuple without error
         search_query, ranked = result
         assert ranked == []
+
+
+# ---------------------------------------------------------------------------
+# 8. Cross-turn entity isolation and multi-entity routing
+# ---------------------------------------------------------------------------
+
+
+class TestCrossTurnEntityIsolation:
+    """Regression tests for cross-turn entity contamination (phase corrective patch)."""
+
+    def _make_msg(self, role: "MessageRole", content: str) -> "ChatMessage":
+        from unclaw.schemas.chat import ChatMessage
+        return ChatMessage(
+            id="test-id",
+            session_id="test-session",
+            role=role,
+            content=content,
+            created_at="2026-03-24T00:00:00",
+        )
+
+    def test_current_turn_entity_not_overwritten_by_history_anchor(self) -> None:
+        """An explicit entity in the current user turn must win over any entity from history."""
+        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unittest.mock import MagicMock
+        from unclaw.schemas.chat import MessageRole
+
+        mock_sm = MagicMock()
+        mock_sm.list_messages.return_value = [
+            self._make_msg(MessageRole.USER, "Inoxtag N"),
+            self._make_msg(MessageRole.ASSISTANT, "Voici des infos sur Inoxtag."),
+        ]
+
+        anchor = _resolve_entity_anchor_for_turn(
+            session_manager=mock_sm,
+            session_id="test",
+            user_input="Qui est Marine Leleu ?",
+        )
+        assert anchor is not None
+        assert anchor.surface == "Marine Leleu"
+        assert anchor.from_current_turn is True
+
+    def test_history_anchor_is_not_from_current_turn(self) -> None:
+        """A follow-up turn that falls back to history must yield from_current_turn=False."""
+        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unittest.mock import MagicMock
+        from unclaw.schemas.chat import MessageRole
+
+        mock_sm = MagicMock()
+        mock_sm.list_messages.return_value = [
+            self._make_msg(MessageRole.USER, "Qui est Marine Leleu ?"),
+            self._make_msg(MessageRole.ASSISTANT, "Marine Leleu est une athlète."),
+        ]
+
+        anchor = _resolve_entity_anchor_for_turn(
+            session_manager=mock_sm,
+            session_id="test",
+            user_input="Fais leur bio courte.",
+        )
+        # Should fall back to history
+        assert anchor is not None
+        assert anchor.from_current_turn is False
+
+    def test_corrected_history_anchor_preserves_corrected_flag(self) -> None:
+        """A corrected entity from history must keep corrected=True."""
+        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unittest.mock import MagicMock
+        from unclaw.schemas.chat import MessageRole
+
+        mock_sm = MagicMock()
+        mock_sm.list_messages.return_value = [
+            self._make_msg(MessageRole.USER, "Qui sont McFly et Carlito ?"),
+            self._make_msg(MessageRole.ASSISTANT, "Je pensais à d'autres."),
+            self._make_msg(MessageRole.USER, "Non, je parle de McFly et Carlito."),
+            self._make_msg(MessageRole.ASSISTANT, "Compris."),
+        ]
+
+        anchor = _resolve_entity_anchor_for_turn(
+            session_manager=mock_sm,
+            session_id="test",
+            user_input="Fais leur bio courte.",
+        )
+        assert anchor is not None
+        assert anchor.corrected is True
+        assert "McFly" in anchor.surface
+
+    def test_multi_entity_request_returns_no_anchor(self) -> None:
+        """Multi-entity sequential requests must produce no enforcement anchor."""
+        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unittest.mock import MagicMock
+
+        mock_sm = MagicMock()
+
+        anchor = _resolve_entity_anchor_for_turn(
+            session_manager=mock_sm,
+            session_id="test",
+            user_input="Fais une recherche sur Michou, puis sur Cyprien, puis sur Squeezie.",
+        )
+        assert anchor is None, (
+            "Multi-entity request must not produce a single enforcement anchor"
+        )
+
+    def test_multi_entity_request_with_puis_returns_no_anchor(self) -> None:
+        """'puis' is the canonical multi-entity marker — must disable anchor."""
+        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unittest.mock import MagicMock
+
+        mock_sm = MagicMock()
+
+        anchor = _resolve_entity_anchor_for_turn(
+            session_manager=mock_sm,
+            session_id="test",
+            user_input="Recherche Michou puis Squeezie.",
+        )
+        assert anchor is None
+
+
+class TestDuplicateSearchDedup:
+    """Regression tests for duplicate wrong-query dispatch guard."""
+
+    def test_dedup_removes_identical_search_calls(self) -> None:
+        from unclaw.core.runtime import _deduplicate_search_tool_calls
+
+        calls = (
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
+        )
+        deduped = _deduplicate_search_tool_calls(calls)
+        assert len(deduped) == 1
+        assert deduped[0].arguments["query"] == "Michou"
+
+    def test_dedup_keeps_distinct_search_queries(self) -> None:
+        from unclaw.core.runtime import _deduplicate_search_tool_calls
+
+        calls = (
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Cyprien"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Squeezie"}),
+        )
+        deduped = _deduplicate_search_tool_calls(calls)
+        assert len(deduped) == 3
+
+    def test_dedup_preserves_non_search_tools(self) -> None:
+        from unclaw.core.runtime import _deduplicate_search_tool_calls
+
+        calls = (
+            ToolCall(tool_name="fetch_url_text", arguments={"url": "https://example.com"}),
+            ToolCall(tool_name="fetch_url_text", arguments={"url": "https://example.com"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "test"}),
+        )
+        deduped = _deduplicate_search_tool_calls(calls)
+        # Non-search tools are never deduped (they may have side effects)
+        assert len(deduped) == 3
+
+    def test_dedup_case_insensitive_query_comparison(self) -> None:
+        from unclaw.core.runtime import _deduplicate_search_tool_calls
+
+        calls = (
+            ToolCall(tool_name="fast_web_search", arguments={"query": "Marine Leleu"}),
+            ToolCall(tool_name="fast_web_search", arguments={"query": "marine leleu"}),
+        )
+        deduped = _deduplicate_search_tool_calls(calls)
+        assert len(deduped) == 1
+
+    def test_dedup_different_tools_same_query_both_kept(self) -> None:
+        from unclaw.core.runtime import _deduplicate_search_tool_calls
+
+        calls = (
+            ToolCall(tool_name="fast_web_search", arguments={"query": "test"}),
+            ToolCall(tool_name="search_web", arguments={"query": "test"}),
+        )
+        deduped = _deduplicate_search_tool_calls(calls)
+        # Different tool names → different signatures → both kept
+        assert len(deduped) == 2

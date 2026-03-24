@@ -139,11 +139,11 @@ _NAME_PARTICLES = frozenset(
 )
 _QUERY_ENTITY_PATTERNS = (
     re.compile(
-        r"^\s*(?:who\s+is|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of|news\s+about|latest\s+news\s+about)\s+(.+?)\s*$",
+        r"^\s*(?:who\s+is|who\s+are|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of|news\s+about|latest\s+news\s+about)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:qui\s+est|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de|parle(?:\s+moi)?\s+de|actualit(?:e|é)s\s+sur|nouvelles\s+sur)\s+(.+?)\s*$",
+        r"^\s*(?:qui\s+est|qui\s+sont|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de|parle(?:\s+moi)?\s+de|actualit(?:e|é)s\s+sur|nouvelles\s+sur)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
     re.compile(
@@ -153,8 +153,15 @@ _QUERY_ENTITY_PATTERNS = (
 )
 _FOLLOW_UP_CORRECTION_PATTERNS = (
     re.compile(r"^\s*(?:non|no)\s*[,;:-]\s+(.+?)\s*$", re.IGNORECASE),
+    # "non recherche Marine Leleu" / "non cherche X" — negation + verb, entity follows.
+    # These are correction utterances, not refusals.  The verb bridges the negation
+    # and the target entity; strip the prefix to expose the entity.
     re.compile(
-        r"^\s*(?:je\s+parle\s+bien\s+de|je\s+parle\s+de|je\s+veux\s+dire|i\s+mean|i\s+meant|i['’]?m\s+talking\s+about|talking\s+about)\s+(.+?)\s*$",
+        r"^\s*(?:non|no)\s+(?:recherche|cherche|recherche\s+sur|cherche\s+sur)\s+(.+?)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:je\s+parle\s+bien\s+de|je\s+parle\s+de|je\s+veux\s+dire|i\s+mean|i\s+meant|i[‘’]?m\s+talking\s+about|talking\s+about)\s+(.+?)\s*$",
         re.IGNORECASE,
     ),
 )
@@ -189,11 +196,11 @@ _ENTITY_CONTEXT_MODIFIERS = frozenset(
 )
 _IDENTITY_INTENT_PATTERNS = (
     re.compile(
-        r"^\s*(?:who\s+is|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of)\b",
+        r"^\s*(?:who\s+is|who\s+are|who['’]s|tell\s+me\s+about|profile\s+of|bio(?:graphy)?\s+of|give\s+me\s+(?:a|the)\s+bio(?:graphy)?\s+of|write\s+(?:a|the)\s+bio(?:graphy)?\s+of)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^\s*(?:qui\s+est|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de)\b",
+        r"^\s*(?:qui\s+est|qui\s+sont|c['’]?est\s+qui|biographie\s+de|bio\s+de|profil\s+de|fais(?:\s+moi)?\s+une?\s+biographie\s+de|fais(?:\s+moi)?\s+la\s+bio\s+de)\b",
         re.IGNORECASE,
     ),
     re.compile(
@@ -648,10 +655,35 @@ def _extract_entity_surface(query: str) -> str:
             if candidate:
                 return candidate
 
+    # The fallback token-count check: prefer the stripped query (shorter, more
+    # likely to be within the 1-4 token range) before the full original.
+    # This is critical for multi-word entities extracted from correction
+    # utterances like "Non, je parle de McFly et Carlito" whose stripped form
+    # "McFly et Carlito" is 3 tokens but the original is 7.
+    if stripped_query and stripped_query != normalized_query:
+        stripped_surfaces = _query_token_surfaces(stripped_query)
+        if 1 <= len(stripped_surfaces) <= 4:
+            return " ".join(stripped_surfaces)
+
     token_surfaces = _query_token_surfaces(normalized_query)
     if 1 <= len(token_surfaces) <= 4:
         return " ".join(token_surfaces)
     return ""
+
+
+def _entity_match_tokens(entity_surface: str) -> tuple[str, ...]:
+    """Return salient entity tokens used for matching and ranking.
+
+    Coordination words such as ``et`` or ``and`` should not make multi-entity
+    names fail alignment checks (e.g. ``McFly et Carlito`` vs ``McFly & Carlito``).
+    """
+    raw_tokens = _text_tokens(entity_surface)
+    filtered_tokens = tuple(
+        token
+        for token in raw_tokens
+        if token not in _QUERY_STOPWORDS and (len(token) > 1 or token.isdigit())
+    )
+    return filtered_tokens or raw_tokens
 
 
 def _build_context_tokens(query: str, entity_surface: str) -> tuple[str, ...]:
@@ -678,6 +710,7 @@ def _analyze_query_discipline(query: str) -> _QueryDiscipline:
     analysis_query = _strip_follow_up_correction_prefix(normalized_query)
     entity_surface = _extract_entity_surface(analysis_query)
     normalized_entity = _fold_for_match(entity_surface)
+    entity_tokens = _entity_match_tokens(entity_surface)
     context_tokens = _build_context_tokens(analysis_query, entity_surface)
     language_hint = _detect_query_language(analysis_query)
     identity_intent = _query_looks_identity_like(
@@ -696,7 +729,7 @@ def _analyze_query_discipline(query: str) -> _QueryDiscipline:
         conservative_query=conservative_query,
         entity_surface=entity_surface,
         normalized_entity=normalized_entity,
-        entity_tokens=_text_tokens(entity_surface),
+        entity_tokens=entity_tokens,
         context_tokens=context_tokens,
         language_hint=language_hint,
         identity_intent=identity_intent,

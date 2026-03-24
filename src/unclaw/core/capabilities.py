@@ -65,8 +65,8 @@ _COMPACT_GUIDANCE_LINE_SELECTIONS: dict[str, tuple[int, ...]] = {
     # 12: entity ambiguity guard  13: exact entity in tool calls
     "guidance.model_callable.core_rules": (0, 1, 3, 7, 8, 9, 10, 12, 13),
     # 0: identity/bio fast lookup  1: uncertainty guard  2: no normalization first
-    # 5: correction follow-up  6: use liberally for cheap grounding
-    "guidance.model_callable.fast_web_grounding": (0, 1, 2, 5, 6),
+    # 5: correction follow-up  6: do not inflate quick grounding  7: use liberally
+    "guidance.model_callable.fast_web_grounding": (0, 1, 2, 5, 6, 7),
     "guidance.model_callable.long_term_memory": (0, 2, 4, 5, 8, 9),
 }
 _COMPACT_TOOL_LABELS_PER_LINE = 4

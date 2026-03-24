@@ -110,3 +110,36 @@ def test_shape_search_backed_reply_uses_raised_grounding_fact_cap() -> None:
     assert "She co-authored the GripKit open-source toolkit." in reply
     assert "She mentors early-career biomedical engineers." in reply
     assert "She speaks at neighborhood design meetups." not in reply
+
+
+def test_shape_search_backed_reply_keeps_sparse_bio_grounding_evidence_bounded() -> None:
+    payload = {
+        "query": "who is Marine Leleu",
+        "display_sources": [
+            {
+                "title": "Marine Leleu Profile",
+                "url": "https://example.com/marine-leleu",
+            }
+        ],
+        "synthesized_findings": [
+            {
+                "text": "Marine Leleu is a French endurance athlete.",
+                "score": 7.0,
+                "support_count": 1,
+                "source_titles": ["Marine Leleu Profile"],
+                "source_urls": ["https://example.com/marine-leleu"],
+            }
+        ],
+    }
+
+    reply = shape_search_backed_reply(
+        (
+            "Marine Leleu is a French endurance athlete, author, and podcast host. "
+            "She is known for several public speaking tours."
+        ),
+        payload=payload,
+        query="who is Marine Leleu",
+        current_date=date(2026, 3, 15),
+    )
+
+    assert reply == "Marine Leleu is a French endurance athlete."

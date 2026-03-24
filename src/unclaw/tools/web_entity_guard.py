@@ -20,8 +20,12 @@ from collections.abc import Sequence
 from dataclasses import replace as _dataclass_replace
 
 from unclaw.tools.contracts import ToolCall
-from unclaw.tools.web_search import _analyze_query_discipline, _extract_entity_surface
-from unclaw.tools.web_text import _fold_for_match, _text_tokens
+from unclaw.tools.web_search import (
+    _analyze_query_discipline,
+    _entity_match_tokens,
+    _extract_entity_surface,
+)
+from unclaw.tools.web_text import _fold_for_match
 
 _GUARDED_SEARCH_TOOL_NAMES: frozenset[str] = frozenset({"search_web", "fast_web_search"})
 
@@ -107,12 +111,8 @@ def _entity_drift_detected(model_query: str, user_entity_surface: str) -> bool:
     if user_entity_folded in model_query_folded:
         return False
 
-    # No drift: all user entity tokens present in model query.
-    user_entity_tokens = tuple(_text_tokens(user_entity_surface))
+    user_entity_tokens = _entity_match_tokens(user_entity_surface)
     if not user_entity_tokens:
-        return False
-    model_query_token_set = set(model_query_folded.split())
-    if all(tok in model_query_token_set for tok in user_entity_tokens):
         return False
 
     # Only treat as drift if the model query has a proper-name-like entity.
@@ -135,6 +135,35 @@ def _entity_drift_detected(model_query: str, user_entity_surface: str) -> bool:
         return False
 
     model_entity_folded = model_discipline.normalized_entity
+    if model_entity_folded == user_entity_folded:
+        return False
+
+    model_query_token_set = set(model_query_folded.split())
+    if all(tok in model_query_token_set for tok in user_entity_tokens):
+        extra_proper_name_token_present = any(
+            raw_token
+            and raw_token[0].isupper()
+            and _fold_for_match(raw_token) not in set(user_entity_tokens)
+            for raw_token in model_discipline.entity_surface.split()
+        )
+        if not extra_proper_name_token_present:
+            return False
+
+    # Narrow noise tolerance: if the user entity ends with a single isolated
+    # uppercase letter (e.g. "Inoxtag N" — likely a stray keypress), and the
+    # model's entity matches the entity surface without that trailing token,
+    # treat it as no drift.  This is intentionally narrow: requires ≥2 tokens
+    # AND the trailing token is exactly one uppercase letter.
+    user_entity_parts = user_entity_surface.split()
+    if (
+        len(user_entity_parts) >= 2
+        and len(user_entity_parts[-1]) == 1
+        and user_entity_parts[-1][0].isupper()
+    ):
+        trimmed_user_entity_folded = _fold_for_match(" ".join(user_entity_parts[:-1]))
+        if model_entity_folded == trimmed_user_entity_folded:
+            return False  # Model used entity without the trailing noise token — OK
+
     return model_entity_folded != user_entity_folded
 
 

@@ -34,6 +34,10 @@ class TestExtractUserEntitySurface:
         entity = extract_user_entity_surface("Who is Marine Leleu?")
         assert entity == "Marine Leleu"
 
+    def test_extracts_entity_from_french_who_are(self) -> None:
+        entity = extract_user_entity_surface("Qui sont McFly et Carlito ?")
+        assert entity == "McFly et Carlito"
+
     def test_extracts_entity_from_tell_me_about(self) -> None:
         entity = extract_user_entity_surface("Tell me about Ada Lovelace")
         assert entity == "Ada Lovelace"
@@ -48,6 +52,16 @@ class TestExtractUserEntitySurface:
 
     def test_extracts_entity_from_follow_up_correction(self) -> None:
         entity = extract_user_entity_surface("non, Marine Leleu")
+        assert entity == "Marine Leleu"
+
+    def test_extracts_entity_from_non_recherche_correction(self) -> None:
+        """'non recherche X' (no comma) must still extract X as the target entity."""
+        entity = extract_user_entity_surface("non recherche Marine Leleu")
+        assert entity == "Marine Leleu"
+
+    def test_extracts_entity_from_non_cherche_correction(self) -> None:
+        """'non cherche X' is a correction utterance — entity is X."""
+        entity = extract_user_entity_surface("non cherche Marine Leleu")
         assert entity == "Marine Leleu"
 
     def test_extracts_entity_from_explicit_follow_up_reference(self) -> None:
@@ -107,6 +121,32 @@ class TestEntityDriftDetected:
 
     def test_no_drift_same_entity_different_case(self) -> None:
         assert not _entity_drift_detected("marine leleu", "Marine Leleu")
+
+    def test_no_drift_for_multi_entity_conjunction_variant(self) -> None:
+        assert not _entity_drift_detected("McFly & Carlito", "McFly et Carlito")
+
+    def test_detects_drift_when_extra_proper_name_changes_multi_entity_identity(self) -> None:
+        assert _entity_drift_detected(
+            "Marty McFly and Carlito",
+            "McFly et Carlito",
+        )
+
+    def test_no_drift_model_drops_trailing_single_letter_noise(self) -> None:
+        """If user entity has a trailing isolated uppercase letter (keyboard noise
+        like 'Inoxtag N'), the model dropping that letter is not drift."""
+        assert not _entity_drift_detected("Inoxtag", "Inoxtag N")
+
+    def test_drift_detected_completely_different_entity_despite_noise_token(self) -> None:
+        """Even with a trailing noise token on the user entity, drift is still
+        detected when the model entity is completely unrelated."""
+        assert _entity_drift_detected("Marine Leleu", "Inoxtag N")
+
+    def test_no_drift_noise_token_only_when_trailing_single_uppercase(self) -> None:
+        """The noise-trim tolerance only applies to exactly-one-uppercase-letter
+        trailing tokens.  Two-letter suffixes are treated as real entity parts."""
+        # "MC" is 2 chars — no trim; "MC Solaar" → "Solaar" is NOT the trimmed entity
+        # If model uses "MC Solaar", that's fine (entity present).
+        assert not _entity_drift_detected("MC Solaar", "MC Solaar")
 
 
 # ---------------------------------------------------------------------------

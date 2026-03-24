@@ -679,6 +679,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "so explicitly instead of presenting the wrong entity's information.",
             "After the user corrects you, reuse the corrected entity or context "
             "exactly on the next search step and do not drift back to the earlier mistake.",
+            "A fast_web_search note is only a quick grounding probe. Do not "
+            "expand it into a full biography or background profile unless a "
+            "later search_web step confirms those details.",
             "fast_web_search is very fast and cheap — use it liberally for "
             "entity resolution before committing to a full research flow.",
         ),
@@ -735,6 +738,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "retrieved context that you may summarize, compare, extract, or "
             "analyze. Do not say you cannot access it, and do not ask the user "
             "to paste it again.",
+            "After a tool call, if the result is sparse, partial, mixed, or "
+            "failed, say that and give only the facts it directly supports.",
             "If a capability is unavailable, say so clearly instead of implying it exists.",
         ),
         "guidance.unavailable_local_file_actions_warning": _dynamic_prompt(

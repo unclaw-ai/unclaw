@@ -14,6 +14,31 @@ from unclaw.tools.contracts import (
 from unclaw.tools.registry import ToolRegistry
 
 
+_GENERIC_ARGUMENT_ALIASES: dict[str, tuple[str, ...]] = {
+    "command": ("cmd",),
+    "content": ("text", "contents", "body"),
+    "destination_path": ("destination", "destination_file", "dest", "to"),
+    "path": ("file_path", "filepath", "filename"),
+    "query": ("q", "search", "search_query", "search_term"),
+    "source_path": ("source", "source_file", "src", "from"),
+    "url": ("link", "href"),
+}
+_TOOL_SPECIFIC_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "write_text_file": {
+        "content": ("text", "contents", "body"),
+    },
+    "fetch_url_text": {
+        "url": ("link", "href"),
+    },
+    "fast_web_search": {
+        "query": ("q", "search", "search_query"),
+    },
+    "search_web": {
+        "query": ("q", "search", "search_query"),
+    },
+}
+
+
 def _coerce_argument(value: Any, expected_type: str) -> Any:
     """Coerce simple primitive argument types emitted by LLMs.
 
@@ -71,6 +96,70 @@ def _coerce_arguments(
     return coerced
 
 
+def _repair_obvious_argument_aliases(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    schema: dict[str, ToolArgumentDefinition],
+) -> dict[str, Any]:
+    """Recover safe near-miss argument names like ``text`` -> ``content``.
+
+    Recovery is intentionally conservative:
+    - only when the target schema key exists and is currently missing
+    - only when exactly one obvious alias is present
+    - never when the alias is itself a declared schema key
+    """
+    if not arguments or not schema:
+        return dict(arguments)
+
+    repaired = dict(arguments)
+    declared_keys = set(schema)
+    tool_specific_aliases = _TOOL_SPECIFIC_ARGUMENT_ALIASES.get(tool_name, {})
+
+    for target_name in declared_keys:
+        if target_name in repaired:
+            continue
+
+        candidate_aliases = tool_specific_aliases.get(
+            target_name,
+            _GENERIC_ARGUMENT_ALIASES.get(target_name, ()),
+        )
+        matching_aliases = [
+            alias
+            for alias in candidate_aliases
+            if alias in repaired and alias not in declared_keys
+        ]
+        if len(matching_aliases) != 1:
+            continue
+
+        alias_name = matching_aliases[0]
+        repaired[target_name] = repaired.pop(alias_name)
+
+    return repaired
+
+
+def normalize_tool_call_for_execution(
+    registry: ToolRegistry,
+    call: ToolCall,
+) -> ToolCall:
+    """Return a repaired + type-coerced tool call ready for execution."""
+    registered_tool = registry.get(call.tool_name)
+    if registered_tool is None:
+        return call
+
+    schema = dict(registered_tool.definition.arguments)
+    repaired_arguments = _repair_obvious_argument_aliases(
+        tool_name=call.tool_name,
+        arguments=call.arguments,
+        schema=schema,
+    )
+    coerced_arguments = _coerce_arguments(repaired_arguments, schema)
+    return ToolCall(
+        tool_name=call.tool_name,
+        arguments=coerced_arguments,
+    )
+
+
 @dataclass(slots=True)
 class ToolDispatcher:
     """Execute one tool call against a registry."""
@@ -89,12 +178,9 @@ class ToolDispatcher:
         # Type coercion layer
         # -----------------------------
         try:
-            schema = dict(registered_tool.definition.arguments)
-            coerced_arguments = _coerce_arguments(call.arguments, schema)
-
-            call = ToolCall(
-                tool_name=call.tool_name,
-                arguments=coerced_arguments,
+            call = normalize_tool_call_for_execution(
+                self.registry,
+                call,
             )
 
         except Exception as exc:
@@ -139,4 +225,4 @@ class ToolDispatcher:
         return result
 
 
-__all__ = ["ToolDispatcher"]
+__all__ = ["ToolDispatcher", "normalize_tool_call_for_execution"]

@@ -8,6 +8,7 @@ import pytest
 
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.tools.contracts import ToolCall, ToolPermissionLevel, ToolResult
+from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
     WRITE_TEXT_FILE_DEFINITION,
     _MAX_WRITE_FILE_CHARS,
@@ -498,6 +499,21 @@ def test_write_text_file_dispatched_via_registry_handler(tmp_path: Path) -> None
     result = registered.handler(call)
     assert result.success is True
     assert (tmp_path / "via-handler.txt").read_text(encoding="utf-8") == "dispatched"
+
+
+def test_write_text_file_dispatcher_recovers_text_alias_to_content(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    register_file_tools(registry, project_root=tmp_path)
+
+    result = ToolDispatcher(registry).dispatch(
+        ToolCall(
+            tool_name="write_text_file",
+            arguments={"path": str(tmp_path / "alias.txt"), "text": "aliased"},
+        )
+    )
+
+    assert result.success is True
+    assert (tmp_path / "alias.txt").read_text(encoding="utf-8") == "aliased"
 
 
 # ---------------------------------------------------------------------------

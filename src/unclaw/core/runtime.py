@@ -38,9 +38,9 @@ from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMRespons
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory.protocols import SessionMemoryContextProvider
-from unclaw.schemas.chat import MessageRole
+from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
-from unclaw.tools.dispatcher import ToolDispatcher
+from unclaw.tools.dispatcher import ToolDispatcher, normalize_tool_call_for_execution
 from unclaw.tools.registry import ToolRegistry
 _MAX_STEPS_FALLBACK_REPLY = (
     "I reached the maximum number of steps for this request. "
@@ -55,6 +55,7 @@ _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
     "invalid tool payload. Please try again or rephrase the request."
 )
 _CURRENT_REQUEST_ROUTING_NOTE_PREFIX = "Current request routing hint:"
+_ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
 _URL_PATTERN = re.compile(r"https?://\S+", flags=re.IGNORECASE)
 _DIRECTORY_SCOPE_PATTERN = re.compile(
@@ -88,7 +89,7 @@ _SYSTEM_INFO_REQUEST_PATTERN = re.compile(
     r"heure locale|date du jour)\b"
 )
 _IDENTITY_REQUEST_PATTERN = re.compile(
-    r"\b(?:who is|who's|qui est|c'?est qui|bio de|biographie de|"
+    r"\b(?:who is|who are|who's|qui est|qui sont|c'?est qui|bio de|biographie de|"
     r"biography of|bio of)\b"
 )
 _WEB_LOOKUP_REQUEST_PATTERN = re.compile(
@@ -100,6 +101,31 @@ _WEB_LOOKUP_REQUEST_PATTERN = re.compile(
 _URL_FETCH_REQUEST_PATTERN = re.compile(
     r"\b(?:fetch|open|read|inspect|summarize|check|visit|load|show|analyze|"
     r"look at|ouvre|lire|inspecte|resume|resumer|visite)\b"
+)
+_FOLLOW_UP_ENTITYLESS_PATTERN = re.compile(
+    r"\b(?:their|them|they|that|this|those|it|him|her|his|its|"
+    r"leur|leurs|eux|elles?|ils?|sa|son|ses|bio(?:graphy)?|biographie|"
+    r"profile|profil|background|parcours|resume|resumer|shorter|brief|"
+    r"court|courte|more about|plus sur|full bio|complete bio)\b"
+)
+_EXPLICIT_ENTITY_CORRECTION_PATTERN = re.compile(
+    r"^\s*(?:non|no)\b|"
+    r"\b(?:je parle(?: bien)? de|je veux dire|i mean|i meant|"
+    r"i am talking about|i'm talking about|talking about)\b",
+    flags=re.IGNORECASE,
+)
+_FULL_BIO_REQUEST_PATTERN = re.compile(
+    r"\b(?:everything you know|full bio(?:graphy)?|complete bio(?:graphy)?|"
+    r"biographie complete|bio complete|biographie courte|biographie detaillee|"
+    r"biographie detaillee|tout ce que tu sais|bio complete|bio courte)\b",
+    flags=re.IGNORECASE,
+)
+_LIMITATION_ACK_PATTERN = re.compile(
+    r"\b(?:could not|couldn't|cannot|can't|did not|didn't|not confirmed|"
+    r"unconfirmed|limited|partial|sparse|insufficient|failed|timed out|timeout|"
+    r"je n'ai pas pu|je ne peux pas|je ne pouvais pas|non confirme|"
+    r"pas confirme|limite|limitee|partiel|partielle|echec|a expire|expire)\b",
+    flags=re.IGNORECASE,
 )
 
 
@@ -145,6 +171,17 @@ class _InlineToolPayloadAnalysis:
     tool_calls: tuple[ToolCall, ...] | None = None
     raw_tool_calls_payload: tuple[dict[str, Any], ...] | None = None
     invalid_tool_payload: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _EntityAnchor:
+    surface: str
+    corrected: bool = False
+    # True when the entity surface was extracted from the CURRENT user turn.
+    # False when it came from a history traversal (follow-up fallback).
+    # The entity guard is only applied when from_current_turn is True OR
+    # the anchor is an explicit correction — never for stale history fallbacks.
+    from_current_turn: bool = False
 
 
 def run_user_turn(
@@ -222,6 +259,7 @@ def run_user_turn(
     system_context_notes: tuple[str, ...] = ()
     runtime_explicit_tool_call = explicit_tool_call
     assistant_reply: str | None = None
+    turn_tool_results: list[ToolResult] = []
     turn_start_message_count = len(session_manager.list_messages(session.id))
 
     # Track whether the streaming callback was ever invoked by the provider.
@@ -265,12 +303,22 @@ def run_user_turn(
             user_input=user_input,
             capability_summary=capability_summary,
         )
+        entity_anchor = _resolve_entity_anchor_for_turn(
+            session_manager=session_manager,
+            session_id=session.id,
+            user_input=user_input,
+        )
+        entity_recentering_note = _build_entity_recentering_note(
+            entity_anchor=entity_anchor,
+            user_input=user_input,
+        )
         system_context_notes = tuple(
             note
             for note in (
                 memory_context_note,
                 local_access_note,
                 request_routing_note,
+                entity_recentering_note,
             )
             if note is not None
         )
@@ -284,13 +332,15 @@ def run_user_turn(
                 tool_guard_state=tool_guard_state,
             )
             if assistant_reply is None:
-                _execute_runtime_tool_calls(
-                    session_manager=session_manager,
-                    session_id=session.id,
-                    tracer=active_tracer,
-                    tool_registry=active_tool_registry,
-                    tool_calls=(runtime_explicit_tool_call,),
-                    tool_guard_state=tool_guard_state,
+                turn_tool_results.extend(
+                    _execute_runtime_tool_calls(
+                        session_manager=session_manager,
+                        session_id=session.id,
+                        tracer=active_tracer,
+                        tool_registry=active_tool_registry,
+                        tool_calls=(runtime_explicit_tool_call,),
+                        tool_guard_state=tool_guard_state,
+                    )
                 )
                 if tool_guard_state.is_cancelled():
                     assistant_reply = _TURN_CANCELLED_REPLY
@@ -369,7 +419,18 @@ def run_user_turn(
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
-                        user_input=user_input,
+                        user_entity_surface=(
+                            # Only activate the pre-tool entity guard when the anchor
+                            # came from the current turn (explicit mention) or from an
+                            # explicit correction by the user.  History-fallback anchors
+                            # must not override the model's entity choice — they only
+                            # inform the recentering note injected into the system prompt.
+                            entity_anchor.surface
+                            if entity_anchor is not None
+                            and (entity_anchor.from_current_turn or entity_anchor.corrected)
+                            else ""
+                        ),
+                        collected_tool_results=turn_tool_results,
                     )
                 elif assistant_reply is None:
                     assistant_reply = (
@@ -408,6 +469,11 @@ def run_user_turn(
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
+    assistant_reply = _apply_post_tool_reply_discipline(
+        reply=assistant_reply,
+        user_input=user_input,
+        tool_results=turn_tool_results,
+    )
 
     # Fallback: if a callback was registered but the provider never invoked it
     # (e.g. the model returned all content in a final aggregated chunk with no
@@ -521,6 +587,156 @@ def _normalize_runtime_routing_text(text: str) -> str:
     return " ".join(without_marks.split())
 
 
+def _looks_like_explicit_entity_correction(user_input: str) -> bool:
+    return _EXPLICIT_ENTITY_CORRECTION_PATTERN.search(user_input) is not None
+
+
+def _looks_like_follow_up_entity_request(
+    *,
+    user_input: str,
+    normalized_user_input: str,
+) -> bool:
+    if _looks_like_identity_request(normalized_user_input):
+        return True
+    if _FOLLOW_UP_ENTITYLESS_PATTERN.search(normalized_user_input) is not None:
+        return True
+    return user_input.strip().endswith("?") and len(normalized_user_input.split()) <= 8
+
+
+def _find_recent_entity_anchor(
+    history: Sequence[ChatMessage],
+) -> _EntityAnchor | None:
+    from unclaw.tools.web_entity_guard import extract_user_entity_surface
+
+    fallback_anchor: _EntityAnchor | None = None
+    user_messages_seen = 0
+    # When a correction utterance is found but the entity can't be extracted
+    # from it (e.g. the sentence is too long: "Non, je parle bien du duo
+    # YouTube francais McFly et Carlito"), carry this flag forward so the
+    # next entity-bearing message is still treated as the corrected target.
+    correction_context_active = False
+
+    for message in reversed(history):
+        if message.role is not MessageRole.USER:
+            continue
+        user_messages_seen += 1
+        if user_messages_seen > 8:
+            break
+
+        message_is_correction = _looks_like_explicit_entity_correction(message.content)
+        if message_is_correction:
+            correction_context_active = True
+
+        surface = extract_user_entity_surface(message.content)
+        if not surface:
+            continue
+        normalized_message = _normalize_runtime_routing_text(message.content)
+        if (
+            _looks_like_follow_up_entity_request(
+                user_input=message.content,
+                normalized_user_input=normalized_message,
+            )
+            and _normalize_runtime_routing_text(surface).strip(" .!?")
+            == normalized_message.strip(" .!?")
+        ):
+            continue
+
+        anchor = _EntityAnchor(
+            surface=surface,
+            # Corrected either when this message is itself a correction, or when
+            # a correction utterance appeared more recently in history (and its
+            # entity could not be extracted, but it signals the same topic).
+            corrected=message_is_correction or correction_context_active,
+        )
+        if anchor.corrected:
+            return anchor
+        if fallback_anchor is None:
+            fallback_anchor = anchor
+
+    return fallback_anchor
+
+
+def _resolve_entity_anchor_for_turn(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+) -> _EntityAnchor | None:
+    from unclaw.tools.web_entity_guard import extract_user_entity_surface
+
+    explicit_surface = extract_user_entity_surface(user_input)
+    normalized_user_input = _normalize_runtime_routing_text(user_input)
+    normalized_explicit_surface = _normalize_runtime_routing_text(explicit_surface)
+    explicit_surface_is_generic_follow_up = (
+        explicit_surface
+        and _looks_like_follow_up_entity_request(
+            user_input=user_input,
+            normalized_user_input=normalized_user_input,
+        )
+        and normalized_explicit_surface.strip(" .!?") == normalized_user_input.strip(" .!?")
+    )
+    if explicit_surface and not explicit_surface_is_generic_follow_up:
+        # Multi-entity sequential requests (e.g. "Michou puis Cyprien puis Squeezie")
+        # cannot be reduced to one enforcement surface — disable the guard so each
+        # tool call keeps the entity the model naturally picks per sub-request.
+        if _looks_like_multi_entity_request(user_input):
+            return None
+        return _EntityAnchor(
+            surface=explicit_surface,
+            corrected=_looks_like_explicit_entity_correction(user_input),
+            from_current_turn=True,
+        )
+
+    if not _looks_like_follow_up_entity_request(
+        user_input=user_input,
+        normalized_user_input=normalized_user_input,
+    ):
+        return None
+
+    # Follow-up: walk history to find the anchor entity.  History anchors always
+    # have from_current_turn=False so the entity guard stays inactive for them
+    # (only the recentering note nudges the model — no hard enforcement).
+    return _find_recent_entity_anchor(session_manager.list_messages(session_id))
+
+
+def _build_entity_recentering_note(
+    *,
+    entity_anchor: _EntityAnchor | None,
+    user_input: str,
+) -> str | None:
+    if entity_anchor is None:
+        return None
+
+    explicit_surface_in_turn = bool(entity_anchor.surface) and (
+        entity_anchor.surface.casefold() in user_input.casefold()
+    )
+
+    if entity_anchor.corrected and explicit_surface_in_turn:
+        return (
+            f"{_ENTITY_RECENTERING_NOTE_PREFIX} "
+            f"the user just corrected the target entity or context to "
+            f"'{entity_anchor.surface}'. Reuse that exact entity on the next "
+            "search or biography step and do not drift back to the earlier mistake."
+        )
+
+    if entity_anchor.corrected:
+        return (
+            f"{_ENTITY_RECENTERING_NOTE_PREFIX} "
+            f"this turn appears to follow the user's corrected entity or context "
+            f"'{entity_anchor.surface}'. Reuse it for the next search or biography "
+            "step and do not ask generic clarification again unless a new ambiguity remains."
+        )
+
+    if explicit_surface_in_turn:
+        return None
+
+    return (
+        f"{_ENTITY_RECENTERING_NOTE_PREFIX} "
+        f"this turn looks like a follow-up about '{entity_anchor.surface}'. "
+        "Keep that entity centered on the next tool step unless the user changes it."
+    )
+
+
 def _looks_like_direct_url_fetch_request(
     *,
     user_input: str,
@@ -598,6 +814,51 @@ def _looks_like_local_file_request(
 
 def _looks_like_explicit_web_lookup_request(normalized_user_input: str) -> bool:
     return _WEB_LOOKUP_REQUEST_PATTERN.search(normalized_user_input) is not None
+
+
+_MULTI_ENTITY_SEQUENCE_PATTERN = re.compile(
+    r"\b(?:puis(?:\s+sur)?|ensuite(?:\s+sur)?|et\s+ensuite|et\s+puis|"
+    r"then(?:\s+for)?|and\s+then(?:\s+for)?)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_multi_entity_request(user_input: str) -> bool:
+    """Return True when the request clearly sequences multiple entity lookups.
+
+    Detects patterns like 'Michou, puis Cyprien, puis Squeezie' or
+    'search Michou then Cyprien then Squeezie'.  When True, no single entity
+    surface should be enforced across all planned tool calls.
+    """
+    normalized = _normalize_runtime_routing_text(user_input)
+    return _MULTI_ENTITY_SEQUENCE_PATTERN.search(normalized) is not None
+
+
+_SEARCH_TOOL_NAMES_FOR_DEDUP: frozenset[str] = frozenset({"fast_web_search", "search_web"})
+
+
+def _deduplicate_search_tool_calls(
+    tool_calls: tuple[ToolCall, ...],
+) -> tuple[ToolCall, ...]:
+    """Drop duplicate search calls with identical (tool, query) in a single batch.
+
+    When entity-routing goes wrong and the same query is emitted for all
+    planned searches (e.g. 'Michou' three times instead of Michou/Cyprien/
+    Squeezie), executing them all wastes cycles and produces misleading output.
+    This guard eliminates the duplicates before execution.  Non-search tool
+    calls are always kept.
+    """
+    seen_signatures: set[tuple[str, str]] = set()
+    deduped: list[ToolCall] = []
+    for tc in tool_calls:
+        if tc.tool_name in _SEARCH_TOOL_NAMES_FOR_DEDUP:
+            query = str(tc.arguments.get("query", "")).casefold().strip()
+            sig = (tc.tool_name, query)
+            if sig in seen_signatures:
+                continue
+            seen_signatures.add(sig)
+        deduped.append(tc)
+    return tuple(deduped)
 
 
 def _build_request_routing_note(
@@ -728,6 +989,251 @@ def _build_request_routing_note(
     return None
 
 
+def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
+    return tool_result.payload if isinstance(tool_result.payload, dict) else {}
+
+
+def _tool_result_timed_out(tool_result: ToolResult) -> bool:
+    haystack = " ".join(
+        part for part in (tool_result.error, tool_result.output_text) if part
+    )
+    return "timed out" in haystack.casefold()
+
+
+def _extract_fast_grounding_points(tool_result: ToolResult) -> tuple[str, ...]:
+    grounding_note = _tool_result_payload_dict(tool_result).get("grounding_note")
+    note = grounding_note if isinstance(grounding_note, str) else tool_result.output_text
+    return tuple(
+        line[2:].strip()
+        for line in note.splitlines()
+        if line.strip().startswith("- ")
+    )
+
+
+def _fast_web_search_result_is_mismatch(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return False
+    note = tool_result.output_text.casefold()
+    return (
+        "different entity" in note
+        or "no exact top match" in note
+        or "no web results found" in note
+    )
+
+
+def _fast_web_search_result_is_thin(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return True
+
+    payload = _tool_result_payload_dict(tool_result)
+    result_count = payload.get("result_count")
+    supported_points = _extract_fast_grounding_points(tool_result)
+    if _fast_web_search_result_is_mismatch(tool_result):
+        return True
+    if isinstance(result_count, int) and result_count <= 1:
+        return True
+    return len(supported_points) <= 1
+
+
+def _search_web_result_is_thin(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return True
+
+    payload = _tool_result_payload_dict(tool_result)
+    evidence_count = payload.get("evidence_count")
+    finding_count = payload.get("finding_count")
+    display_sources = payload.get("display_sources")
+
+    if isinstance(finding_count, int) and finding_count <= 1:
+        return True
+    if isinstance(evidence_count, int) and evidence_count <= 1:
+        return True
+    if isinstance(display_sources, list) and len(display_sources) <= 1:
+        return True
+    return False
+
+
+def _reply_acknowledges_limitations(reply: str) -> bool:
+    return _LIMITATION_ACK_PATTERN.search(reply) is not None
+
+
+def _detect_runtime_reply_language(user_input: str) -> str:
+    normalized = _normalize_runtime_routing_text(user_input)
+    if any(
+        token in normalized.split()
+        for token in (
+            "biographie",
+            "de",
+            "est",
+            "fais",
+            "leur",
+            "qui",
+            "recherche",
+            "sur",
+            "quoi",
+        )
+    ):
+        return "fr"
+    return "en"
+
+
+def _reply_sentence_count(text: str) -> int:
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text.strip())
+        if sentence.strip()
+    ]
+    return len(sentences) if sentences else (1 if text.strip() else 0)
+
+
+def _build_all_failed_tool_reply(
+    *,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+) -> str:
+    language = _detect_runtime_reply_language(user_input)
+    timeout_failed = any(_tool_result_timed_out(tool_result) for tool_result in tool_results)
+
+    if language == "fr":
+        if timeout_failed:
+            return (
+                "L'etape outil a expire, donc je n'ai pas pu confirmer les details "
+                "demandes a partir des resultats recuperes."
+            )
+        return (
+            "L'etape outil a echoue, donc je n'ai pas pu confirmer les details "
+            "demandes a partir des resultats recuperes."
+        )
+
+    if timeout_failed:
+        return (
+            "The tool step timed out, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+    return (
+        "The tool step failed, so I couldn't confirm the requested details "
+        "from retrieved tool evidence."
+    )
+
+
+def _build_fast_grounding_guarded_reply(
+    *,
+    candidate_reply: str,
+    user_input: str,
+    fast_results: Sequence[ToolResult],
+) -> str | None:
+    if not fast_results:
+        return None
+
+    language = _detect_runtime_reply_language(user_input)
+    supported_points = [
+        point
+        for tool_result in fast_results
+        for point in _extract_fast_grounding_points(tool_result)[:1]
+    ]
+    any_mismatch = any(
+        _fast_web_search_result_is_mismatch(tool_result) for tool_result in fast_results
+    )
+    all_thin = all(_fast_web_search_result_is_thin(tool_result) for tool_result in fast_results)
+    full_bio_requested = _FULL_BIO_REQUEST_PATTERN.search(user_input) is not None
+    reply_is_minimal = _reply_sentence_count(candidate_reply) <= 1
+
+    if len(fast_results) > 1 and (any_mismatch or all_thin):
+        if language == "fr":
+            return (
+                "Les resultats de grounding rapide etaient limites ou melanges, "
+                "donc je ne peux confirmer que des fragments partiels pour ces "
+                "entites. Je ne peux pas confirmer des biographies completes a partir de ces seules recherches rapides."
+            )
+        return (
+            "The quick grounding results were limited or mixed, so I can only "
+            "confirm partial fragments for these entities. I couldn't confirm "
+            "full biographies from those probes alone."
+        )
+
+    primary_point = supported_points[0] if supported_points else ""
+    if any_mismatch and not primary_point:
+        if language == "fr":
+            return (
+                "Le grounding web rapide semblait pointer vers une autre entite, "
+                "donc je ne peux pas confirmer les details demandes a partir de "
+                "ce resultat seul."
+            )
+        return (
+            "The quick web grounding appeared to match a different entity, so I "
+            "couldn't confirm the requested details from that result alone."
+        )
+
+    if primary_point and (
+        full_bio_requested
+        or (
+            all_thin
+            and not reply_is_minimal
+            and primary_point.casefold() not in candidate_reply.casefold()
+        )
+        or (all_thin and _reply_sentence_count(candidate_reply) > 1)
+    ):
+        if language == "fr":
+            return (
+                f"{primary_point} Je ne peux pas confirmer une biographie plus "
+                "complete a partir de ce grounding rapide seul."
+            )
+        return (
+            f"{primary_point} I couldn't confirm a fuller biography from that "
+            "quick grounding probe alone."
+        )
+
+    return None
+
+
+def _apply_post_tool_reply_discipline(
+    *,
+    reply: str,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+) -> str:
+    stripped_reply = reply.strip()
+    if not stripped_reply or not tool_results:
+        return stripped_reply
+    if stripped_reply == _TURN_CANCELLED_REPLY:
+        return stripped_reply
+
+    if all(tool_result.success is False for tool_result in tool_results):
+        if _reply_acknowledges_limitations(stripped_reply):
+            return stripped_reply
+        return _build_all_failed_tool_reply(
+            user_input=user_input,
+            tool_results=tool_results,
+        )
+
+    successful_search_web = any(
+        tool_result.tool_name == "search_web" and tool_result.success
+        for tool_result in tool_results
+    )
+    successful_fast_web = [
+        tool_result
+        for tool_result in tool_results
+        if tool_result.tool_name == "fast_web_search" and tool_result.success
+    ]
+    if successful_fast_web and not successful_search_web:
+        guarded_reply = _build_fast_grounding_guarded_reply(
+            candidate_reply=stripped_reply,
+            user_input=user_input,
+            fast_results=successful_fast_web,
+        )
+        if guarded_reply is not None:
+            # Preserve already-minimal honest replies when they are shorter than
+            # our fallback and clearly acknowledge the result limits.
+            if _reply_acknowledges_limitations(stripped_reply) and (
+                len(stripped_reply) <= len(guarded_reply)
+                or _reply_sentence_count(stripped_reply) <= 2
+            ):
+                return stripped_reply
+            return guarded_reply
+
+    return stripped_reply
+
+
 def _build_post_tool_grounding_note(
     *,
     tool_results: Sequence[ToolResult],
@@ -746,17 +1252,52 @@ def _build_post_tool_grounding_note(
             f"{success_count} success(es) and {error_count} error(s)."
         ),
         "Base the next reply on the latest tool results above.",
+        "Only state facts that the latest tool outputs directly support.",
         "If the user's request is now answered, reply directly from that evidence.",
         "If one obvious missing fact remains and a listed tool can get it, call that tool now instead of stopping early.",
         "Do not ask for clarification when the current request already gives enough information for the next obvious tool step.",
         "Do not contradict successful tool output, and do not say a tool failed unless the tool result above says it failed.",
+        "Do not infer missing names, professions, achievements, biographies, timelines, or background details from weak clues.",
     ]
+
+    if any(
+        _fast_web_search_result_is_thin(tool_result)
+        or _search_web_result_is_thin(tool_result)
+        for tool_result in tool_results
+    ):
+        lines.append(
+            "One or more latest tool outputs are thin or partial. Say that they are limited and give only the supported fragment."
+        )
+    if any(tool_result.success is False for tool_result in tool_results):
+        lines.append(
+            "A failed or timed-out tool call does not confirm the requested fact. If no successful tool result supports it, say you could not confirm it."
+        )
+    if len(tool_results) > 1:
+        lines.append(
+            "Keep multiple tool results separate. If quality differs across entities or sources, say which parts are solid and which remain weak."
+        )
+    if any(
+        tool_result.tool_name in {
+            "system_info",
+            "read_text_file",
+            "list_directory",
+            "run_terminal_command",
+            "fetch_url_text",
+        }
+        for tool_result in tool_results
+    ):
+        lines.append(
+            "For local file, terminal, system, or fetched-page output, summarize only what the tool output actually shows."
+        )
 
     if "fast_web_search" in latest_tool_names and "search_web" in available_tool_names:
         lines.append(
             "If the quick grounding note identified the entity but the request still "
             "needs a fuller answer, call search_web next with the exact confirmed "
             "entity wording."
+        )
+        lines.append(
+            "Do not turn a short fast_web_search grounding note into a full biography unless a later search_web step confirms those details."
         )
     if "list_directory" in latest_tool_names and "read_text_file" in available_tool_names:
         lines.append(
@@ -783,15 +1324,12 @@ def _run_agent_loop(
     max_steps: int,
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None,
-    user_input: str = "",
+    user_entity_surface: str = "",
+    collected_tool_results: list[ToolResult] | None = None,
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
-    from unclaw.tools.web_entity_guard import (
-        apply_entity_guard_to_tool_calls,
-        extract_user_entity_surface,
-    )
+    from unclaw.tools.web_entity_guard import apply_entity_guard_to_tool_calls
 
-    user_entity_surface = extract_user_entity_surface(user_input)
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
 
@@ -821,6 +1359,9 @@ def _run_agent_loop(
             tool_calls,
             user_entity_surface,
         )
+        # Drop duplicate search calls with identical queries (routing corruption
+        # can collapse all multi-entity planned calls into the same wrong query).
+        guarded_tool_calls = _deduplicate_search_tool_calls(guarded_tool_calls)
 
         # Execute tool calls concurrently, then replay results in model order.
         tool_results = _execute_runtime_tool_calls(
@@ -832,6 +1373,8 @@ def _run_agent_loop(
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
         )
+        if collected_tool_results is not None:
+            collected_tool_results.extend(tool_results)
         for tool_result in tool_results:
             context_messages.append(
                 LLMMessage(
@@ -957,18 +1500,22 @@ def _start_pending_tool_executions(
         if tool_guard_state.is_cancelled():
             break
 
+        normalized_tool_call = normalize_tool_call_for_execution(
+            tool_registry,
+            tool_call,
+        )
         started_at = perf_counter()
         if tool_call_callback is not None:
-            tool_call_callback(tool_call)
+            tool_call_callback(normalized_tool_call)
         tracer.trace_tool_started(
             session_id=session_id,
-            tool_name=tool_call.tool_name,
-            arguments=tool_call.arguments,
-            skill_id=tool_registry.get_owner_skill_id(tool_call.tool_name),
+            tool_name=normalized_tool_call.tool_name,
+            arguments=normalized_tool_call.arguments,
+            skill_id=tool_registry.get_owner_skill_id(normalized_tool_call.tool_name),
         )
         done_event = threading.Event()
         pending_call = _PendingToolExecution(
-            tool_call=tool_call,
+            tool_call=normalized_tool_call,
             started_at=started_at,
             done_event=done_event,
         )
