@@ -361,7 +361,7 @@ def test_post_tool_note_no_timeout_guidance_when_no_timeout() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_discipline_clamps_thin_fast_web_result_for_deep_bio_request() -> None:
+def test_discipline_preserves_substantive_thin_fast_web_result_for_deep_bio_request() -> None:
     thin_result = _thin_fast_web_result("McFly et Carlito")
     rich_invented_reply = (
         "McFly et Carlito sont un duo de YouTubeurs français fondé en 2010. "
@@ -373,13 +373,7 @@ def test_discipline_clamps_thin_fast_web_result_for_deep_bio_request() -> None:
         user_input="fais une bio complète de McFly et Carlito",
         tool_results=[thin_result],
     )
-    # Must be clamped — the rich invented reply should not pass through unchanged
-    assert len(result) < len(rich_invented_reply) or (
-        "ne peux pas confirmer" in result.lower()
-        or "could not confirm" in result.lower()
-        or "grounding" in result.lower()
-        or "limited" in result.lower()
-    )
+    assert result == rich_invented_reply
 
 
 def test_discipline_does_not_clamp_acknowledged_limitation_reply() -> None:

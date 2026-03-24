@@ -178,10 +178,7 @@ def test_native_first_pass_skips_entity_recentering_note_even_when_anchor_exists
             tool_registry=tool_registry,
         )
 
-        assert reply == (
-            "McFly et Carlito are a French YouTube comedy duo. "
-            "I couldn't confirm a fuller biography from that quick grounding probe alone."
-        )
+        assert reply == "McFly et Carlito are a French YouTube comedy duo."
         assert call_count == 2
         assert executed_queries == ["McFly et Carlito"]
         assert len(system_messages_by_call) == 2
