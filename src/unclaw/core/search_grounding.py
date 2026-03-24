@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import json
 import re
@@ -14,9 +14,7 @@ from unclaw.core.search_payload_helpers import (
     read_search_display_sources,
     read_search_string_items,
 )
-from unclaw.errors import ConfigurationError
-from unclaw.llm.base import LLMMessage, LLMProviderError, LLMRole
-from unclaw.llm.model_profiles import resolve_model_profile
+from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.settings import Settings
 from unclaw.tools.contracts import SearchWebPayload
@@ -495,46 +493,13 @@ def _run_semantic_grounding_request(
     messages: Sequence[LLMMessage],
     timeout_seconds: float,
 ) -> str | None:
-    try:
-        profile = resolve_model_profile(settings, model_profile_name)
-    except ConfigurationError:
-        return None
+    from unclaw.core.grounding_model_call import run_grounding_model_call
 
-    provider = _create_semantic_provider(settings, provider_name=profile.provider)
-    if provider is None:
-        return None
-
-    semantic_profile = replace(profile, temperature=0.0)
-    try:
-        response = provider.chat(
-            profile=semantic_profile,
-            messages=messages,
-            timeout_seconds=timeout_seconds,
-            thinking_enabled=False,
-        )
-    except LLMProviderError:
-        return None
-
-    return response.content
-
-
-def _create_semantic_provider(
-    settings: Settings,
-    *,
-    provider_name: str,
-) -> Any | None:
-    from unclaw.core import orchestrator as orchestrator_module
-
-    provider_class = getattr(orchestrator_module, "OllamaProvider", None)
-    if provider_class is None:
-        return None
-
-    expected_provider_name = getattr(provider_class, "provider_name", "")
-    if provider_name != expected_provider_name:
-        return None
-
-    return provider_class(
-        default_timeout_seconds=settings.app.providers.ollama.timeout_seconds,
+    return run_grounding_model_call(
+        settings=settings,
+        model_profile_name=model_profile_name,
+        messages=messages,
+        timeout_seconds=timeout_seconds,
     )
 
 
