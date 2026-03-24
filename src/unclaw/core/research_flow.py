@@ -17,7 +17,7 @@ from unclaw.core.search_grounding import (
     parse_search_tool_history,
     shape_reply_with_grounding,
 )
-from unclaw.core.runtime import run_user_turn
+from unclaw.core.runtime_research_shared import run_user_turn
 from unclaw.llm.base import LLMContentCallback
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.tools.contracts import SearchWebPayload, ToolCall, ToolResult
