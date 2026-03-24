@@ -94,6 +94,9 @@ def test_main_help_mentions_telegram_management_commands(capsys) -> None:
 
     assert "unclaw telegram allow-latest" in help_text
     assert "unclaw telegram list" in help_text
+    assert "Interactive slash commands after `unclaw start`:" in help_text
+    assert "  /control workspace\n" in help_text
+    assert "  /ctx main 4096\n" in help_text
 
 
 def test_main_help_uses_logs_as_the_canonical_simple_command(capsys) -> None:

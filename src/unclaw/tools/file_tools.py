@@ -1029,7 +1029,10 @@ def resolve_allowed_roots(
     configured_roots: tuple[str, ...],
 ) -> tuple[Path, ...]:
     base_root = project_root.resolve() if project_root is not None else Path.cwd().resolve()
-    roots = [base_root]
+    roots: list[Path] = []
+
+    if not configured_roots:
+        roots.append(base_root)
 
     for raw_root in configured_roots:
         candidate = Path(raw_root).expanduser()

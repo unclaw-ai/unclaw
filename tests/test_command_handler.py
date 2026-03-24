@@ -23,9 +23,17 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/use <session_id>  Switch to an existing session." in result.lines
     assert "/model                 Show the active model profile." in result.lines
     assert "/model <profile_name>  Switch model profiles." in result.lines
+    assert "/profiles              Show model profiles, tools, and context windows." in result.lines
+    assert "/ctx                   Show context windows for each profile." in result.lines
+    assert (
+        "/ctx <profile_name> <num_ctx>  Save a context window override for one profile."
+        in result.lines
+    )
     assert "/think                 Show thinking mode status." in result.lines
     assert "/think on              Turn thinking mode on." in result.lines
     assert "/think off             Turn thinking mode off." in result.lines
+    assert "/control              Show the current local access preset and roots." in result.lines
+    assert "/control <preset>     Set local access to safe, workspace, or full." in result.lines
     assert "/tools            List built-in tools." in result.lines
     assert "/read <path>      Read one local file inside allowed roots." in result.lines
     assert (
@@ -49,6 +57,8 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/skills update --all  Update every installed skill that has a newer catalog version." in result.lines
     assert "/help  Show this command list with examples." in result.lines
     assert "Examples:" in result.lines
+    assert "/control workspace" in result.lines
+    assert "/ctx main 4096" in result.lines
     assert "/ls ." in result.lines
     assert "/ls /home/user/project" in result.lines
     assert "/read README.md" in result.lines
@@ -239,6 +249,146 @@ def test_switching_back_to_supported_model_keeps_thinking_off() -> None:
     assert handler.thinking_enabled is False
 
 
+def test_profiles_lists_models_and_context_windows() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+    )
+
+    result = handler.handle("/profiles")
+
+    assert result.status is CommandStatus.OK
+    assert result.lines[0] == "Model profiles:"
+    assert any("main | model=" in line and "ctx=8192" in line for line in result.lines)
+    assert any("| current" in line for line in result.lines)
+
+
+def test_ctx_without_arguments_lists_current_context_windows() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+    )
+
+    result = handler.handle("/ctx")
+
+    assert result.status is CommandStatus.OK
+    assert result.lines[0] == "Context windows:"
+    assert any("main | ctx=8192" in line for line in result.lines)
+    assert result.lines[-1] == "Use /ctx <profile_name> <num_ctx> to save a new value."
+
+
+def test_control_without_arguments_shows_current_preset_and_roots() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/control")
+
+    assert result.status is CommandStatus.OK
+    assert result.lines[0] == "Control preset: workspace"
+    assert "Meaning:" in result.lines[1]
+    assert result.lines[2] == "Tool access: restricted"
+    assert result.lines[3] == "Allowed roots:"
+
+
+def test_control_command_persists_new_preset(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = _build_session_manager(settings=settings)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+    )
+
+    result = handler.handle("/control safe")
+
+    assert result.status is CommandStatus.OK
+    assert result.updated_settings is not None
+    assert result.refresh_tool_executor is True
+    assert handler.settings.app.security.tools.files.control_preset == "safe"
+    assert handler.settings.app.security.tools.files.allowed_roots == ("data/files",)
+    assert result.lines[0] == "Saved control preset: safe."
+
+
+def test_control_command_rejects_invalid_preset() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/control ghost")
+
+    assert result.status is CommandStatus.ERROR
+    assert result.lines == (
+        "Unknown control preset 'ghost'. Available presets: safe, workspace, full.",
+    )
+
+
+def test_control_command_reports_config_write_failures(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.persist_control_preset",
+        lambda settings, preset_name: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/control full")
+
+    assert result.status is CommandStatus.ERROR
+    assert result.lines == ("Could not save control preset: disk full",)
+
+
+def test_ctx_command_persists_new_context_window(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = _build_session_manager(settings=settings)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+    )
+
+    result = handler.handle("/ctx main 4096")
+
+    assert result.status is CommandStatus.OK
+    assert result.updated_settings is not None
+    assert result.refresh_tool_executor is True
+    assert handler.settings.models["main"].num_ctx == 4096
+    assert result.lines == ("Saved context window: main=4096.",)
+
+
+def test_ctx_command_rejects_invalid_num_ctx() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/ctx main nope")
+
+    assert result.status is CommandStatus.ERROR
+    assert result.lines == ("Context window must be an integer.",)
+
+
+def test_ctx_command_rejects_too_small_num_ctx() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/ctx main 512")
+
+    assert result.status is CommandStatus.ERROR
+    assert result.lines == ("Context window must be at least 1024 tokens.",)
+
+
 def test_ls_defaults_to_current_directory_when_no_path_is_given() -> None:
     handler = CommandHandler(
         settings=_load_repo_settings(),
@@ -303,8 +453,8 @@ def _load_repo_settings():
     return load_settings(project_root=Path(__file__).resolve().parents[1])
 
 
-def _build_session_manager() -> SimpleNamespace:
-    return SimpleNamespace(current_session_id="sess-current")
+def _build_session_manager(settings=None) -> SimpleNamespace:
+    return SimpleNamespace(current_session_id="sess-current", settings=settings)
 
 
 def _with_default_fast_and_thinking_enabled(settings):

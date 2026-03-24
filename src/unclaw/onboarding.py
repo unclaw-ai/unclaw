@@ -284,6 +284,11 @@ def run_onboarding(
         "Check the plan before Unclaw writes local configuration files.",
     )
     _print_plan_summary(plan, output_func=output_func)
+    output_func(
+        "- Local access: "
+        f"{settings.app.security.tools.files.control_preset} preset "
+        "(change later with `/control`)."
+    )
     should_write_config = prompt_ui.confirm(
         "Write this configuration now?",
         default=True,
@@ -335,6 +340,8 @@ def run_onboarding(
     output_func("")
     output_func("What to do next:")
     output_func("- Start the terminal experience with `unclaw start`.")
+    output_func("- Review local access later with `/control` inside the CLI.")
+    output_func("- Tune profile context later with `/ctx <profile> <num_ctx>`.")
     if "telegram" in enabled_channels:
         output_func("- Start your Telegram bot with `unclaw telegram`.")
         output_func(

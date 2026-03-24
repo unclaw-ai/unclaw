@@ -35,7 +35,9 @@ skills:
 security:
   tools:
     files:
+      control_preset: full
       allowed_roots:
       - .
+      - /home/moussetik
     fetch:
       allow_private_networks: false

@@ -50,6 +50,35 @@ def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
     )
 
 
+def test_startup_report_includes_control_and_context_summary(monkeypatch) -> None:
+    settings = load_settings(project_root=_repo_root())
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=True,
+            model_names=(settings.default_model.model_name,),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(settings.app.default_model_profile,),
+    )
+
+    control_check = next(check for check in report.checks if check.label == "Control")
+    profile_check = next(check for check in report.checks if check.label == "Profiles")
+
+    assert "Workspace preset" in control_check.detail
+    assert "Allowed roots:" in control_check.detail
+    assert "Context windows:" in profile_check.detail
+    assert "main=8192" in profile_check.detail
+
+
 def test_startup_report_uses_pack_resolved_default_model(
     monkeypatch,
     make_temp_project,

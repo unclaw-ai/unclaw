@@ -339,6 +339,7 @@ def _print_banner(
                         f"{command_handler.current_model_profile.model_name}"
                     ),
                 ),
+                ("control", settings.app.security.tools.files.control_preset),
                 ("thinking", command_handler.thinking_label),
                 ("logging", settings.app.logging.mode),
             ),
@@ -359,6 +360,7 @@ def _build_preflight_banner(settings: Settings) -> str:
                 "default",
                 f"{settings.app.default_model_profile} -> {settings.default_model.model_name}",
             ),
+            ("control", settings.app.security.tools.files.control_preset),
             ("logging", settings.app.logging.mode),
         ),
     )

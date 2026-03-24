@@ -73,7 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw telegram allow-latest\n"
             "  unclaw telegram allow 123456789\n"
             "  unclaw telegram list\n"
-            "  unclaw update"
+            "  unclaw update\n"
+            "\n"
+            "Interactive slash commands after `unclaw start`:\n"
+            "  /control\n"
+            "  /control workspace\n"
+            "  /profiles\n"
+            "  /ctx\n"
+            "  /ctx main 4096"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

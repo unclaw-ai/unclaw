@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from unclaw.control_surface import CONTROL_PRESET_CUSTOM
 from unclaw.errors import ConfigurationError
 from unclaw.local_secrets import (
     LOCAL_SECRETS_FILE_NAME,
@@ -104,6 +105,12 @@ def build_onboarding_file_payloads(
             },
         },
     }
+    files_security_section = app_payload["security"]["tools"]["files"]
+    assert isinstance(files_security_section, dict)
+    if settings.app.security.tools.files.control_preset != CONTROL_PRESET_CUSTOM:
+        files_security_section["control_preset"] = (
+            settings.app.security.tools.files.control_preset
+        )
 
     models_payload: dict[str, object] = {
         "active_pack": plan.model_pack,
@@ -128,6 +135,14 @@ def build_onboarding_file_payloads(
         if profile.keep_alive is not None:
             profile_payload["keep_alive"] = profile.keep_alive
         profiles_section[profile_name] = profile_payload
+    if settings.profile_overrides:
+        profile_overrides_payload: dict[str, object] = {}
+        for profile_name, override in settings.profile_overrides.items():
+            if override.num_ctx is None:
+                continue
+            profile_overrides_payload[profile_name] = {"num_ctx": override.num_ctx}
+        if profile_overrides_payload:
+            models_payload["profile_overrides"] = profile_overrides_payload
 
     telegram_payload: dict[str, object] = {
         "bot_token_env_var": plan.telegram_bot_token_env_var,
@@ -168,7 +183,15 @@ def _write_yaml(path: Path, payload: dict[str, object]) -> None:
         sort_keys=False,
         allow_unicode=False,
     )
-    path.write_text(rendered, encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temp_path.write_text(rendered, encoding="utf-8")
+        temp_path.replace(path)
+    except OSError as exc:
+        raise ConfigurationError(f"Could not write {path}: {exc}") from exc
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
 
 def _backup_existing_files(paths: list[Path]) -> None:

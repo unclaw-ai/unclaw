@@ -7,12 +7,23 @@ from enum import StrEnum
 from shlex import split as shlex_split
 from typing import TYPE_CHECKING
 
+from unclaw.control_surface import (
+    CONTROL_PRESET_NAMES,
+    MIN_PROFILE_NUM_CTX,
+    build_control_surface_summary,
+)
 from unclaw.core.executor import resolve_builtin_tool_command
 from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.errors import ConfigurationError
 from unclaw.memory.diagnostics import collect_memory_diagnostics, render_memory_diagnostics
 from unclaw.schemas.session import SessionSummary
 from unclaw.startup import warm_load_model_profile
-from unclaw.settings import ModelProfile, Settings
+from unclaw.settings import (
+    ModelProfile,
+    Settings,
+    persist_control_preset,
+    persist_profile_num_ctx,
+)
 from unclaw.tools.contracts import ToolCall
 
 if TYPE_CHECKING:
@@ -116,6 +127,12 @@ class CommandHandler:
                     return self._handle_session(parsed_command.arguments)
                 case "model":
                     return self._handle_model(parsed_command.arguments)
+                case "profiles":
+                    return self._handle_profiles(parsed_command.arguments)
+                case "ctx":
+                    return self._handle_ctx(parsed_command.arguments)
+                case "control":
+                    return self._handle_control(parsed_command.arguments)
                 case "think":
                     return self._handle_think(parsed_command.arguments)
                 case "tools":
@@ -265,6 +282,108 @@ class CommandHandler:
 
         return self._ok(*lines)
 
+    def _handle_profiles(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/profiles")
+
+        lines = ["Model profiles:"]
+        for profile_name, profile in self.settings.models.items():
+            marker = "*" if profile_name == self.current_model_profile_name else " "
+            current_suffix = " | current" if marker == "*" else ""
+            lines.append(
+                f"{marker} {profile.name} | model={profile.model_name} | "
+                f"ctx={self._format_num_ctx(profile.num_ctx)} | tools={profile.tool_mode}"
+                f"{current_suffix}"
+            )
+        lines.append("Use /model <profile_name> to switch profiles.")
+        lines.append("Use /ctx <profile_name> <num_ctx> to change one context window.")
+        return self._ok(*lines)
+
+    def _handle_ctx(self, arguments: tuple[str, ...]) -> CommandResult:
+        if not arguments:
+            lines = ["Context windows:"]
+            for profile_name, profile in self.settings.models.items():
+                marker = "*" if profile_name == self.current_model_profile_name else " "
+                current_suffix = " | current" if marker == "*" else ""
+                lines.append(
+                    f"{marker} {profile.name} | ctx={self._format_num_ctx(profile.num_ctx)} "
+                    f"| model={profile.model_name}{current_suffix}"
+                )
+            lines.append("Use /ctx <profile_name> <num_ctx> to save a new value.")
+            return self._ok(*lines)
+
+        if len(arguments) != 2:
+            return self._usage("/ctx <profile_name> <num_ctx>")
+
+        profile_name = arguments[0].strip().lower()
+        if profile_name not in self.settings.models:
+            available_profiles = ", ".join(sorted(self.settings.models))
+            return self._error(
+                f"Unknown model profile '{profile_name}'. "
+                f"Available profiles: {available_profiles}."
+            )
+
+        try:
+            num_ctx = int(arguments[1])
+        except ValueError:
+            return self._error("Context window must be an integer.")
+        if num_ctx < MIN_PROFILE_NUM_CTX:
+            return self._error(
+                f"Context window must be at least {MIN_PROFILE_NUM_CTX} tokens."
+            )
+
+        previous_settings = self.settings
+        try:
+            updated_settings = persist_profile_num_ctx(
+                self.settings,
+                profile_name=profile_name,
+                num_ctx=num_ctx,
+            )
+        except (ConfigurationError, OSError) as exc:
+            return self._error(f"Could not save context window: {exc}")
+
+        if updated_settings is previous_settings:
+            return self._ok(f"Context window unchanged: {profile_name}={num_ctx}.")
+
+        self._apply_updated_settings(updated_settings)
+        return self._ok(
+            f"Saved context window: {profile_name}={num_ctx}.",
+            updated_settings=updated_settings,
+            refresh_tool_executor=True,
+        )
+
+    def _handle_control(self, arguments: tuple[str, ...]) -> CommandResult:
+        if not arguments:
+            return self._ok(*self._build_control_summary_lines())
+
+        if len(arguments) != 1:
+            return self._usage("/control <safe|workspace|full>")
+
+        preset_name = arguments[0].strip().lower()
+        if preset_name not in CONTROL_PRESET_NAMES:
+            available_presets = ", ".join(CONTROL_PRESET_NAMES)
+            return self._error(
+                f"Unknown control preset '{preset_name}'. "
+                f"Available presets: {available_presets}."
+            )
+
+        previous_settings = self.settings
+        try:
+            updated_settings = persist_control_preset(self.settings, preset_name)
+        except (ConfigurationError, OSError) as exc:
+            return self._error(f"Could not save control preset: {exc}")
+
+        if updated_settings is not previous_settings:
+            self._apply_updated_settings(updated_settings)
+            lines = [f"Saved control preset: {preset_name}.", *self._build_control_summary_lines()]
+            return self._ok(
+                *lines,
+                updated_settings=updated_settings,
+                refresh_tool_executor=True,
+            )
+
+        return self._ok(f"Control preset unchanged: {preset_name}.")
+
     def _handle_think(self, arguments: tuple[str, ...]) -> CommandResult:
         if not arguments:
             lines = [f"Thinking mode: {self.thinking_label}"]
@@ -398,9 +517,16 @@ class CommandHandler:
             "Models:",
             "/model                 Show the active model profile.",
             "/model <profile_name>  Switch model profiles.",
+            "/profiles              Show model profiles, tools, and context windows.",
+            "/ctx                   Show context windows for each profile.",
+            "/ctx <profile_name> <num_ctx>  Save a context window override for one profile.",
             "/think                 Show thinking mode status.",
             "/think on              Turn thinking mode on.",
             "/think off             Turn thinking mode off.",
+            "",
+            "Control:",
+            "/control              Show the current local access preset and roots.",
+            "/control <preset>     Set local access to safe, workspace, or full.",
             "",
             "Tools:",
             "/tools            List built-in tools.",
@@ -428,6 +554,8 @@ class CommandHandler:
             "/help  Show this command list with examples.",
             "",
             "Examples:",
+            "/control workspace",
+            "/ctx main 4096",
             "/ls .",
             "/ls /home/user/project",
             "/read README.md",
@@ -521,6 +649,28 @@ class CommandHandler:
             return value or None
 
         return raw_value
+
+    def _build_control_summary_lines(self) -> tuple[str, ...]:
+        summary = build_control_surface_summary(
+            preset_name=self.settings.app.security.tools.files.control_preset,
+            project_root=self.settings.paths.project_root,
+            allowed_roots=self.settings.app.security.tools.files.allowed_roots,
+        )
+        lines = [
+            f"Control preset: {summary.preset_name}",
+            f"Meaning: {summary.preset_description}",
+            f"Tool access: {summary.access_scope}",
+            "Allowed roots:",
+        ]
+        lines.extend(f"- {root}" for root in summary.allowed_roots)
+        return tuple(lines)
+
+    def _apply_updated_settings(self, updated_settings: Settings) -> None:
+        self.settings = updated_settings
+        self.session_manager.settings = updated_settings
+
+    def _format_num_ctx(self, num_ctx: int | None) -> str:
+        return str(num_ctx) if num_ctx is not None else "default"
 
     def _ok(
         self,

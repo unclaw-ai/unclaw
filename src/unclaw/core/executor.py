@@ -92,17 +92,10 @@ def create_default_tool_registry(
         )
 
         # Resolve research budget from active model pack.
-        _active_pack = getattr(settings, "active_model_pack", "")
         _profile_ctx = 8192  # safe default
-        try:
-            from unclaw.model_packs import get_model_pack_profiles
-
-            _pack_profiles = get_model_pack_profiles(_active_pack)
-            _main_profile = _pack_profiles.get("main")
-            if _main_profile and _main_profile.num_ctx:
-                _profile_ctx = _main_profile.num_ctx
-        except (ValueError, KeyError):
-            pass
+        _main_profile = settings.models.get("main")
+        if _main_profile is not None and _main_profile.num_ctx:
+            _profile_ctx = _main_profile.num_ctx
 
         _research_budget = resolve_research_budget(
             effective_context=_profile_ctx,

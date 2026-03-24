@@ -1,4 +1,4 @@
-"""Configuration loading and runtime path resolution."""
+"""Configuration loading, persistence, and runtime path resolution."""
 
 from __future__ import annotations
 
@@ -10,6 +10,13 @@ from typing import Any
 
 import yaml
 
+from unclaw.control_surface import (
+    CONTROL_PRESET_NAME_SET,
+    MIN_PROFILE_NUM_CTX,
+    derive_control_root_strings,
+    normalize_control_preset_name,
+    resolve_control_surface,
+)
 from unclaw.constants import (
     APP_CONFIG_FILE_NAME,
     APP_NAME,
@@ -91,6 +98,7 @@ class RuntimeGuardrailSettings:
 
 @dataclass(frozen=True, slots=True)
 class FileToolSecuritySettings:
+    control_preset: str
     allowed_roots: tuple[str, ...]
     allow_destructive_file_overwrite: bool = False
 
@@ -150,6 +158,13 @@ class ModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelProfileOverride:
+    """Optional user-facing overrides applied on top of base profiles."""
+
+    num_ctx: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimePaths:
     project_root: Path
     config_dir: Path
@@ -189,6 +204,7 @@ class Settings:
     catalog: CatalogSettings
     models: dict[str, ModelProfile]
     dev_profiles: dict[str, ModelProfile]
+    profile_overrides: dict[str, ModelProfileOverride]
     paths: RuntimePaths
     system_prompt: str
 
@@ -214,9 +230,11 @@ def load_settings(project_root: Path | None = None) -> Settings:
     skill_settings = _build_skill_settings(app_payload)
     catalog_settings = _build_catalog_settings(app_payload)
     dev_model_profiles = _build_dev_model_profiles(models_payload)
+    profile_overrides = _build_model_profile_overrides(models_payload)
     model_profiles = _build_active_model_profiles(
         model_pack=model_pack,
         dev_model_profiles=dev_model_profiles,
+        profile_overrides=profile_overrides,
     )
     runtime_paths = _build_runtime_paths(
         project_root=resolved_project_root,
@@ -245,9 +263,85 @@ def load_settings(project_root: Path | None = None) -> Settings:
         catalog=catalog_settings,
         models=model_profiles,
         dev_profiles=dev_model_profiles,
+        profile_overrides=profile_overrides,
         paths=runtime_paths,
         system_prompt=system_prompt,
     )
+
+
+def persist_control_preset(settings: Settings, preset_name: str) -> Settings:
+    """Persist one control preset change and reload settings."""
+
+    try:
+        normalized_preset = normalize_control_preset_name(preset_name)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    derived_roots = derive_control_root_strings(
+        preset_name=normalized_preset,
+        project_root=settings.paths.project_root,
+        files_dir=settings.paths.files_dir,
+    )
+    if (
+        settings.app.security.tools.files.control_preset == normalized_preset
+        and settings.app.security.tools.files.allowed_roots == derived_roots
+    ):
+        return settings
+
+    app_payload = _load_mutable_yaml_mapping(settings.paths.app_config_path)
+    files_section = _ensure_mutable_mapping(
+        _ensure_mutable_mapping(
+            _ensure_mutable_mapping(app_payload, "security"),
+            "tools",
+        ),
+        "files",
+    )
+    files_section["control_preset"] = normalized_preset
+    files_section["allowed_roots"] = list(derived_roots)
+    _write_yaml_mapping(settings.paths.app_config_path, app_payload)
+    return load_settings(project_root=settings.paths.project_root)
+
+
+def persist_profile_num_ctx(
+    settings: Settings,
+    *,
+    profile_name: str,
+    num_ctx: int,
+) -> Settings:
+    """Persist one context-window override and reload settings."""
+
+    normalized_profile_name = profile_name.strip().lower()
+    if normalized_profile_name not in settings.models:
+        available_profiles = ", ".join(sorted(settings.models))
+        raise ConfigurationError(
+            f"Unknown model profile '{normalized_profile_name}'. "
+            f"Available profiles: {available_profiles}."
+        )
+    if isinstance(num_ctx, bool) or not isinstance(num_ctx, int):
+        raise ConfigurationError("Context window must be an integer.")
+    if num_ctx < MIN_PROFILE_NUM_CTX:
+        raise ConfigurationError(
+            "Context window must be at least "
+            f"{MIN_PROFILE_NUM_CTX} tokens."
+        )
+
+    current_override = settings.profile_overrides.get(normalized_profile_name)
+    if current_override is not None and current_override.num_ctx == num_ctx:
+        return settings
+    if (
+        current_override is None
+        and settings.models[normalized_profile_name].num_ctx == num_ctx
+    ):
+        return settings
+
+    models_payload = _load_mutable_yaml_mapping(settings.paths.models_config_path)
+    profile_overrides = _ensure_mutable_mapping(models_payload, "profile_overrides")
+    override_payload = profile_overrides.get(normalized_profile_name)
+    if not isinstance(override_payload, dict):
+        override_payload = {}
+    profile_overrides[normalized_profile_name] = override_payload
+    override_payload["num_ctx"] = num_ctx
+    _write_yaml_mapping(settings.paths.models_config_path, models_payload)
+    return load_settings(project_root=settings.paths.project_root)
 
 
 def resolve_project_root(project_root: Path | None = None) -> Path:
@@ -313,7 +407,6 @@ def _build_app_settings(
     *,
     project_root: Path,
 ) -> AppSettings:
-    del project_root
     app_section = _get_mapping(payload, "app")
     paths_section = _get_mapping(payload, "paths")
     logging_section = _get_mapping(payload, "logging")
@@ -372,14 +465,16 @@ def _build_app_settings(
             default=DEFAULT_RUNTIME_TOOL_CALL_LIMIT,
         ),
     )
+    control_preset, allowed_roots = _resolve_file_tool_security_settings(
+        file_security_section=file_security_section,
+        project_root=project_root,
+        directories=directories,
+    )
     security_settings = SecuritySettings(
         tools=ToolSecuritySettings(
             files=FileToolSecuritySettings(
-                allowed_roots=_get_str_list(
-                    file_security_section,
-                    "allowed_roots",
-                    default=(".",),
-                ),
+                control_preset=control_preset,
+                allowed_roots=allowed_roots,
                 allow_destructive_file_overwrite=_get_bool(
                     file_security_section,
                     "allow_destructive_file_overwrite",
@@ -420,6 +515,32 @@ def _build_app_settings(
     )
 
 
+def _resolve_file_tool_security_settings(
+    *,
+    file_security_section: Mapping[str, Any],
+    project_root: Path,
+    directories: DirectorySettings,
+) -> tuple[str, tuple[str, ...]]:
+    configured_allowed_roots = _get_str_list(
+        file_security_section,
+        "allowed_roots",
+        default=(".",),
+    )
+    configured_control_preset = _get_optional_choice(
+        file_security_section,
+        "control_preset",
+        allowed_values=CONTROL_PRESET_NAME_SET,
+    )
+    data_dir = _resolve_path(project_root, directories.data_dir)
+    files_dir = _resolve_path(data_dir, directories.files_dir)
+    return resolve_control_surface(
+        configured_preset_name=configured_control_preset,
+        configured_roots=configured_allowed_roots,
+        project_root=project_root,
+        files_dir=files_dir,
+    )
+
+
 def _build_skill_settings(payload: Mapping[str, Any]) -> SkillSettings:
     skills_section = _get_mapping(payload, "skills")
     enabled_skill_ids = _get_str_list(
@@ -452,9 +573,11 @@ def _build_active_model_profiles(
     *,
     model_pack: str,
     dev_model_profiles: dict[str, ModelProfile],
+    profile_overrides: dict[str, ModelProfileOverride],
 ) -> dict[str, ModelProfile]:
+    profiles: dict[str, ModelProfile]
     if not is_manual_model_pack(model_pack):
-        return {
+        profiles = {
             profile_name: _build_model_profile_from_values(
                 profile_name=profile_name,
                 provider=profile.provider,
@@ -468,9 +591,14 @@ def _build_active_model_profiles(
             )
             for profile_name, profile in get_model_pack_profiles(model_pack).items()
         }
+    else:
+        profiles = _copy_model_profiles(
+            _require_dev_model_profiles(dev_model_profiles=dev_model_profiles)
+        )
 
-    return _copy_model_profiles(
-        _require_dev_model_profiles(dev_model_profiles=dev_model_profiles)
+    return _apply_model_profile_overrides(
+        profiles=profiles,
+        profile_overrides=profile_overrides,
     )
 
 
@@ -489,6 +617,43 @@ def _build_dev_model_profiles(
     return _build_model_profiles_from_mapping(profiles_section)
 
 
+def _build_model_profile_overrides(
+    payload: Mapping[str, Any],
+) -> dict[str, ModelProfileOverride]:
+    overrides_section = payload.get("profile_overrides")
+    if overrides_section is None:
+        return {}
+    if not isinstance(overrides_section, Mapping):
+        raise ConfigurationError(
+            "Configuration key 'profile_overrides' must contain a mapping."
+        )
+
+    overrides: dict[str, ModelProfileOverride] = {}
+    for profile_name, raw_override in overrides_section.items():
+        if not isinstance(profile_name, str):
+            raise ConfigurationError("Model profile override names must be strings.")
+        if not isinstance(raw_override, Mapping):
+            raise ConfigurationError(
+                f"Model profile override '{profile_name}' must contain a mapping."
+            )
+        unexpected_keys = tuple(
+            sorted(key for key in raw_override if key not in {"num_ctx"})
+        )
+        if unexpected_keys:
+            unexpected_text = ", ".join(unexpected_keys)
+            raise ConfigurationError(
+                f"Model profile override '{profile_name}' contains unsupported key(s): "
+                f"{unexpected_text}."
+            )
+
+        num_ctx = _get_optional_positive_int(raw_override, "num_ctx")
+        if num_ctx is None:
+            continue
+        overrides[profile_name] = ModelProfileOverride(num_ctx=num_ctx)
+
+    return overrides
+
+
 def _require_dev_model_profiles(
     *,
     dev_model_profiles: dict[str, ModelProfile],
@@ -505,6 +670,31 @@ def _copy_model_profiles(
     profiles: dict[str, ModelProfile],
 ) -> dict[str, ModelProfile]:
     return {profile_name: profile for profile_name, profile in profiles.items()}
+
+
+def _apply_model_profile_overrides(
+    *,
+    profiles: dict[str, ModelProfile],
+    profile_overrides: dict[str, ModelProfileOverride],
+) -> dict[str, ModelProfile]:
+    effective_profiles: dict[str, ModelProfile] = {}
+    for profile_name, profile in profiles.items():
+        override = profile_overrides.get(profile_name)
+        if override is None or override.num_ctx is None:
+            effective_profiles[profile_name] = profile
+            continue
+        effective_profiles[profile_name] = _build_model_profile_from_values(
+            profile_name=profile.name,
+            provider=profile.provider,
+            model_name=profile.model_name,
+            temperature=profile.temperature,
+            thinking_supported=profile.thinking_supported,
+            tool_mode=profile.tool_mode,
+            num_ctx=override.num_ctx,
+            keep_alive=profile.keep_alive,
+            planner_profile=profile.planner_profile,
+        )
+    return effective_profiles
 
 
 def _build_model_profiles_from_mapping(
@@ -746,6 +936,24 @@ def _get_choice(
     return normalized_value
 
 
+def _get_optional_choice(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    allowed_values: frozenset[str],
+) -> str | None:
+    value = _get_optional_str(source, key)
+    if value is None:
+        return None
+    normalized_value = value.strip().lower()
+    if normalized_value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be one of: {allowed}."
+        )
+    return normalized_value
+
+
 def _get_str_list(
     source: Mapping[str, Any],
     key: str,
@@ -770,3 +978,47 @@ def _get_str_list(
 
 def _deduplicate_strings(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
+
+
+def _load_mutable_yaml_mapping(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise OSError(f"Missing configuration file: {path}") from exc
+    except yaml.YAMLError as exc:
+        raise OSError(f"Invalid YAML in {path}: {exc}") from exc
+    except OSError as exc:
+        raise OSError(f"Could not read {path}: {exc}") from exc
+
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise OSError(f"Configuration file must contain a mapping: {path}")
+    return payload
+
+
+def _ensure_mutable_mapping(
+    payload: dict[str, Any],
+    key: str,
+) -> dict[str, Any]:
+    value = payload.get(key)
+    if value is None:
+        nested_mapping: dict[str, Any] = {}
+        payload[key] = nested_mapping
+        return nested_mapping
+    if not isinstance(value, dict):
+        raise OSError(f"Configuration key '{key}' must contain a mapping.")
+    return value
+
+
+def _write_yaml_mapping(path: Path, payload: dict[str, Any]) -> None:
+    rendered = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    try:
+        temp_path.write_text(rendered, encoding="utf-8")
+        temp_path.replace(path)
+    except OSError as exc:
+        raise OSError(f"Could not write {path}: {exc}") from exc
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)

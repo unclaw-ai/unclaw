@@ -201,6 +201,8 @@ def test_preflight_banner_shows_active_model_pack(make_temp_project) -> None:
 
     assert "PACK" in banner
     assert "sweet" in banner
+    assert "CONTROL" in banner
+    assert "workspace" in banner
 
 
 def test_cli_shows_model_requested_tool_call_before_final_reply(

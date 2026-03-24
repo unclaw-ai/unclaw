@@ -105,6 +105,9 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
     assert any("allow-latest" in line for line in outputs)
+    assert any("Local access: workspace preset" in line for line in outputs)
+    assert any("ctx=8192" in line for line in outputs)
+    assert any("/ctx <profile> <num_ctx>" in line for line in outputs)
     if os.name == "posix":
         assert (
             stat.S_IMODE((project_root / "config" / "secrets.yaml").stat().st_mode)

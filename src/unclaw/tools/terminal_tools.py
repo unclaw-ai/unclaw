@@ -62,10 +62,14 @@ def register_terminal_tools(
         project_root=project_root,
         configured_roots=configured_roots,
     )
-    resolved_default_working_directory = (
+    requested_default_working_directory = (
         default_working_directory.expanduser().resolve()
         if default_working_directory is not None
-        else allowed_roots[0]
+        else None
+    )
+    resolved_default_working_directory = _resolve_default_working_directory(
+        allowed_roots=allowed_roots,
+        requested_default_working_directory=requested_default_working_directory,
     )
 
     def run_handler(call: ToolCall) -> ToolResult:
@@ -77,6 +81,19 @@ def register_terminal_tools(
         )
 
     registry.register(RUN_TERMINAL_COMMAND_DEFINITION, run_handler)
+
+
+def _resolve_default_working_directory(
+    *,
+    allowed_roots: tuple[Path, ...],
+    requested_default_working_directory: Path | None,
+) -> Path:
+    if (
+        requested_default_working_directory is not None
+        and _is_path_allowed(requested_default_working_directory, allowed_roots)
+    ):
+        return requested_default_working_directory
+    return allowed_roots[0]
 
 
 def run_terminal_command(

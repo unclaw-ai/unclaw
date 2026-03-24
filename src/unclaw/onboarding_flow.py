@@ -376,7 +376,10 @@ def print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None
         output_func("- Skills: none enabled")
     output_func("- Model lineup:")
     for profile_name in PROFILE_ORDER:
-        output_func(f"  {profile_name}: {plan.model_profiles[profile_name].model_name}")
+        profile = plan.model_profiles[profile_name]
+        output_func(
+            f"  {profile_name}: {profile.model_name} | ctx={profile.num_ctx}"
+        )
     if "telegram" in plan.enabled_channels:
         output_func("- Telegram token: stored locally in config/secrets.yaml")
         output_func(f"- Telegram env fallback: {plan.telegram_bot_token_env_var}")
@@ -478,6 +481,7 @@ def build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus) 
         rows=(
             ("project", str(settings.paths.project_root)),
             ("config", str(settings.paths.config_dir)),
+            ("control", settings.app.security.tools.files.control_preset),
             ("ollama", _describe_ollama_status(ollama_status)),
         ),
     )

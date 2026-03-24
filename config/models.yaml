@@ -32,3 +32,6 @@ dev_profiles:
     tool_mode: none
     num_ctx: 4096
     keep_alive: 10m
+profile_overrides:
+  main:
+    num_ctx: 4050

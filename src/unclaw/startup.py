@@ -14,6 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 from time import sleep
 
+from unclaw.control_surface import build_control_surface_summary
 from unclaw.constants import (
     OLLAMA_STARTUP_INSPECTION_TIMEOUT_SECONDS,
     OLLAMA_STARTUP_POLL_INTERVAL_SECONDS,
@@ -194,6 +195,8 @@ def build_startup_report(
     checks.append(
         _build_channel_check(channel_name=channel_name, channel_enabled=channel_enabled)
     )
+    checks.append(_build_profile_context_check(settings))
+    checks.append(_build_control_surface_check(settings))
 
     ollama_status = inspect_ollama()
     checks.extend(_build_ollama_checks(ollama_status))
@@ -564,6 +567,40 @@ def _build_ollama_checks(ollama_status: OllamaStatus) -> tuple[StartupCheck, ...
                 "installed model(s)."
             ),
         ),
+    )
+
+
+def _build_profile_context_check(settings: Settings) -> StartupCheck:
+    context_text = ", ".join(
+        f"{profile_name}={profile.num_ctx}"
+        for profile_name, profile in settings.models.items()
+    )
+    return StartupCheck(
+        status=CheckStatus.INFO,
+        label="Profiles",
+        detail=(
+            f"Active default profile is {settings.app.default_model_profile}. "
+            f"Context windows: {context_text}."
+        ),
+        guidance="Use /profiles or /ctx inside the CLI to inspect or tune them.",
+    )
+
+
+def _build_control_surface_check(settings: Settings) -> StartupCheck:
+    summary = build_control_surface_summary(
+        preset_name=settings.app.security.tools.files.control_preset,
+        project_root=settings.paths.project_root,
+        allowed_roots=settings.app.security.tools.files.allowed_roots,
+    )
+    allowed_roots_text = ", ".join(str(root) for root in summary.allowed_roots)
+    return StartupCheck(
+        status=CheckStatus.INFO,
+        label="Control",
+        detail=(
+            f"{summary.preset_name.title()} preset. {summary.preset_description} "
+            f"Tool access is {summary.access_scope}. Allowed roots: {allowed_roots_text}."
+        ),
+        guidance="Use /control inside the CLI to switch between safe, workspace, and full.",
     )
 
 

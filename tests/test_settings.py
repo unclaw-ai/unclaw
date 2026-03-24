@@ -9,7 +9,11 @@ from unclaw.channels.telegram_config import load_telegram_config
 from unclaw.errors import ConfigurationError
 from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, recommend_model_pack
-from unclaw.settings import load_settings
+from unclaw.settings import (
+    load_settings,
+    persist_control_preset,
+    persist_profile_num_ctx,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -162,6 +166,50 @@ def test_load_settings_reads_runtime_guardrail_config(
 
     assert settings.app.runtime.tool_timeout_seconds == 15.0
     assert settings.app.runtime.max_tool_calls_per_turn == 8
+
+
+def test_load_settings_reads_control_preset_from_config(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.security.tools.files.control_preset == "workspace"
+    assert settings.app.security.tools.files.allowed_roots == (".",)
+
+
+def test_load_settings_resolves_safe_control_preset_to_files_sandbox(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["security"]["tools"]["files"]["control_preset"] = "safe"
+    app_payload["security"]["tools"]["files"]["allowed_roots"] = ["."]
+    _write_yaml(app_config_path, app_payload)
+
+    settings = load_settings(project_root=project_root)
+
+    assert settings.app.security.tools.files.control_preset == "safe"
+    assert settings.app.security.tools.files.allowed_roots == ("data/files",)
+
+
+def test_load_settings_errors_when_control_preset_is_invalid(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = _read_yaml(app_config_path)
+    app_payload["security"]["tools"]["files"]["control_preset"] = "ghost"
+    _write_yaml(app_config_path, app_payload)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(project_root=project_root)
+
+    assert str(exc_info.value) == (
+        "Configuration key 'control_preset' must be one of: full, safe, workspace."
+    )
 
 
 def test_load_settings_reads_enabled_skill_ids_from_config(
@@ -352,6 +400,26 @@ def test_load_settings_supports_legacy_dev_pack_shape(
     assert settings.dev_profiles["codex"].model_name == "legacy-codex:7b"
 
 
+def test_load_settings_applies_profile_num_ctx_overrides(
+    make_temp_project,
+    pack_profiles,
+    write_models_config,
+) -> None:
+    project_root = make_temp_project()
+    write_models_config(project_root, active_pack="sweet", dev_profiles=_manual_dev_profiles_payload())
+    models_config_path = project_root / "config" / "models.yaml"
+    models_payload = _read_yaml(models_config_path)
+    models_payload["profile_overrides"] = {"main": {"num_ctx": 4096}}
+    _write_yaml(models_config_path, models_payload)
+
+    settings = load_settings(project_root=project_root)
+    sweet_profiles = pack_profiles("sweet")
+
+    assert sweet_profiles["main"].num_ctx == 8192
+    assert settings.profile_overrides["main"].num_ctx == 4096
+    assert settings.models["main"].num_ctx == 4096
+
+
 def test_load_settings_preserves_legacy_profiles_as_dev_profiles_for_fixed_packs(
     make_temp_project,
     pack_profiles,
@@ -448,6 +516,39 @@ def test_load_settings_allows_profile_keep_alive_to_be_absent(
 
     assert settings.models["main"].keep_alive is None
     assert profile.keep_alive is None
+
+
+def test_persist_control_preset_updates_app_config_and_reloads_settings(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    updated_settings = persist_control_preset(settings, "safe")
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
+
+    assert updated_settings.app.security.tools.files.control_preset == "safe"
+    assert updated_settings.app.security.tools.files.allowed_roots == ("data/files",)
+    assert app_payload["security"]["tools"]["files"]["control_preset"] == "safe"
+    assert app_payload["security"]["tools"]["files"]["allowed_roots"] == ["data/files"]
+
+
+def test_persist_profile_num_ctx_updates_models_config_and_reloads_settings(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    updated_settings = persist_profile_num_ctx(
+        settings,
+        profile_name="main",
+        num_ctx=4096,
+    )
+    models_payload = _read_yaml(project_root / "config" / "models.yaml")
+
+    assert updated_settings.models["main"].num_ctx == 4096
+    assert updated_settings.profile_overrides["main"].num_ctx == 4096
+    assert models_payload["profile_overrides"]["main"]["num_ctx"] == 4096
 
 
 def test_load_telegram_config_errors_when_yaml_is_malformed(
