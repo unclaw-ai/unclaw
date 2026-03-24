@@ -24,12 +24,16 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.runtime import (
+from unclaw.core.reply_discipline import (
     _apply_post_tool_reply_discipline,
-    _build_post_tool_grounding_note,
+)
+from unclaw.core.routing import (
     _build_request_routing_note,
     _looks_like_deep_search_request,
     _looks_like_joint_entity_request,
+)
+from unclaw.core.runtime_support import (
+    _build_post_tool_grounding_note,
 )
 from unclaw.tools.contracts import ToolResult
 from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINITION

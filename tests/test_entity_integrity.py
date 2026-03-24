@@ -669,7 +669,7 @@ class TestCrossTurnEntityIsolation:
 
     def test_current_turn_entity_not_overwritten_by_history_anchor(self) -> None:
         """An explicit entity in the current user turn must win over any entity from history."""
-        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
 
@@ -690,7 +690,7 @@ class TestCrossTurnEntityIsolation:
 
     def test_history_anchor_is_not_from_current_turn(self) -> None:
         """A follow-up turn that falls back to history must yield from_current_turn=False."""
-        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
 
@@ -711,7 +711,7 @@ class TestCrossTurnEntityIsolation:
 
     def test_corrected_history_anchor_preserves_corrected_flag(self) -> None:
         """A corrected entity from history must keep corrected=True."""
-        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
 
@@ -734,7 +734,7 @@ class TestCrossTurnEntityIsolation:
 
     def test_multi_entity_request_returns_no_anchor(self) -> None:
         """Multi-entity sequential requests must produce no enforcement anchor."""
-        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
 
         mock_sm = MagicMock()
@@ -750,7 +750,7 @@ class TestCrossTurnEntityIsolation:
 
     def test_multi_entity_request_with_puis_returns_no_anchor(self) -> None:
         """'puis' is the canonical multi-entity marker — must disable anchor."""
-        from unclaw.core.runtime import _resolve_entity_anchor_for_turn
+        from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
 
         mock_sm = MagicMock()
@@ -767,7 +767,7 @@ class TestDuplicateSearchDedup:
     """Regression tests for duplicate wrong-query dispatch guard."""
 
     def test_dedup_removes_identical_search_calls(self) -> None:
-        from unclaw.core.runtime import _deduplicate_search_tool_calls
+        from unclaw.core.routing import _deduplicate_search_tool_calls
 
         calls = (
             ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
@@ -779,7 +779,7 @@ class TestDuplicateSearchDedup:
         assert deduped[0].arguments["query"] == "Michou"
 
     def test_dedup_keeps_distinct_search_queries(self) -> None:
-        from unclaw.core.runtime import _deduplicate_search_tool_calls
+        from unclaw.core.routing import _deduplicate_search_tool_calls
 
         calls = (
             ToolCall(tool_name="fast_web_search", arguments={"query": "Michou"}),
@@ -790,7 +790,7 @@ class TestDuplicateSearchDedup:
         assert len(deduped) == 3
 
     def test_dedup_preserves_non_search_tools(self) -> None:
-        from unclaw.core.runtime import _deduplicate_search_tool_calls
+        from unclaw.core.routing import _deduplicate_search_tool_calls
 
         calls = (
             ToolCall(tool_name="fetch_url_text", arguments={"url": "https://example.com"}),
@@ -802,7 +802,7 @@ class TestDuplicateSearchDedup:
         assert len(deduped) == 3
 
     def test_dedup_case_insensitive_query_comparison(self) -> None:
-        from unclaw.core.runtime import _deduplicate_search_tool_calls
+        from unclaw.core.routing import _deduplicate_search_tool_calls
 
         calls = (
             ToolCall(tool_name="fast_web_search", arguments={"query": "Marine Leleu"}),
@@ -812,7 +812,7 @@ class TestDuplicateSearchDedup:
         assert len(deduped) == 1
 
     def test_dedup_different_tools_same_query_both_kept(self) -> None:
-        from unclaw.core.runtime import _deduplicate_search_tool_calls
+        from unclaw.core.routing import _deduplicate_search_tool_calls
 
         calls = (
             ToolCall(tool_name="fast_web_search", arguments={"query": "test"}),

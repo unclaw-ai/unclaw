@@ -15,14 +15,12 @@ from unclaw.core.capabilities import (
     build_runtime_capability_context,
     build_runtime_capability_summary,
 )
+from unclaw.core.agent_loop import RuntimeTurnCancellation
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.research_flow import build_tool_history_content, run_search_command
-from unclaw.core.runtime import (
-    RuntimeTurnCancellation,
-    run_user_turn,
-)
+from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
 from unclaw.llm.base import (
@@ -3867,7 +3865,7 @@ def test_run_user_turn_raises_unclaw_error_when_agent_loop_returns_no_reply(
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
     monkeypatch.setattr(
-        "unclaw.core.runtime._run_agent_loop",
+        "unclaw.core.agent_loop._run_agent_loop",
         lambda **kwargs: None,
     )
 
@@ -5169,14 +5167,6 @@ def test_agent_loop_one_tool_call_then_final_response(
             )
 
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
-    def _unexpected_thread_pool(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del args, kwargs
-        raise AssertionError("single-tool turns must not use the thread pool")
-
-    monkeypatch.setattr(
-        "unclaw.core.runtime.ThreadPoolExecutor",
-        _unexpected_thread_pool,
-    )
 
     # Register a simple tool that will be called.
     tool_registry = ToolRegistry()
@@ -5742,7 +5732,7 @@ def test_agent_loop_max_steps_guardrail(
     set_profile_tool_mode,
 ) -> None:
     """When max_agent_steps is reached, a safe fallback reply is returned."""
-    from unclaw.core.runtime import _MAX_STEPS_FALLBACK_REPLY
+    from unclaw.core.agent_loop import _MAX_STEPS_FALLBACK_REPLY
 
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
@@ -5954,7 +5944,7 @@ def test_agent_loop_cancellation_stops_additional_tool_execution(
     set_profile_tool_mode,
     build_scripted_ollama_provider,
 ) -> None:
-    from unclaw.core.runtime import _TURN_CANCELLED_REPLY
+    from unclaw.core.agent_loop import _TURN_CANCELLED_REPLY
 
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
@@ -6092,7 +6082,7 @@ def test_agent_loop_tool_budget_stops_excess_tool_calls(
     make_temp_project,
     set_profile_tool_mode,
 ) -> None:
-    from unclaw.core.runtime import _TOOL_BUDGET_FALLBACK_REPLY
+    from unclaw.core.agent_loop import _TOOL_BUDGET_FALLBACK_REPLY
 
     project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"

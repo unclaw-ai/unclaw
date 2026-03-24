@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from unclaw.core.capabilities import RuntimeCapabilitySummary
-from unclaw.core.runtime import _build_request_routing_note
+from unclaw.core.routing import _build_request_routing_note
 
 pytestmark = pytest.mark.unit
 

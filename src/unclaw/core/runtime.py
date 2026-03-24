@@ -3,24 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from time import perf_counter
 
-from unclaw.core.agent_loop import (
-    RuntimeTurnCancellation,
-    _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY,
-    _InlineToolPayloadAnalysis,
-    _MAX_STEPS_FALLBACK_REPLY,
-    _PendingToolExecution,
-    _RuntimeToolGuardState,
-    _TOOL_BUDGET_FALLBACK_REPLY,
-    _TURN_CANCELLED_REPLY,
-    _execute_runtime_tool_calls,
-    _preflight_runtime_tool_batch,
-    _recover_inline_native_tool_response,
-    _run_agent_loop,
-)
+import unclaw.core.agent_loop as _agent_loop
 from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
@@ -29,31 +15,9 @@ from unclaw.core.orchestrator import (
     Orchestrator,
     OrchestratorError,
 )
-from unclaw.core.reply_discipline import (
-    _apply_post_tool_reply_discipline,
-)
-from unclaw.core.routing import (
-    _build_request_routing_note,
-    _deduplicate_search_tool_calls,
-    _looks_like_deep_search_request,
-    _looks_like_joint_entity_request,
-    _normalize_runtime_routing_text,
-    _resolve_entity_anchor_for_turn,
-)
-from unclaw.core.runtime_support import (
-    _ENTITY_RECENTERING_NOTE_PREFIX,
-    _POST_TOOL_GROUNDING_NOTE_PREFIX,
-    _build_default_search_grounding_transform,
-    _build_entity_recentering_note,
-    _build_local_access_control_note,
-    _build_model_failure_reply,
-    _build_post_tool_grounding_note,
-    _build_session_memory_context_note,
-    _compose_reply_transforms,
-    _is_tool_mode_none_profile,
-    _resolve_tool_definitions,
-    _supports_native_tool_calling,
-)
+import unclaw.core.reply_discipline as _reply_discipline
+import unclaw.core.routing as _routing
+import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
 from unclaw.constants import (
@@ -83,7 +47,7 @@ def run_user_turn(
     assistant_reply_transform: Callable[[str], str] | None = None,
     tool_call_callback: Callable[[ToolCall], None] | None = None,
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
-    turn_cancellation: RuntimeTurnCancellation | None = None,
+    turn_cancellation: _agent_loop.RuntimeTurnCancellation | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -108,9 +72,11 @@ def run_user_turn(
         session_manager=session_manager,
     )
     capability_tool_registry = (
-        ToolRegistry() if _is_tool_mode_none_profile(selected_model) else active_tool_registry
+        ToolRegistry()
+        if _runtime_support._is_tool_mode_none_profile(selected_model)
+        else active_tool_registry
     )
-    tool_guard_state = _RuntimeToolGuardState(
+    tool_guard_state = _agent_loop._RuntimeToolGuardState(
         tool_timeout_seconds=(
             session_manager.settings.app.runtime.tool_timeout_seconds
         ),
@@ -120,7 +86,7 @@ def run_user_turn(
         cancellation=turn_cancellation,
     )
 
-    legacy_tool_definitions = _resolve_tool_definitions(
+    legacy_tool_definitions = _runtime_support._resolve_tool_definitions(
         tool_registry=active_tool_registry,
         model_profile=selected_model,
     )
@@ -166,8 +132,8 @@ def run_user_turn(
         _effective_stream_func = None
 
     if runtime_explicit_tool_call is None and legacy_tool_definitions is not None:
-        active_assistant_reply_transform = _compose_reply_transforms(
-            _build_default_search_grounding_transform(
+        active_assistant_reply_transform = _runtime_support._compose_reply_transforms(
+            _runtime_support._build_default_search_grounding_transform(
                 session_manager=session_manager,
                 session_id=session.id,
                 query=user_input,
@@ -178,23 +144,23 @@ def run_user_turn(
         )
 
     try:
-        memory_context_note = _build_session_memory_context_note(
+        memory_context_note = _runtime_support._build_session_memory_context_note(
             command_handler=command_handler,
             session_id=session.id,
         )
-        local_access_note = _build_local_access_control_note(
+        local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
-        request_routing_note = _build_request_routing_note(
+        request_routing_note = _routing._build_request_routing_note(
             user_input=user_input,
             capability_summary=capability_summary,
         )
-        entity_anchor = _resolve_entity_anchor_for_turn(
+        entity_anchor = _routing._resolve_entity_anchor_for_turn(
             session_manager=session_manager,
             session_id=session.id,
             user_input=user_input,
         )
-        entity_recentering_note = _build_entity_recentering_note(
+        entity_recentering_note = _runtime_support._build_entity_recentering_note(
             entity_anchor=entity_anchor,
             user_input=user_input,
         )
@@ -213,13 +179,13 @@ def run_user_turn(
         responder_capability_summary = capability_summary
 
         if runtime_explicit_tool_call is not None and responder_tool_definitions is None:
-            assistant_reply = _preflight_runtime_tool_batch(
+            assistant_reply = _agent_loop._preflight_runtime_tool_batch(
                 tool_calls=(runtime_explicit_tool_call,),
                 tool_guard_state=tool_guard_state,
             )
             if assistant_reply is None:
                 turn_tool_results.extend(
-                    _execute_runtime_tool_calls(
+                    _agent_loop._execute_runtime_tool_calls(
                         session_manager=session_manager,
                         session_id=session.id,
                         tracer=active_tracer,
@@ -229,10 +195,10 @@ def run_user_turn(
                     )
                 )
                 if tool_guard_state.is_cancelled():
-                    assistant_reply = _TURN_CANCELLED_REPLY
+                    assistant_reply = _agent_loop._TURN_CANCELLED_REPLY
 
         if assistant_reply is None and tool_guard_state.is_cancelled():
-            assistant_reply = _TURN_CANCELLED_REPLY
+            assistant_reply = _agent_loop._TURN_CANCELLED_REPLY
 
         if assistant_reply is None:
             orchestrator = Orchestrator(
@@ -273,7 +239,7 @@ def run_user_turn(
                 # the native legacy path only, easy to audit and remove.
                 if not response.response.tool_calls:
                     inline_tool_response, inline_tool_reply = (
-                        _recover_inline_native_tool_response(
+                        _agent_loop._recover_inline_native_tool_response(
                             response.response,
                             tool_definitions=responder_tool_definitions or (),
                             max_agent_steps=max_agent_steps,
@@ -291,7 +257,7 @@ def run_user_turn(
                     and responder_tool_definitions
                     and max_agent_steps > 0
                 ):
-                    assistant_reply = _run_agent_loop(
+                    assistant_reply = _agent_loop._run_agent_loop(
                         first_response=response,
                         orchestrator=orchestrator,
                         session_id=session.id,
@@ -305,7 +271,9 @@ def run_user_turn(
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
-                        build_post_tool_grounding_note=_build_post_tool_grounding_note,
+                        build_post_tool_grounding_note=(
+                            _runtime_support._build_post_tool_grounding_note
+                        ),
                         user_entity_surface=(
                             # Only activate the pre-tool entity guard when the anchor
                             # came from the current turn (explicit mention) or from an
@@ -333,7 +301,7 @@ def run_user_turn(
             model_duration_ms=exc.duration_ms,
             error=str(exc),
         )
-        assistant_reply = _build_model_failure_reply(exc)
+        assistant_reply = _runtime_support._build_model_failure_reply(exc)
     except (
         ConfigurationError,
         LLMError,
@@ -356,11 +324,11 @@ def run_user_turn(
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
-    assistant_reply = _apply_post_tool_reply_discipline(
+    assistant_reply = _reply_discipline._apply_post_tool_reply_discipline(
         reply=assistant_reply,
         user_input=user_input,
         tool_results=turn_tool_results,
-        turn_cancelled_reply=_TURN_CANCELLED_REPLY,
+        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
     )
 
     # Fallback: if a callback was registered but the provider never invoked it

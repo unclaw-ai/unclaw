@@ -32,10 +32,8 @@ import pytest
 from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.runtime import (
-    _resolve_tool_definitions,
-    run_user_turn,
-)
+from unclaw.core.runtime import run_user_turn
+from unclaw.core.runtime_support import _resolve_tool_definitions
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import (
     LLMMessage,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from unclaw.core.runtime import _apply_post_tool_reply_discipline
+from unclaw.core.reply_discipline import _apply_post_tool_reply_discipline
 from unclaw.tools.contracts import ToolResult
 
 pytestmark = pytest.mark.unit
