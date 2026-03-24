@@ -152,21 +152,37 @@ def run_user_turn(
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
-        entity_anchor = _routing._resolve_entity_anchor_for_turn(
-            session_manager=session_manager,
-            session_id=session.id,
-            user_input=user_input,
-        )
-        entity_recentering_note = _runtime_support._build_entity_recentering_note(
-            entity_anchor=entity_anchor,
-            user_input=user_input,
-        )
+        entity_anchor = None
+        entity_anchor_resolved = False
+        entity_recentering_note = None
+        entity_recentering_note_built = False
+
+        def _get_entity_anchor():
+            nonlocal entity_anchor, entity_anchor_resolved
+            if not entity_anchor_resolved:
+                entity_anchor = _routing._resolve_entity_anchor_for_turn(
+                    session_manager=session_manager,
+                    session_id=session.id,
+                    user_input=user_input,
+                )
+                entity_anchor_resolved = True
+            return entity_anchor
+
+        def _get_entity_recentering_note():
+            nonlocal entity_recentering_note, entity_recentering_note_built
+            if not entity_recentering_note_built:
+                entity_recentering_note = _runtime_support._build_entity_recentering_note(
+                    entity_anchor=_get_entity_anchor(),
+                    user_input=user_input,
+                )
+                entity_recentering_note_built = True
+            return entity_recentering_note
+
         system_context_notes = tuple(
             note
             for note in (
                 memory_context_note,
                 local_access_note,
-                entity_recentering_note,
             )
             if note is not None
         )
@@ -282,6 +298,7 @@ def run_user_turn(
                         capability_summary=capability_summary,
                     )
                     if legacy_request_routing_note is not None:
+                        entity_recentering_note = _get_entity_recentering_note()
                         legacy_system_context_notes = tuple(
                             note
                             for note in (
@@ -331,9 +348,12 @@ def run_user_turn(
                             # explicit correction by the user.  History-fallback anchors
                             # must not override the model's entity choice — they only
                             # inform the recentering note injected into the system prompt.
-                            entity_anchor.surface
-                            if entity_anchor is not None
-                            and (entity_anchor.from_current_turn or entity_anchor.corrected)
+                            resolved_entity_anchor.surface
+                            if (resolved_entity_anchor := _get_entity_anchor()) is not None
+                            and (
+                                resolved_entity_anchor.from_current_turn
+                                or resolved_entity_anchor.corrected
+                            )
                             else ""
                         ),
                         collected_tool_results=turn_tool_results,

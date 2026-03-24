@@ -162,9 +162,8 @@ def test_corrected_ambiguity_stays_centered_on_next_turn(
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
             if call_count == 1:
-                assert any(
-                    "Entity recentering hint:" in message
-                    and "McFly et Carlito" in message
+                assert all(
+                    "Entity recentering hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -630,9 +629,8 @@ def test_non_recherche_correction_is_not_treated_as_refusal(
             system_texts = " ".join(
                 m.content for m in messages if m.role is LLMRole.SYSTEM
             )
-            # The recentering note must mention the corrected entity
-            assert "Marine Leleu" in system_texts, (
-                "Entity recentering note must contain 'Marine Leleu'"
+            assert "Entity recentering hint:" not in system_texts, (
+                "Entity recentering note must stay out of the normal first-pass path"
             )
             if call_count == 1:
                 return LLMResponse(
