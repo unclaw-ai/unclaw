@@ -205,7 +205,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         session_manager.close()
 
 
-def test_run_user_turn_fast_grounding_fallback_adds_no_extra_model_call(
+def test_run_user_turn_fast_grounding_preserves_substantive_reply_without_extra_model_call(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -326,7 +326,7 @@ def test_run_user_turn_fast_grounding_fallback_adds_no_extra_model_call(
 
         assert reply == (
             "Marine Leleu is a French endurance athlete. "
-            "I couldn't confirm a fuller biography from that quick grounding probe alone."
+            "She also has a much broader public biography."
         )
         assert call_count == 2
     finally:

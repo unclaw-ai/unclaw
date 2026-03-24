@@ -6,6 +6,7 @@ from collections.abc import Sequence
 import re
 from typing import Any
 
+from unclaw.constants import EMPTY_RESPONSE_REPLY
 from unclaw.core.routing import (
     _looks_like_deep_search_request,
 )
@@ -91,6 +92,11 @@ def _reply_acknowledges_limitations(reply: str) -> bool:
     return _LIMITATION_ACK_PATTERN.search(reply) is not None
 
 
+def _reply_is_effectively_empty(reply: str) -> bool:
+    stripped_reply = reply.strip()
+    return not stripped_reply or stripped_reply == EMPTY_RESPONSE_REPLY
+
+
 def _reply_sentence_count(text: str) -> int:
     sentences = [
         sentence.strip()
@@ -138,7 +144,8 @@ def _build_fast_grounding_guarded_reply(
     )
     all_thin = all(_fast_web_search_result_is_thin(tool_result) for tool_result in fast_results)
     full_bio_requested = _looks_like_deep_search_request(user_input)
-    reply_is_minimal = _reply_sentence_count(candidate_reply) <= 1
+    reply_is_effectively_empty = _reply_is_effectively_empty(candidate_reply)
+    reply_is_minimal = reply_is_effectively_empty or _reply_sentence_count(candidate_reply) <= 1
 
     if len(fast_results) > 1 and (any_mismatch or all_thin):
         return (
@@ -155,7 +162,8 @@ def _build_fast_grounding_guarded_reply(
         )
 
     if primary_point and (
-        full_bio_requested
+        reply_is_effectively_empty
+        or full_bio_requested
         or (
             all_thin
             and not reply_is_minimal
@@ -179,12 +187,14 @@ def _apply_post_tool_reply_discipline(
     turn_cancelled_reply: str = _DEFAULT_TURN_CANCELLED_REPLY,
 ) -> str:
     stripped_reply = reply.strip()
-    if not stripped_reply or not tool_results:
+    if not tool_results:
         return stripped_reply
     if stripped_reply == turn_cancelled_reply:
         return stripped_reply
 
     if all(tool_result.success is False for tool_result in tool_results):
+        if not stripped_reply:
+            return stripped_reply
         if _reply_acknowledges_limitations(stripped_reply):
             return stripped_reply
         return _build_all_failed_tool_reply(
@@ -202,19 +212,22 @@ def _apply_post_tool_reply_discipline(
         if tool_result.tool_name == "fast_web_search" and tool_result.success
     ]
     if successful_fast_web and not successful_search_web:
-        guarded_reply = _build_fast_grounding_guarded_reply(
-            candidate_reply=stripped_reply,
-            user_input=user_input,
-            fast_results=successful_fast_web,
-        )
-        if guarded_reply is not None:
-            # Preserve already-minimal honest replies when they are shorter than
-            # our fallback and clearly acknowledge the result limits.
-            if _reply_acknowledges_limitations(stripped_reply) and (
-                len(stripped_reply) <= len(guarded_reply)
-                or _reply_sentence_count(stripped_reply) <= 2
-            ):
-                return stripped_reply
-            return guarded_reply
+        reply_is_effectively_empty = _reply_is_effectively_empty(stripped_reply)
+        reply_acknowledges_limitations = _reply_acknowledges_limitations(stripped_reply)
+        if reply_is_effectively_empty or reply_acknowledges_limitations:
+            guarded_reply = _build_fast_grounding_guarded_reply(
+                candidate_reply=stripped_reply,
+                user_input=user_input,
+                fast_results=successful_fast_web,
+            )
+            if guarded_reply is not None:
+                # Preserve already-minimal honest replies when they are shorter than
+                # our fallback and clearly acknowledge the result limits.
+                if reply_acknowledges_limitations and not reply_is_effectively_empty and (
+                    len(stripped_reply) <= len(guarded_reply)
+                    or _reply_sentence_count(stripped_reply) <= 2
+                ):
+                    return stripped_reply
+                return guarded_reply
 
     return stripped_reply

@@ -31,7 +31,7 @@ def _build_native_runtime(project_root, set_profile_tool_mode):
     return settings, session_manager, tracer, command_handler
 
 
-def test_post_fast_web_search_reply_stays_evidence_bounded(
+def test_post_fast_web_search_preserves_substantive_reply(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -127,8 +127,8 @@ def test_post_fast_web_search_reply_stays_evidence_bounded(
         )
 
         assert reply == (
-            "Marine Leleu is a French endurance athlete. "
-            "I couldn't confirm a fuller biography from that quick grounding probe alone."
+            "Marine Leleu is a French endurance athlete, author, and podcast host. "
+            "She is also known for major speaking tours."
         )
         assert call_count == 2
     finally:
@@ -261,10 +261,7 @@ def test_corrected_ambiguity_stays_centered_on_next_turn(
             tool_call_callback=observed_tool_calls.append,
         )
 
-        assert reply == (
-            "McFly et Carlito are a French YouTube comedy duo. "
-            "I couldn't confirm a fuller biography from that quick grounding probe alone."
-        )
+        assert reply == "McFly et Carlito are a French YouTube comedy duo."
         assert call_count == 2
         assert len(observed_tool_calls) == 1
         assert "McFly et Carlito" in observed_tool_calls[0].arguments["query"]
@@ -273,7 +270,7 @@ def test_corrected_ambiguity_stays_centered_on_next_turn(
         session_manager.close()
 
 
-def test_multi_entity_mismatch_does_not_turn_into_confident_wrong_answer(
+def test_multi_entity_mismatch_preserves_substantive_model_reply(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -371,10 +368,7 @@ def test_multi_entity_mismatch_does_not_turn_into_confident_wrong_answer(
             tool_registry=tool_registry,
         )
 
-        assert reply == (
-            "The quick web grounding appeared to match a different entity, so I "
-            "couldn't confirm the requested details from that result alone."
-        )
+        assert reply == "Marty McFly is a fictional character, and Carlito is a wrestler."
         assert call_count == 2
     finally:
         session_manager.close()

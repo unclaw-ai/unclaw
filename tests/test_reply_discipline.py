@@ -106,21 +106,18 @@ def test_reply_discipline_uses_language_neutral_timeout_fallback_when_all_tools_
     )
 
 
-def test_reply_discipline_clamps_thin_fast_web_results() -> None:
+def test_reply_discipline_preserves_substantive_reply_for_thin_fast_web_results() -> None:
+    reply = (
+        "Marine Leleu is a French endurance athlete, author, speaker, and "
+        "podcast host with a much broader biography."
+    )
     result = _apply_post_tool_reply_discipline(
-        reply=(
-            "Marine Leleu is a French endurance athlete, author, speaker, and "
-            "podcast host with a much broader biography."
-        ),
+        reply=reply,
         user_input="Tell me everything you know about Marine Leleu.",
         tool_results=[_fast_web_result()],
     )
 
-    assert (
-        result
-        == "Marine Leleu is a French endurance athlete. "
-        "I couldn't confirm a fuller biography from that quick grounding probe alone."
-    )
+    assert result == reply
 
 
 @pytest.mark.parametrize(
@@ -150,9 +147,10 @@ def test_fast_grounding_guarded_reply_is_language_neutral_across_user_inputs(
     )
 
 
-def test_reply_discipline_guards_fast_web_entity_mismatches() -> None:
+def test_reply_discipline_preserves_substantive_reply_for_fast_web_entity_mismatches() -> None:
+    reply = "Marine Leleu is a politician with a long public career."
     result = _apply_post_tool_reply_discipline(
-        reply="Marine Leleu is a politician with a long public career.",
+        reply=reply,
         user_input="Who is Marine Leleu?",
         tool_results=[
             _fast_web_result(
@@ -162,11 +160,7 @@ def test_reply_discipline_guards_fast_web_entity_mismatches() -> None:
         ],
     )
 
-    assert (
-        result
-        == "The quick web grounding appeared to match a different entity, so I "
-        "couldn't confirm the requested details from that result alone."
-    )
+    assert result == reply
 
 
 def test_reply_discipline_preserves_normal_grounded_replies() -> None:
