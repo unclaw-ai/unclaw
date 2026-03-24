@@ -114,11 +114,45 @@ _EXPLICIT_ENTITY_CORRECTION_PATTERN = re.compile(
     r"i am talking about|i'm talking about|talking about)\b",
     flags=re.IGNORECASE,
 )
-_FULL_BIO_REQUEST_PATTERN = re.compile(
-    r"\b(?:everything you know|full bio(?:graphy)?|complete bio(?:graphy)?|"
-    r"biographie complete|bio complete|biographie courte|biographie detaillee|"
-    r"biographie detaillee|tout ce que tu sais|bio complete|bio courte)\b",
+_DEEP_SEARCH_REQUEST_PATTERN = re.compile(
+    r"\b(?:"
+    # Bio depth (matched against normalized/accent-stripped text)
+    r"bio(?:graphie)? (?:complete|detaillee|approfondie|exhaustive|courte)|"
+    r"biographie courte|"
+    r"bio courte|"
+    r"full bio(?:graphy)?|"
+    r"complete bio(?:graphy)?|"
+    r"detailed bio(?:graphy)?|"
+    r"fiche (?:complete|detaillee)|"
+    r"dossier (?:complet|detaille)|"
+    r"resume (?:complet|detaille)|"
+    r"profil (?:complet|detaille)|"
+    # Research depth
+    r"recherche (?:complete|approfondie|detaillee|plus complete|plus approfondie)|"
+    r"recherche en detail|"
+    r"cherche (?:en detail|plus en detail|plus approfondi)|"
+    r"deep (?:research|search|dive)|"
+    r"in[- ]?depth|"
+    r"en profondeur|"
+    # "Everything" signals
+    r"tout ce que tu sais|"
+    r"tout ce qu.il y a|"
+    r"everything (?:you know|about)|"
+    # File-write with research intent
+    r"dans un fichier|"
+    r"in a (?:text )?file|"
+    r"ecris une bio|"
+    r"write.*bio|"
+    r"sauvegarde.*bio|"
+    r"enregistre.*bio|"
+    # Explicit escalation or frustration signals
+    r"pourquoi.*fast|"
+    r"plus (?:de|en) (?:detail|profondeur)"
+    r")\b",
     flags=re.IGNORECASE,
+)
+_DUO_ENTITY_PATTERN = re.compile(
+    r"\b([A-Z]\w+(?:\s+[A-Z]\w+)*)\s+(?:et|and|&)\s+([A-Z]\w+(?:\s+[A-Z]\w+)*)\b",
 )
 _LIMITATION_ACK_PATTERN = re.compile(
     r"\b(?:could not|couldn't|cannot|can't|did not|didn't|not confirmed|"
@@ -834,6 +868,38 @@ def _looks_like_multi_entity_request(user_input: str) -> bool:
     return _MULTI_ENTITY_SEQUENCE_PATTERN.search(normalized) is not None
 
 
+def _looks_like_deep_search_request(user_input: str) -> bool:
+    """Return True when the user explicitly signals they want deep or complete research.
+
+    Normalizes the input before matching so accented characters (e.g.
+    'complète' → 'complete') are handled correctly.  Covers bio depth signals,
+    research depth signals, file-write-from-research intents, and explicit
+    escalation or frustration phrases.
+    """
+    normalized = _normalize_runtime_routing_text(user_input)
+    return _DEEP_SEARCH_REQUEST_PATTERN.search(normalized) is not None
+
+
+def _looks_like_joint_entity_request(user_input: str) -> bool:
+    """Return True when the request targets a paired or duo entity like 'McFly et Carlito'.
+
+    Detects 'X et Y' / 'X and Y' / 'X & Y' where X and Y look like proper
+    names (capitalized tokens).  Requires an identity or bio signal so that
+    non-person pairs like 'Python et Java' are not mistaken for duo lookups.
+    Does NOT fire for sequential multi-entity requests (puis/then/ensuite).
+    """
+    if _looks_like_multi_entity_request(user_input):
+        return False
+    if _DUO_ENTITY_PATTERN.search(user_input) is None:
+        return False
+    normalized = _normalize_runtime_routing_text(user_input)
+    return (
+        _looks_like_identity_request(normalized)
+        or _FOLLOW_UP_ENTITYLESS_PATTERN.search(normalized) is not None
+        or _DEEP_SEARCH_REQUEST_PATTERN.search(normalized) is not None
+    )
+
+
 _SEARCH_TOOL_NAMES_FOR_DEDUP: frozenset[str] = frozenset({"fast_web_search", "search_web"})
 
 
@@ -911,13 +977,47 @@ def _build_request_routing_note(
             "asking whether you should check."
         )
 
+    # Deep search signal: skip fast_web_search, route directly to search_web.
+    # This check comes before the identity check so that 'fais une bio complète'
+    # does not fall into the lighter fast_web_search-first identity path.
+    if _looks_like_deep_search_request(user_input) and capability_summary.web_search_available:
+        is_duo = _looks_like_joint_entity_request(user_input)
+        is_identity = _looks_like_identity_request(normalized_user_input)
+        if is_duo:
+            entity_hint = (
+                "with the exact duo/pair name as the user wrote it (both names as a unit). "
+                "Do not split the duo into separate unrelated lookups."
+            )
+        elif is_identity:
+            entity_hint = "with the exact entity wording from the user."
+        else:
+            entity_hint = "with the user's exact query terms."
+        return (
+            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+            "the user explicitly asked for deep, complete, or file-output research. "
+            f"Call search_web {entity_hint} "
+            "search_web is the deeper grounded path — it fetches and condenses pages "
+            "for richer answers. Do not stop at fast_web_search alone."
+        )
+
     if _looks_like_identity_request(normalized_user_input):
+        is_duo = _looks_like_joint_entity_request(user_input)
         if capability_summary.fast_web_search_available:
+            if is_duo:
+                return (
+                    f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                    "this is a duo or joint entity biography lookup. Call fast_web_search "
+                    "with the duo name as a unit exactly as the user wrote it (both names "
+                    "together). Do not separate the duo into unrelated single-entity lookups. "
+                    "If the grounding note is thin or the user wants more, call search_web "
+                    "next with the same duo name — it is the deeper grounded path."
+                )
             return (
                 f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
                 "this is an identity or biography lookup. Call fast_web_search "
-                "first with the exact entity wording from the user; use search_web "
-                "only if the fast grounding note is still too thin."
+                "first with the exact entity wording from the user. If the result "
+                "is thin or the user wants a full answer, call search_web next — "
+                "it is the deeper grounded web path for complete biographies."
             )
         if capability_summary.web_search_available:
             return (
@@ -1135,7 +1235,7 @@ def _build_fast_grounding_guarded_reply(
         _fast_web_search_result_is_mismatch(tool_result) for tool_result in fast_results
     )
     all_thin = all(_fast_web_search_result_is_thin(tool_result) for tool_result in fast_results)
-    full_bio_requested = _FULL_BIO_REQUEST_PATTERN.search(user_input) is not None
+    full_bio_requested = _looks_like_deep_search_request(user_input)
     reply_is_minimal = _reply_sentence_count(candidate_reply) <= 1
 
     if len(fast_results) > 1 and (any_mismatch or all_thin):
@@ -1292,12 +1392,20 @@ def _build_post_tool_grounding_note(
 
     if "fast_web_search" in latest_tool_names and "search_web" in available_tool_names:
         lines.append(
-            "If the quick grounding note identified the entity but the request still "
-            "needs a fuller answer, call search_web next with the exact confirmed "
-            "entity wording."
+            "search_web is the deeper grounded web path — it fetches pages, condenses "
+            "evidence, and builds a richer answer. Call search_web next if the user "
+            "wants a full biography, complete research, or a file output from web research."
         )
         lines.append(
-            "Do not turn a short fast_web_search grounding note into a full biography unless a later search_web step confirms those details."
+            "Do not expand a fast_web_search grounding note into a full biography — "
+            "call search_web to ground additional details before writing a complete answer."
+        )
+    if any(_tool_result_timed_out(tr) for tr in tool_results):
+        lines.append(
+            "A tool timed out: reuse any valid grounding from earlier successful steps. "
+            "Do not invent missing facts. If enough grounded evidence exists for a partial "
+            "answer, give it clearly labeled as partial. Otherwise say the search timed "
+            "out and the detail could not be confirmed."
         )
     if "list_directory" in latest_tool_names and "read_text_file" in available_tool_names:
         lines.append(

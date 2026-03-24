@@ -684,6 +684,17 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "later search_web step confirms those details.",
             "fast_web_search is very fast and cheap — use it liberally for "
             "entity resolution before committing to a full research flow.",
+            "search_web is the deeper grounded web path — it fetches pages, "
+            "condenses evidence across sources, and returns a verified research note. "
+            "Use it when the user asks for a full biography, complete research, "
+            "or a file output based on web grounding. Do not stop at fast_web_search "
+            "alone when the user clearly wants more depth.",
+            "When the user explicitly asks for 'bio complète', 'recherche complète', "
+            "'cherche en détail', 'everything you know', or to write a file from "
+            "research, call search_web — fast_web_search alone is not enough.",
+            "For joint entities or duos (e.g. 'McFly et Carlito'), search for both "
+            "names together as a unit first. Do not default to a single entity or "
+            "unrelated person unless you have clear evidence the pair is separate.",
         ),
         "guidance.model_callable.session_history": _static_prompt(
             "guidance.model_callable.session_history",
