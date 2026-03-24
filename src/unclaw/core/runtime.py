@@ -4,35 +4,36 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
-import json
-import threading
-from time import perf_counter, sleep
+from dataclasses import replace
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
+from unclaw.core.agent_loop import (
+    RuntimeTurnCancellation,
+    _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY,
+    _InlineToolPayloadAnalysis,
+    _MAX_STEPS_FALLBACK_REPLY,
+    _PendingToolExecution,
+    _RuntimeToolGuardState,
+    _TOOL_BUDGET_FALLBACK_REPLY,
+    _TURN_CANCELLED_REPLY,
+    _execute_runtime_tool_calls,
+    _preflight_runtime_tool_batch,
+    _recover_inline_native_tool_response,
+    _run_agent_loop,
+)
 from unclaw.core.capabilities import build_runtime_capability_summary
-from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
     OrchestratorError,
-    OrchestratorTurnResult,
 )
 from unclaw.core.reply_discipline import (
-    _LIMITATION_ACK_PATTERN,
     _apply_post_tool_reply_discipline,
-    _build_all_failed_tool_reply,
-    _build_fast_grounding_guarded_reply,
-    _detect_runtime_reply_language,
-    _extract_fast_grounding_points,
-    _fast_web_search_result_is_mismatch,
     _fast_web_search_result_is_thin,
-    _reply_acknowledges_limitations,
-    _reply_sentence_count,
     _search_web_result_is_thin,
-    _tool_result_payload_dict,
     _tool_result_timed_out,
 )
 from unclaw.core.routing import (
@@ -49,79 +50,21 @@ from unclaw.constants import (
     DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     EMPTY_RESPONSE_REPLY,
     RUNTIME_ERROR_REPLY,
-    RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS,
 )
 from unclaw.errors import ConfigurationError, UnclawError
-from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMResponse, LLMRole
+from unclaw.llm.base import LLMContentCallback, LLMError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
-from unclaw.tools.dispatcher import ToolDispatcher, normalize_tool_call_for_execution
 from unclaw.tools.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from unclaw.core.routing import _EntityAnchor
 
-_MAX_STEPS_FALLBACK_REPLY = (
-    "I reached the maximum number of steps for this request. "
-    "Here is what I found so far."
-)
-_TOOL_BUDGET_FALLBACK_REPLY = (
-    "I stopped after reaching the tool-call limit for this request."
-)
-_TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
-_INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
-    "I couldn't safely execute a tool request because the model returned an "
-    "invalid tool payload. Please try again or rephrase the request."
-)
 _ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
-
-
-@dataclass(slots=True)
-class RuntimeTurnCancellation:
-    """Minimal turn-local cancellation handle for runtime tool execution."""
-
-    _cancel_event: threading.Event = field(
-        default_factory=threading.Event,
-        init=False,
-        repr=False,
-    )
-
-    def cancel(self) -> None:
-        self._cancel_event.set()
-
-    def is_cancelled(self) -> bool:
-        return self._cancel_event.is_set()
-
-
-@dataclass(slots=True)
-class _RuntimeToolGuardState:
-    tool_timeout_seconds: float
-    max_tool_calls_per_turn: int
-    cancellation: RuntimeTurnCancellation | None = None
-    tool_calls_started: int = 0
-
-    def is_cancelled(self) -> bool:
-        return self.cancellation is not None and self.cancellation.is_cancelled()
-
-
-@dataclass(slots=True)
-class _PendingToolExecution:
-    tool_call: ToolCall
-    started_at: float
-    done_event: threading.Event
-    thread: threading.Thread | None = None
-    result: ToolResult | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _InlineToolPayloadAnalysis:
-    tool_calls: tuple[ToolCall, ...] | None = None
-    raw_tool_calls_payload: tuple[dict[str, Any], ...] | None = None
-    invalid_tool_payload: bool = False
 
 
 def run_user_turn(
@@ -359,6 +302,7 @@ def run_user_turn(
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
+                        build_post_tool_grounding_note=_build_post_tool_grounding_note,
                         user_entity_surface=(
                             # Only activate the pre-tool entity guard when the anchor
                             # came from the current turn (explicit mention) or from an
@@ -636,325 +580,6 @@ def _build_post_tool_grounding_note(
     return "\n".join(lines)
 
 
-def _run_agent_loop(
-    *,
-    first_response: OrchestratorTurnResult,
-    orchestrator: Orchestrator,
-    session_id: str,
-    session_manager: SessionManager,
-    tracer: Tracer,
-    tool_registry: ToolRegistry,
-    tool_definitions: Sequence[ToolDefinition],
-    model_profile_name: str,
-    thinking_enabled: bool,
-    content_callback: LLMContentCallback | None,
-    max_steps: int,
-    tool_guard_state: _RuntimeToolGuardState,
-    tool_call_callback: Callable[[ToolCall], None] | None,
-    user_entity_surface: str = "",
-    collected_tool_results: list[ToolResult] | None = None,
-) -> str:
-    """Execute the observation-action loop until text reply or step limit."""
-    from unclaw.tools.web_entity_guard import apply_entity_guard_to_tool_calls
-
-    context_messages: list[LLMMessage] = list(first_response.context_messages)
-    current_response = first_response
-
-    for _step in range(max_steps):
-        tool_calls = current_response.response.tool_calls
-        if not tool_calls:
-            return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
-
-        stop_reply = _preflight_runtime_tool_batch(
-            tool_calls=tool_calls,
-            tool_guard_state=tool_guard_state,
-        )
-        if stop_reply is not None:
-            return stop_reply
-
-        # Append the assistant message (with tool_calls) to context.
-        context_messages.append(
-            LLMMessage(
-                role=LLMRole.ASSISTANT,
-                content=current_response.response.content,
-                tool_calls_payload=_extract_raw_tool_calls(current_response.response),
-            )
-        )
-
-        # Apply pre-tool entity guard: restore literal entity if model drifted.
-        guarded_tool_calls = apply_entity_guard_to_tool_calls(
-            tool_calls,
-            user_entity_surface,
-        )
-        # Drop duplicate search calls with identical queries (routing corruption
-        # can collapse all multi-entity planned calls into the same wrong query).
-        guarded_tool_calls = _deduplicate_search_tool_calls(guarded_tool_calls)
-
-        # Execute tool calls concurrently, then replay results in model order.
-        tool_results = _execute_runtime_tool_calls(
-            session_manager=session_manager,
-            session_id=session_id,
-            tracer=tracer,
-            tool_registry=tool_registry,
-            tool_calls=guarded_tool_calls,
-            tool_guard_state=tool_guard_state,
-            tool_call_callback=tool_call_callback,
-        )
-        if collected_tool_results is not None:
-            collected_tool_results.extend(tool_results)
-        for tool_result in tool_results:
-            context_messages.append(
-                LLMMessage(
-                    role=LLMRole.TOOL,
-                    content=build_untrusted_tool_message_content(
-                        tool_result.output_text
-                    ),
-                )
-            )
-
-        if tool_guard_state.is_cancelled():
-            return _TURN_CANCELLED_REPLY
-
-        if tool_results:
-            context_messages.append(
-                LLMMessage(
-                    role=LLMRole.SYSTEM,
-                    content=_build_post_tool_grounding_note(
-                        tool_results=tool_results,
-                        tool_definitions=tool_definitions,
-                    ),
-                )
-            )
-
-        # Call the model again with extended context.
-        current_response = orchestrator.call_model(
-            session_id=session_id,
-            messages=context_messages,
-            model_profile_name=model_profile_name,
-            thinking_enabled=thinking_enabled,
-            content_callback=content_callback,
-            tools=tool_definitions,
-        )
-        tracer.trace_model_succeeded(
-            session_id=session_id,
-            provider=current_response.response.provider,
-            model_name=current_response.response.model_name,
-            finish_reason=current_response.response.finish_reason,
-            output_length=len(current_response.response.content),
-            model_duration_ms=current_response.model_duration_ms,
-            reasoning=current_response.response.reasoning,
-        )
-
-    # Final check: last model call may have produced a text reply.
-    if not current_response.response.tool_calls:
-        return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
-
-    # max_steps reached without a final text reply.
-    return _MAX_STEPS_FALLBACK_REPLY
-
-
-def _preflight_runtime_tool_batch(
-    *,
-    tool_calls: Sequence[ToolCall],
-    tool_guard_state: _RuntimeToolGuardState,
-) -> str | None:
-    if tool_guard_state.is_cancelled():
-        return _TURN_CANCELLED_REPLY
-    if (
-        tool_guard_state.tool_calls_started + len(tool_calls)
-        > tool_guard_state.max_tool_calls_per_turn
-    ):
-        return _TOOL_BUDGET_FALLBACK_REPLY
-    return None
-
-
-def _execute_runtime_tool_calls(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    tracer: Tracer,
-    tool_registry: ToolRegistry,
-    tool_calls: Sequence[ToolCall],
-    tool_guard_state: _RuntimeToolGuardState,
-    tool_call_callback: Callable[[ToolCall], None] | None = None,
-) -> tuple[ToolResult, ...]:
-    """Execute one tool-call batch while keeping context and persistence ordered."""
-    pending_calls = _start_pending_tool_executions(
-        session_id=session_id,
-        tracer=tracer,
-        tool_registry=tool_registry,
-        tool_calls=tool_calls,
-        tool_guard_state=tool_guard_state,
-        tool_call_callback=tool_call_callback,
-    )
-    if not pending_calls:
-        return ()
-
-    resolved_results = _collect_pending_tool_results(
-        pending_calls=pending_calls,
-        tool_guard_state=tool_guard_state,
-    )
-    tool_results: list[ToolResult] = []
-    for pending_call, tool_result, finished_at in resolved_results:
-        _finalize_runtime_tool_call(
-            session_manager=session_manager,
-            session_id=session_id,
-            tracer=tracer,
-            tool_call=pending_call.tool_call,
-            tool_result=tool_result,
-            tool_duration_ms=max(
-                0,
-                round((finished_at - pending_call.started_at) * 1000),
-            ),
-            skill_id=tool_registry.get_owner_skill_id(pending_call.tool_call.tool_name),
-        )
-        tool_results.append(tool_result)
-
-    return tuple(tool_results)
-
-
-def _start_pending_tool_executions(
-    *,
-    session_id: str,
-    tracer: Tracer,
-    tool_registry: ToolRegistry,
-    tool_calls: Sequence[ToolCall],
-    tool_guard_state: _RuntimeToolGuardState,
-    tool_call_callback: Callable[[ToolCall], None] | None = None,
-) -> list[_PendingToolExecution]:
-    pending_calls: list[_PendingToolExecution] = []
-    for tool_call in tool_calls:
-        if tool_guard_state.is_cancelled():
-            break
-
-        normalized_tool_call = normalize_tool_call_for_execution(
-            tool_registry,
-            tool_call,
-        )
-        started_at = perf_counter()
-        if tool_call_callback is not None:
-            tool_call_callback(normalized_tool_call)
-        tracer.trace_tool_started(
-            session_id=session_id,
-            tool_name=normalized_tool_call.tool_name,
-            arguments=normalized_tool_call.arguments,
-            skill_id=tool_registry.get_owner_skill_id(normalized_tool_call.tool_name),
-        )
-        done_event = threading.Event()
-        pending_call = _PendingToolExecution(
-            tool_call=normalized_tool_call,
-            started_at=started_at,
-            done_event=done_event,
-        )
-        pending_call.thread = threading.Thread(
-            target=_run_pending_tool_execution,
-            kwargs={
-                "pending_call": pending_call,
-                "tool_registry": tool_registry,
-            },
-            daemon=True,
-        )
-        pending_call.thread.start()
-        pending_calls.append(pending_call)
-
-    tool_guard_state.tool_calls_started += len(pending_calls)
-    return pending_calls
-
-
-def _run_pending_tool_execution(
-    *,
-    pending_call: _PendingToolExecution,
-    tool_registry: ToolRegistry,
-) -> None:
-    try:
-        pending_call.result = _dispatch_runtime_tool_call(
-            tool_registry=tool_registry,
-            tool_call=pending_call.tool_call,
-        )
-    except Exception as exc:
-        pending_call.result = ToolResult.failure(
-            tool_name=pending_call.tool_call.tool_name,
-            error=(
-                f"Tool '{pending_call.tool_call.tool_name}' failed unexpectedly: {exc}"
-            ),
-        )
-    finally:
-        pending_call.done_event.set()
-
-
-def _collect_pending_tool_results(
-    *,
-    pending_calls: Sequence[_PendingToolExecution],
-    tool_guard_state: _RuntimeToolGuardState,
-) -> tuple[tuple[_PendingToolExecution, ToolResult, float], ...]:
-    resolved_by_index: list[tuple[ToolResult, float] | None] = [None] * len(pending_calls)
-    timeout_seconds = tool_guard_state.tool_timeout_seconds
-
-    while any(result is None for result in resolved_by_index):
-        cancellation_requested = tool_guard_state.is_cancelled()
-        now = perf_counter()
-        for index, pending_call in enumerate(pending_calls):
-            if resolved_by_index[index] is not None:
-                continue
-
-            if pending_call.done_event.is_set():
-                resolved_result = pending_call.result or ToolResult.failure(
-                    tool_name=pending_call.tool_call.tool_name,
-                    error=(
-                        f"Tool '{pending_call.tool_call.tool_name}' returned no result."
-                    ),
-                )
-                resolved_by_index[index] = (resolved_result, perf_counter())
-                continue
-
-            if cancellation_requested:
-                resolved_by_index[index] = (
-                    _build_cancelled_tool_result(pending_call.tool_call),
-                    now,
-                )
-                continue
-
-            if now - pending_call.started_at >= timeout_seconds:
-                resolved_by_index[index] = (
-                    _build_timed_out_tool_result(
-                        pending_call.tool_call,
-                        timeout_seconds=timeout_seconds,
-                    ),
-                    now,
-                )
-
-        if any(result is None for result in resolved_by_index):
-            sleep(RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS)
-
-    return tuple(
-        (pending_call, resolved_result, finished_at)
-        for pending_call, resolved in zip(pending_calls, resolved_by_index, strict=True)
-        if resolved is not None
-        for resolved_result, finished_at in (resolved,)
-    )
-
-
-def _build_timed_out_tool_result(
-    tool_call: ToolCall,
-    *,
-    timeout_seconds: float,
-) -> ToolResult:
-    return ToolResult.failure(
-        tool_name=tool_call.tool_name,
-        error=(
-            f"Tool '{tool_call.tool_name}' timed out after "
-            f"{timeout_seconds:g} seconds."
-        ),
-    )
-
-
-def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
-    return ToolResult.failure(
-        tool_name=tool_call.tool_name,
-        error=f"Tool '{tool_call.tool_name}' was cancelled.",
-    )
-
-
 def _resolve_tool_definitions(
     *,
     tool_registry: ToolRegistry,
@@ -981,288 +606,6 @@ def _supports_native_tool_calling(model_profile: Any) -> bool:
     return tool_mode.strip().lower() == "native"
 
 
-def _recover_inline_native_tool_response(
-    response: LLMResponse,
-    *,
-    tool_definitions: Sequence[ToolDefinition],
-    max_agent_steps: int,
-) -> tuple[LLMResponse | None, str | None]:
-    """Normalize inline JSON tool payloads into the shared native tool path.
-
-    Some native-capable local models emit tool requests as assistant-visible
-    JSON instead of filling the structured ``tool_calls`` field. When recovery
-    is safe, rebuild a synthetic native payload so the existing agent loop can
-    run unchanged. When the content clearly looks like a tool payload but is
-    invalid or tool execution is unavailable, return a normal assistant reply
-    instead of exposing raw JSON to the user.
-    """
-    analysis = _analyze_inline_tool_payload(
-        response.content,
-        tool_definitions=tool_definitions,
-    )
-    if analysis.tool_calls is None:
-        if analysis.invalid_tool_payload:
-            return None, _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY
-        return None, None
-
-    if max_agent_steps <= 0:
-        return None, _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY
-
-    raw_message = response.raw_payload.get("message")
-    normalized_message = dict(raw_message) if isinstance(raw_message, dict) else {}
-    normalized_message["content"] = ""
-    normalized_message["tool_calls"] = list(analysis.raw_tool_calls_payload or ())
-
-    normalized_payload = dict(response.raw_payload)
-    normalized_payload["message"] = normalized_message
-    return (
-        replace(
-            response,
-            content="",
-            tool_calls=analysis.tool_calls,
-            raw_payload=normalized_payload,
-        ),
-        None,
-    )
-
-
-def _analyze_inline_tool_payload(
-    content: str,
-    *,
-    tool_definitions: Sequence[ToolDefinition],
-) -> _InlineToolPayloadAnalysis:
-    candidate = _extract_inline_tool_payload_candidate(content)
-    if candidate is None:
-        return _InlineToolPayloadAnalysis()
-
-    try:
-        payload = json.loads(candidate)
-    except json.JSONDecodeError:
-        return _InlineToolPayloadAnalysis(
-            invalid_tool_payload=_looks_like_inline_tool_payload_text(candidate)
-        )
-
-    if not _looks_like_inline_tool_payload(payload):
-        return _InlineToolPayloadAnalysis()
-
-    parsed = _parse_inline_tool_payload(
-        payload,
-        allowed_tool_names={tool.name for tool in tool_definitions},
-    )
-    if parsed is None:
-        return _InlineToolPayloadAnalysis(invalid_tool_payload=True)
-
-    tool_calls, raw_tool_calls_payload = parsed
-    return _InlineToolPayloadAnalysis(
-        tool_calls=tool_calls,
-        raw_tool_calls_payload=raw_tool_calls_payload,
-    )
-
-
-def _extract_inline_tool_payload_candidate(content: str) -> str | None:
-    stripped = content.strip()
-    if not stripped:
-        return None
-
-    fenced_candidate = _extract_fenced_json_candidate(stripped)
-    if fenced_candidate is not None:
-        return fenced_candidate
-
-    if stripped[0] in ("{", "["):
-        return stripped
-
-    return None
-
-
-def _extract_fenced_json_candidate(content: str) -> str | None:
-    fence_start = content.find("```")
-    if fence_start == -1:
-        return None
-
-    fence_end = content.find("```", fence_start + 3)
-    if fence_end == -1:
-        return None
-
-    candidate = content[fence_start + 3 : fence_end].strip()
-    if not candidate:
-        return None
-
-    if "\n" in candidate:
-        first_line, remainder = candidate.split("\n", 1)
-        if first_line.strip().lower() in {"json", "jsonc", "javascript", "js"}:
-            candidate = remainder.strip()
-
-    if not candidate or candidate[0] not in ("{", "["):
-        return None
-    return candidate
-
-
-def _looks_like_inline_tool_payload_text(candidate: str) -> bool:
-    lowered = candidate.lower()
-    if "\"tool_calls\"" in lowered or "\"function\"" in lowered:
-        return True
-    return "\"arguments\"" in lowered and (
-        "\"name\"" in lowered or "\"tool_name\"" in lowered
-    )
-
-
-def _looks_like_inline_tool_payload(payload: Any) -> bool:
-    if isinstance(payload, list):
-        return bool(payload) and all(
-            _looks_like_inline_tool_payload(item) for item in payload
-        )
-
-    if not isinstance(payload, dict):
-        return False
-
-    if "tool_calls" in payload:
-        return set(payload).issubset({"tool_calls", "id", "type"})
-
-    if "function" in payload:
-        return set(payload).issubset({"function", "id", "type", "index"})
-
-    name = payload.get("name")
-    tool_name = payload.get("tool_name")
-    return (
-        (isinstance(name, str) or isinstance(tool_name, str))
-        and set(payload).issubset({"name", "tool_name", "arguments", "id", "type"})
-    )
-
-
-def _parse_inline_tool_payload(
-    payload: Any,
-    *,
-    allowed_tool_names: set[str],
-) -> tuple[tuple[ToolCall, ...], tuple[dict[str, Any], ...]] | None:
-    if isinstance(payload, dict) and "tool_calls" in payload:
-        raw_calls = payload.get("tool_calls")
-    elif isinstance(payload, list):
-        raw_calls = payload
-    else:
-        raw_calls = [payload]
-
-    if not isinstance(raw_calls, list) or not raw_calls:
-        return None
-
-    parsed_calls: list[ToolCall] = []
-    raw_payloads: list[dict[str, Any]] = []
-    for raw_call in raw_calls:
-        parsed = _parse_one_inline_tool_call(
-            raw_call,
-            allowed_tool_names=allowed_tool_names,
-        )
-        if parsed is None:
-            return None
-        tool_call, raw_payload = parsed
-        parsed_calls.append(tool_call)
-        raw_payloads.append(raw_payload)
-
-    return tuple(parsed_calls), tuple(raw_payloads)
-
-
-def _parse_one_inline_tool_call(
-    payload: Any,
-    *,
-    allowed_tool_names: set[str],
-) -> tuple[ToolCall, dict[str, Any]] | None:
-    if not isinstance(payload, dict):
-        return None
-
-    if "function" in payload:
-        function = payload.get("function")
-        if not isinstance(function, dict):
-            return None
-        raw_name = function.get("name")
-        raw_arguments = function.get("arguments")
-    else:
-        raw_name = payload.get("name")
-        if not isinstance(raw_name, str):
-            raw_name = payload.get("tool_name")
-        raw_arguments = payload.get("arguments")
-
-    if not isinstance(raw_name, str) or raw_name not in allowed_tool_names:
-        return None
-
-    arguments = _normalize_inline_tool_arguments(raw_arguments)
-    if arguments is None:
-        return None
-
-    return (
-        ToolCall(tool_name=raw_name, arguments=arguments),
-        {
-            "function": {
-                "name": raw_name,
-                "arguments": arguments,
-            }
-        },
-    )
-
-
-def _normalize_inline_tool_arguments(arguments: Any) -> dict[str, Any] | None:
-    if arguments is None:
-        return {}
-    if isinstance(arguments, dict):
-        return arguments
-    if not isinstance(arguments, str):
-        return None
-
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError:
-        return None
-
-    if not isinstance(parsed, dict):
-        return None
-    return parsed
-
-
-def _extract_raw_tool_calls(response: LLMResponse) -> tuple[dict[str, Any], ...] | None:
-    """Extract raw tool_calls from the provider response for re-sending."""
-    message = response.raw_payload.get("message")
-    if not isinstance(message, dict):
-        return None
-    raw_tool_calls = message.get("tool_calls")
-    if not isinstance(raw_tool_calls, list) or not raw_tool_calls:
-        return None
-    return tuple(raw_tool_calls)
-
-
-def _dispatch_runtime_tool_call(
-    *,
-    tool_registry: ToolRegistry,
-    tool_call: ToolCall,
-) -> ToolResult:
-    dispatcher = ToolDispatcher(tool_registry)
-    return dispatcher.dispatch(tool_call)
-
-
-def _finalize_runtime_tool_call(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    tracer: Tracer,
-    tool_call: ToolCall,
-    tool_result: ToolResult,
-    tool_duration_ms: int,
-    skill_id: str | None = None,
-) -> None:
-    from unclaw.core.research_flow import persist_tool_result  # lazy to avoid circular import
-
-    tracer.trace_tool_finished(
-        session_id=session_id,
-        tool_name=tool_result.tool_name,
-        success=tool_result.success,
-        output_length=len(tool_result.output_text),
-        error=tool_result.error,
-        tool_duration_ms=tool_duration_ms,
-        skill_id=skill_id,
-    )
-    persist_tool_result(
-        session_manager=session_manager,
-        session_id=session_id,
-        result=tool_result,
-        tool_call=tool_call,
-    )
 
 
 def _build_model_failure_reply(error: ModelCallFailedError) -> str:
