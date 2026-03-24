@@ -8,7 +8,6 @@ from typing import Any
 
 from unclaw.core.routing import (
     _looks_like_deep_search_request,
-    _normalize_runtime_routing_text,
 )
 from unclaw.tools.contracts import ToolResult
 
@@ -92,26 +91,6 @@ def _reply_acknowledges_limitations(reply: str) -> bool:
     return _LIMITATION_ACK_PATTERN.search(reply) is not None
 
 
-def _detect_runtime_reply_language(user_input: str) -> str:
-    normalized = _normalize_runtime_routing_text(user_input)
-    if any(
-        token in normalized.split()
-        for token in (
-            "biographie",
-            "de",
-            "est",
-            "fais",
-            "leur",
-            "qui",
-            "recherche",
-            "sur",
-            "quoi",
-        )
-    ):
-        return "fr"
-    return "en"
-
-
 def _reply_sentence_count(text: str) -> int:
     sentences = [
         sentence.strip()
@@ -126,19 +105,8 @@ def _build_all_failed_tool_reply(
     user_input: str,
     tool_results: Sequence[ToolResult],
 ) -> str:
-    language = _detect_runtime_reply_language(user_input)
+    del user_input
     timeout_failed = any(_tool_result_timed_out(tool_result) for tool_result in tool_results)
-
-    if language == "fr":
-        if timeout_failed:
-            return (
-                "L'etape outil a expire, donc je n'ai pas pu confirmer les details "
-                "demandes a partir des resultats recuperes."
-            )
-        return (
-            "L'etape outil a echoue, donc je n'ai pas pu confirmer les details "
-            "demandes a partir des resultats recuperes."
-        )
 
     if timeout_failed:
         return (
@@ -160,7 +128,6 @@ def _build_fast_grounding_guarded_reply(
     if not fast_results:
         return None
 
-    language = _detect_runtime_reply_language(user_input)
     supported_points = [
         point
         for tool_result in fast_results
@@ -174,12 +141,6 @@ def _build_fast_grounding_guarded_reply(
     reply_is_minimal = _reply_sentence_count(candidate_reply) <= 1
 
     if len(fast_results) > 1 and (any_mismatch or all_thin):
-        if language == "fr":
-            return (
-                "Les resultats de grounding rapide etaient limites ou melanges, "
-                "donc je ne peux confirmer que des fragments partiels pour ces "
-                "entites. Je ne peux pas confirmer des biographies completes a partir de ces seules recherches rapides."
-            )
         return (
             "The quick grounding results were limited or mixed, so I can only "
             "confirm partial fragments for these entities. I couldn't confirm "
@@ -188,12 +149,6 @@ def _build_fast_grounding_guarded_reply(
 
     primary_point = supported_points[0] if supported_points else ""
     if any_mismatch and not primary_point:
-        if language == "fr":
-            return (
-                "Le grounding web rapide semblait pointer vers une autre entite, "
-                "donc je ne peux pas confirmer les details demandes a partir de "
-                "ce resultat seul."
-            )
         return (
             "The quick web grounding appeared to match a different entity, so I "
             "couldn't confirm the requested details from that result alone."
@@ -208,11 +163,6 @@ def _build_fast_grounding_guarded_reply(
         )
         or (all_thin and _reply_sentence_count(candidate_reply) > 1)
     ):
-        if language == "fr":
-            return (
-                f"{primary_point} Je ne peux pas confirmer une biographie plus "
-                "complete a partir de ce grounding rapide seul."
-            )
         return (
             f"{primary_point} I couldn't confirm a fuller biography from that "
             "quick grounding probe alone."

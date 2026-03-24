@@ -47,7 +47,11 @@ from unclaw.tools.long_term_memory_tools import (
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolPermissionLevel, ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
-from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINITION
+from unclaw.tools.web_tools import (
+    FAST_WEB_SEARCH_DEFINITION,
+    FETCH_URL_TEXT_DEFINITION,
+    SEARCH_WEB_DEFINITION,
+)
 pytestmark = pytest.mark.integration
 
 
@@ -197,6 +201,134 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         runtime_log = settings.paths.log_file_path.read_text(encoding="utf-8")
         assert '"event_type": "assistant.reply.persisted"' in runtime_log
         assert '"event_type": "model.succeeded"' in runtime_log
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_fast_grounding_fallback_adds_no_extra_model_call(
+    monkeypatch,
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del messages, timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-24T10:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="fast_web_search",
+                            arguments={"query": "Marine Leleu"},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "fast_web_search",
+                                        "arguments": {"query": "Marine Leleu"},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=(
+                    "Marine Leleu is a French endurance athlete. "
+                    "She also has a much broader public biography."
+                ),
+                created_at="2026-03-24T10:00:01Z",
+                finish_reason="stop",
+            )
+
+        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+            del timeout_seconds
+            return True
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Marine Leleu\n- Marine Leleu is a French endurance athlete.",
+            payload={
+                "query": call.arguments["query"],
+                "result_count": 1,
+                "grounding_note": (
+                    "Marine Leleu\n- Marine Leleu is a French endurance athlete."
+                ),
+            },
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Qui est Marine Leleu ?",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Qui est Marine Leleu ?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == (
+            "Marine Leleu is a French endurance athlete. "
+            "I couldn't confirm a fuller biography from that quick grounding probe alone."
+        )
+        assert call_count == 2
     finally:
         session_manager.close()
 

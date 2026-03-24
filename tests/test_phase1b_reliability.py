@@ -264,8 +264,7 @@ def test_corrected_ambiguity_stays_centered_on_next_turn(
 
         assert reply == (
             "McFly et Carlito are a French YouTube comedy duo. "
-            "Je ne peux pas confirmer une biographie plus complete a partir de "
-            "ce grounding rapide seul."
+            "I couldn't confirm a fuller biography from that quick grounding probe alone."
         )
         assert call_count == 2
         assert len(observed_tool_calls) == 1

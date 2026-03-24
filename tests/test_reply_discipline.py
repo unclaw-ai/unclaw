@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from unclaw.core.reply_discipline import _apply_post_tool_reply_discipline
+from unclaw.core.reply_discipline import (
+    _apply_post_tool_reply_discipline,
+    _build_all_failed_tool_reply,
+    _build_fast_grounding_guarded_reply,
+)
 from unclaw.tools.contracts import ToolResult
 
 pytestmark = pytest.mark.unit
@@ -58,7 +62,32 @@ def test_reply_discipline_uses_failed_tool_fallback_when_all_tools_fail() -> Non
     )
 
 
-def test_reply_discipline_uses_french_timeout_fallback_when_all_tools_fail() -> None:
+@pytest.mark.parametrize(
+    "user_input",
+    (
+        "Who is Ada Lovelace?",
+        "Qui est Ada Lovelace ?",
+        "Quien es Ada Lovelace?",
+    ),
+)
+def test_all_failed_tool_builder_is_language_neutral_across_user_inputs(
+    user_input: str,
+) -> None:
+    result = _build_all_failed_tool_reply(
+        user_input=user_input,
+        tool_results=[
+            ToolResult.failure(tool_name="search_web", error="network failure"),
+        ],
+    )
+
+    assert (
+        result
+        == "The tool step failed, so I couldn't confirm the requested details "
+        "from retrieved tool evidence."
+    )
+
+
+def test_reply_discipline_uses_language_neutral_timeout_fallback_when_all_tools_fail() -> None:
     result = _apply_post_tool_reply_discipline(
         reply="Je vais repondre quand meme.",
         user_input="Qui est Marine Leleu ?",
@@ -72,8 +101,8 @@ def test_reply_discipline_uses_french_timeout_fallback_when_all_tools_fail() -> 
 
     assert (
         result
-        == "L'etape outil a expire, donc je n'ai pas pu confirmer les details "
-        "demandes a partir des resultats recuperes."
+        == "The tool step timed out, so I couldn't confirm the requested details "
+        "from retrieved tool evidence."
     )
 
 
@@ -85,6 +114,33 @@ def test_reply_discipline_clamps_thin_fast_web_results() -> None:
         ),
         user_input="Tell me everything you know about Marine Leleu.",
         tool_results=[_fast_web_result()],
+    )
+
+    assert (
+        result
+        == "Marine Leleu is a French endurance athlete. "
+        "I couldn't confirm a fuller biography from that quick grounding probe alone."
+    )
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    (
+        "Who is Marine Leleu?",
+        "Qui est Marine Leleu ?",
+        "Quien es Marine Leleu?",
+    ),
+)
+def test_fast_grounding_guarded_reply_is_language_neutral_across_user_inputs(
+    user_input: str,
+) -> None:
+    result = _build_fast_grounding_guarded_reply(
+        candidate_reply=(
+            "Marine Leleu is a French endurance athlete. "
+            "She also has a much broader biography."
+        ),
+        user_input=user_input,
+        fast_results=[_fast_web_result()],
     )
 
     assert (
@@ -123,22 +179,6 @@ def test_reply_discipline_preserves_normal_grounded_replies() -> None:
     )
 
     assert result == reply
-
-
-def test_reply_discipline_falls_back_to_english_for_non_french_unknown_language() -> None:
-    result = _apply_post_tool_reply_discipline(
-        reply="No se.",
-        user_input="Quien es Marine Leleu?",
-        tool_results=[
-            ToolResult.failure(tool_name="search_web", error="network failure"),
-        ],
-    )
-
-    assert (
-        result
-        == "The tool step failed, so I couldn't confirm the requested details "
-        "from retrieved tool evidence."
-    )
 
 
 def test_reply_discipline_preserves_existing_limitation_acknowledgement() -> None:
