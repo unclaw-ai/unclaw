@@ -124,7 +124,10 @@ def _fake_urlopen(payload: object):
 
 
 def _load_repo_settings():
-    return load_settings(project_root=Path(__file__).resolve().parents[1])
+    return load_settings(
+        project_root=Path(__file__).resolve().parents[1],
+        include_local_overrides=False,
+    )
 
 
 def _build_session_manager() -> SimpleNamespace:

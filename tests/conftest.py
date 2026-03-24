@@ -80,6 +80,8 @@ def make_temp_project(tmp_path: Path):
         """
         project_root = tmp_path / "project"
         shutil.copytree(_repo_root() / "config", project_root / "config")
+        for local_override_path in (project_root / "config").glob("*.local.yaml"):
+            local_override_path.unlink()
 
         # Always patch out enabled_skill_ids so tests are not tied to the
         # developer's personal config/app.yaml.  Pass enabled_skill_ids explicitly

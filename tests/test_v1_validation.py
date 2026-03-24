@@ -72,7 +72,7 @@ def _repo_root() -> Path:
 
 
 def _load_repo_settings():
-    return load_settings(project_root=_repo_root())
+    return load_settings(project_root=_repo_root(), include_local_overrides=False)
 
 
 def _make_native_capabilities() -> ModelCapabilities:

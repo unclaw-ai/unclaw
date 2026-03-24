@@ -206,8 +206,14 @@ def run_user_turn(
             command_handler=command_handler,
             session_id=session.id,
         )
-        if memory_context_note is not None:
-            system_context_notes = (memory_context_note,)
+        local_access_note = _build_local_access_control_note(
+            command_handler=command_handler,
+        )
+        system_context_notes = tuple(
+            note
+            for note in (memory_context_note, local_access_note)
+            if note is not None
+        )
 
         responder_tool_definitions = legacy_tool_definitions
         responder_capability_summary = capability_summary
@@ -381,6 +387,19 @@ def _build_session_memory_context_note(
 
     normalized_note = note.strip()
     return normalized_note or None
+
+
+def _build_local_access_control_note(
+    *,
+    command_handler: CommandHandler,
+) -> str:
+    preset_name = command_handler.settings.app.security.tools.files.control_preset
+    return (
+        "Local access control: the current control preset "
+        f"('{preset_name}') only changes elevated file and terminal boundaries. "
+        "It never disables system_info, web tools, session history, long-term "
+        "memory, or active skill tools when the active model profile can call tools."
+    )
 
 
 def _is_tool_mode_none_profile(model_profile: Any) -> bool:

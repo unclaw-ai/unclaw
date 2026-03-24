@@ -590,15 +590,24 @@ def _build_control_surface_check(settings: Settings) -> StartupCheck:
     summary = build_control_surface_summary(
         preset_name=settings.app.security.tools.files.control_preset,
         project_root=settings.paths.project_root,
-        allowed_roots=settings.app.security.tools.files.allowed_roots,
+        read_roots=settings.app.security.tools.files.read_allowed_roots,
+        write_roots=settings.app.security.tools.files.write_allowed_roots,
+        terminal_roots=settings.app.security.tools.files.terminal_allowed_roots,
     )
-    allowed_roots_text = ", ".join(str(root) for root in summary.allowed_roots)
+    read_roots_text = ", ".join(str(root) for root in summary.read_roots)
+    write_roots_text = ", ".join(str(root) for root in summary.write_roots)
+    terminal_roots_text = ", ".join(str(root) for root in summary.terminal_roots)
     return StartupCheck(
         status=CheckStatus.INFO,
         label="Control",
         detail=(
             f"{summary.preset_name.title()} preset. {summary.preset_description} "
-            f"Tool access is {summary.access_scope}. Allowed roots: {allowed_roots_text}."
+            "Control presets affect elevated file and terminal access only. "
+            "Core tools stay available. "
+            f"Tool access is {summary.access_scope}. "
+            f"Read roots: {read_roots_text}. "
+            f"Write roots: {write_roots_text}. "
+            f"Terminal roots: {terminal_roots_text}."
         ),
         guidance="Use /control inside the CLI to switch between safe, workspace, and full.",
     )

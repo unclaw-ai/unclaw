@@ -28,7 +28,7 @@ def _repo_root() -> Path:
 @pytest.mark.unit
 def test_phase0_repo_settings_lock_shipped_pack_resolution_contract() -> None:
     repo_root = _repo_root()
-    settings = load_settings(project_root=repo_root)
+    settings = load_settings(project_root=repo_root, include_local_overrides=False)
     shipped_models_payload = yaml.safe_load(
         (repo_root / "config" / "models.yaml").read_text(encoding="utf-8")
     )

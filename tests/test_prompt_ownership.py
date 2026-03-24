@@ -19,7 +19,7 @@ def _repo_root() -> Path:
 
 def test_shipped_prompt_directory_contains_only_the_stable_system_prompt() -> None:
     repo_root = _repo_root()
-    settings = load_settings(project_root=repo_root)
+    settings = load_settings(project_root=repo_root, include_local_overrides=False)
     prompts_dir = repo_root / "config" / "prompts"
     prompt_files = tuple(
         path.relative_to(prompts_dir).as_posix()
@@ -42,5 +42,4 @@ def test_builtin_capability_prompt_sources_stay_inside_capability_fragments_modu
         assert fragment.prompt_source.reference.startswith(
             "unclaw.core.capability_fragments"
         )
-
 

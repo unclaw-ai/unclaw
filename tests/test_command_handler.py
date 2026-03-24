@@ -305,7 +305,10 @@ def test_control_without_arguments_shows_current_preset_and_roots() -> None:
     )
     assert "Meaning:" in result.lines[1]
     assert result.lines[2].startswith("Tool access: ")
-    assert result.lines[3] == "Allowed roots:"
+    assert result.lines[3].startswith("Core tools:")
+    assert result.lines[4] == "Read roots:"
+    assert "Write roots:" in result.lines
+    assert "Terminal working roots:" in result.lines
 
 
 def test_control_command_persists_new_preset(
@@ -325,7 +328,12 @@ def test_control_command_persists_new_preset(
     assert result.updated_settings is not None
     assert result.refresh_tool_executor is True
     assert handler.settings.app.security.tools.files.control_preset == "safe"
-    assert handler.settings.app.security.tools.files.allowed_roots == ("data/files",)
+    assert handler.settings.app.security.tools.files.read_allowed_roots == (
+        "config",
+        "data",
+        "data/files",
+    )
+    assert handler.settings.app.security.tools.files.write_allowed_roots == ("data",)
     assert result.lines[0] == "Saved control preset: safe."
     assert (
         result.lines[1]
@@ -641,7 +649,10 @@ def test_read_keeps_useful_quoted_paths_working() -> None:
 
 
 def _load_repo_settings():
-    return load_settings(project_root=Path(__file__).resolve().parents[1])
+    return load_settings(
+        project_root=Path(__file__).resolve().parents[1],
+        include_local_overrides=False,
+    )
 
 
 def _build_session_manager(settings=None) -> SimpleNamespace:

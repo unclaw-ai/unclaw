@@ -50,6 +50,7 @@ config/secrets.yaml
 config/app.yaml
 config/telegram.yaml
 config/models.yaml
+config/*.local.yaml
 
 # Project data
 data/

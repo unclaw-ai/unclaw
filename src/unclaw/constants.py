@@ -13,6 +13,8 @@ FILES_DIRECTORY_NAME = "files"
 
 APP_CONFIG_FILE_NAME = "app.yaml"
 MODELS_CONFIG_FILE_NAME = "models.yaml"
+APP_LOCAL_CONFIG_FILE_NAME = "app.local.yaml"
+MODELS_LOCAL_CONFIG_FILE_NAME = "models.local.yaml"
 SYSTEM_PROMPT_FILE_NAME = "system.txt"
 DATABASE_FILE_NAME = "memory/app.db"
 LOG_FILE_NAME = "runtime.log"

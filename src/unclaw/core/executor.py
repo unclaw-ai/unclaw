@@ -78,7 +78,8 @@ def create_default_tool_registry(
         register_file_tools(
             registry,
             project_root=settings.paths.project_root,
-            configured_roots=settings.app.security.tools.files.allowed_roots,
+            configured_read_roots=settings.app.security.tools.files.read_allowed_roots,
+            configured_write_roots=settings.app.security.tools.files.write_allowed_roots,
             default_write_dir=settings.paths.files_dir,
             default_read_dir=settings.paths.files_dir,
             allow_destructive_file_overwrite=(
@@ -119,7 +120,7 @@ def create_default_tool_registry(
         register_terminal_tools(
             registry,
             project_root=settings.paths.project_root,
-            configured_roots=settings.app.security.tools.files.allowed_roots,
+            configured_roots=settings.app.security.tools.files.terminal_allowed_roots,
             default_working_directory=settings.paths.project_root,
             max_timeout_seconds=settings.app.runtime.tool_timeout_seconds,
         )

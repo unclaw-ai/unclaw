@@ -23,7 +23,7 @@ from unclaw.startup import (
 
 
 def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -57,7 +57,7 @@ def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
 
 
 def test_startup_report_includes_control_and_context_summary(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -80,7 +80,10 @@ def test_startup_report_includes_control_and_context_summary(monkeypatch) -> Non
     profile_check = next(check for check in report.checks if check.label == "Profiles")
 
     assert f"{settings.app.security.tools.files.control_preset.title()} preset" in control_check.detail
-    assert "Allowed roots:" in control_check.detail
+    assert "Read roots:" in control_check.detail
+    assert "Write roots:" in control_check.detail
+    assert "Terminal roots:" in control_check.detail
+    assert "Core tools stay available" in control_check.detail
     assert "Context windows:" in profile_check.detail
     assert f"main={settings.models['main'].num_ctx}" in profile_check.detail
 
@@ -88,7 +91,7 @@ def test_startup_report_includes_control_and_context_summary(monkeypatch) -> Non
 def test_format_startup_report_renders_control_and_profile_context_summary(
     monkeypatch,
 ) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -113,7 +116,8 @@ def test_format_startup_report_renders_control_and_profile_context_summary(
     assert "Context windows:" in rendered
     assert f"main={settings.models['main'].num_ctx}" in rendered
     assert "Control" in rendered
-    assert "Allowed roots:" in rendered
+    assert "Read roots:" in rendered
+    assert "Write roots:" in rendered
 
 
 def test_startup_report_uses_pack_resolved_default_model(
@@ -155,7 +159,7 @@ def test_startup_report_uses_pack_resolved_default_model(
 
 
 def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -182,7 +186,7 @@ def test_startup_report_errors_when_required_model_is_missing(monkeypatch) -> No
 
 
 def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
@@ -258,7 +262,7 @@ def test_startup_report_warm_loads_default_model_when_requested(monkeypatch) -> 
 
 
 def test_startup_report_warm_load_failure_is_non_fatal(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",
@@ -362,7 +366,7 @@ def test_startup_report_accepts_local_telegram_token(
 
 
 def test_startup_report_suggests_local_telegram_allow_commands(monkeypatch) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",

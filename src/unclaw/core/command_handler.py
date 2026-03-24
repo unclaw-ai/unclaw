@@ -668,15 +668,25 @@ class CommandHandler:
         summary = build_control_surface_summary(
             preset_name=self.settings.app.security.tools.files.control_preset,
             project_root=self.settings.paths.project_root,
-            allowed_roots=self.settings.app.security.tools.files.allowed_roots,
+            read_roots=self.settings.app.security.tools.files.read_allowed_roots,
+            write_roots=self.settings.app.security.tools.files.write_allowed_roots,
+            terminal_roots=self.settings.app.security.tools.files.terminal_allowed_roots,
         )
         lines = [
             f"Control preset: {summary.preset_name}",
             f"Meaning: {summary.preset_description}",
-            f"Tool access: {summary.access_scope}",
-            "Allowed roots:",
+            f"Tool access: {summary.access_scope} (file and terminal permissions only)",
+            (
+                "Core tools: system_info, web, memory, session history, "
+                "and active skills stay available across presets."
+            ),
+            "Read roots:",
         ]
-        lines.extend(f"- {root}" for root in summary.allowed_roots)
+        lines.extend(f"- {root}" for root in summary.read_roots)
+        lines.append("Write roots:")
+        lines.extend(f"- {root}" for root in summary.write_roots)
+        lines.append("Terminal working roots:")
+        lines.extend(f"- {root}" for root in summary.terminal_roots)
         return tuple(lines)
 
     def _build_ctx_change_feedback(

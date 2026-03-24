@@ -13,12 +13,12 @@ import yaml
 from unclaw.control_surface import (
     CONTROL_PRESET_NAME_SET,
     MIN_PROFILE_NUM_CTX,
-    derive_control_root_strings,
     normalize_control_preset_name,
     resolve_control_surface,
 )
 from unclaw.constants import (
     APP_CONFIG_FILE_NAME,
+    APP_LOCAL_CONFIG_FILE_NAME,
     APP_NAME,
     CACHE_DIRECTORY_NAME,
     CONFIG_DIRECTORY_NAME,
@@ -34,6 +34,7 @@ from unclaw.constants import (
     LOG_FILE_NAME,
     LOGS_DIRECTORY_NAME,
     MODELS_CONFIG_FILE_NAME,
+    MODELS_LOCAL_CONFIG_FILE_NAME,
     PROMPTS_DIRECTORY_NAME,
     PROJECT_ROOT_ENV_VAR,
     SESSIONS_DIRECTORY_NAME,
@@ -99,8 +100,16 @@ class RuntimeGuardrailSettings:
 @dataclass(frozen=True, slots=True)
 class FileToolSecuritySettings:
     control_preset: str
-    allowed_roots: tuple[str, ...]
+    read_allowed_roots: tuple[str, ...]
+    write_allowed_roots: tuple[str, ...]
+    terminal_allowed_roots: tuple[str, ...]
     allow_destructive_file_overwrite: bool = False
+
+    @property
+    def allowed_roots(self) -> tuple[str, ...]:
+        """Legacy alias for read-allowed roots."""
+
+        return self.read_allowed_roots
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +178,9 @@ class RuntimePaths:
     project_root: Path
     config_dir: Path
     app_config_path: Path
+    app_local_config_path: Path
     models_config_path: Path
+    models_local_config_path: Path
     system_prompt_path: Path
     data_dir: Path
     logs_dir: Path
@@ -213,18 +224,34 @@ class Settings:
         return self.models[self.app.default_model_profile]
 
 
-def load_settings(project_root: Path | None = None) -> Settings:
+def load_settings(
+    project_root: Path | None = None,
+    *,
+    include_local_overrides: bool = True,
+) -> Settings:
     resolved_project_root = resolve_project_root(project_root)
     config_dir = resolved_project_root / CONFIG_DIRECTORY_NAME
     app_config_path = config_dir / APP_CONFIG_FILE_NAME
+    app_local_config_path = config_dir / APP_LOCAL_CONFIG_FILE_NAME
     models_config_path = config_dir / MODELS_CONFIG_FILE_NAME
+    models_local_config_path = config_dir / MODELS_LOCAL_CONFIG_FILE_NAME
 
     app_payload = _load_yaml_file(app_config_path)
     models_payload = _load_yaml_file(models_config_path)
+    if include_local_overrides:
+        app_payload = _merge_yaml_mappings(
+            app_payload,
+            _load_optional_yaml_file(app_local_config_path),
+        )
+        models_payload = _merge_yaml_mappings(
+            models_payload,
+            _load_optional_yaml_file(models_local_config_path),
+        )
 
     app_settings = _build_app_settings(
         app_payload,
         project_root=resolved_project_root,
+        config_dir=config_dir,
     )
     model_pack = _resolve_model_pack_name(models_payload)
     skill_settings = _build_skill_settings(app_payload)
@@ -240,7 +267,9 @@ def load_settings(project_root: Path | None = None) -> Settings:
         project_root=resolved_project_root,
         config_dir=config_dir,
         app_config_path=app_config_path,
+        app_local_config_path=app_local_config_path,
         models_config_path=models_config_path,
+        models_local_config_path=models_local_config_path,
         app_settings=app_settings,
     )
     system_prompt = _load_text_file(
@@ -276,28 +305,46 @@ def persist_control_preset(settings: Settings, preset_name: str) -> Settings:
         normalized_preset = normalize_control_preset_name(preset_name)
     except ValueError as exc:
         raise ConfigurationError(str(exc)) from exc
-    derived_roots = derive_control_root_strings(
-        preset_name=normalized_preset,
+    base_settings = load_settings(
         project_root=settings.paths.project_root,
-        files_dir=settings.paths.files_dir,
+        include_local_overrides=False,
     )
-    if (
-        settings.app.security.tools.files.control_preset == normalized_preset
-        and settings.app.security.tools.files.allowed_roots == derived_roots
-    ):
-        return settings
-
-    app_payload = _load_mutable_yaml_mapping(settings.paths.app_config_path)
+    local_app_payload = _load_optional_mutable_yaml_mapping(
+        settings.paths.app_local_config_path
+    )
     files_section = _ensure_mutable_mapping(
         _ensure_mutable_mapping(
-            _ensure_mutable_mapping(app_payload, "security"),
+            _ensure_mutable_mapping(local_app_payload, "security"),
             "tools",
         ),
         "files",
     )
-    files_section["control_preset"] = normalized_preset
-    files_section["allowed_roots"] = list(derived_roots)
-    _write_yaml_mapping(settings.paths.app_config_path, app_payload)
+
+    override_required = (
+        normalized_preset != base_settings.app.security.tools.files.control_preset
+    )
+    current_override = files_section.get("control_preset")
+    if override_required:
+        if (
+            current_override == normalized_preset
+            and settings.app.security.tools.files.control_preset == normalized_preset
+        ):
+            return settings
+        files_section["control_preset"] = normalized_preset
+    else:
+        if (
+            current_override is None
+            and settings.app.security.tools.files.control_preset == normalized_preset
+        ):
+            return settings
+        files_section.pop("control_preset", None)
+        files_section.pop("allowed_roots", None)
+        files_section.pop("read_allowed_roots", None)
+        files_section.pop("write_allowed_roots", None)
+        files_section.pop("terminal_allowed_roots", None)
+
+    _prune_empty_mappings(local_app_payload)
+    _write_yaml_mapping(settings.paths.app_local_config_path, local_app_payload)
     return load_settings(project_root=settings.paths.project_root)
 
 
@@ -324,23 +371,44 @@ def persist_profile_num_ctx(
             f"{MIN_PROFILE_NUM_CTX} tokens."
         )
 
-    current_override = settings.profile_overrides.get(normalized_profile_name)
-    if current_override is not None and current_override.num_ctx == num_ctx:
-        return settings
-    if (
-        current_override is None
-        and settings.models[normalized_profile_name].num_ctx == num_ctx
-    ):
-        return settings
-
-    models_payload = _load_mutable_yaml_mapping(settings.paths.models_config_path)
+    base_settings = load_settings(
+        project_root=settings.paths.project_root,
+        include_local_overrides=False,
+    )
+    base_num_ctx = base_settings.models[normalized_profile_name].num_ctx
+    models_payload = _load_optional_mutable_yaml_mapping(
+        settings.paths.models_local_config_path
+    )
     profile_overrides = _ensure_mutable_mapping(models_payload, "profile_overrides")
-    override_payload = profile_overrides.get(normalized_profile_name)
-    if not isinstance(override_payload, dict):
-        override_payload = {}
-    profile_overrides[normalized_profile_name] = override_payload
-    override_payload["num_ctx"] = num_ctx
-    _write_yaml_mapping(settings.paths.models_config_path, models_payload)
+    raw_local_override = profile_overrides.get(normalized_profile_name)
+    local_override_num_ctx = (
+        raw_local_override.get("num_ctx")
+        if isinstance(raw_local_override, dict)
+        else None
+    )
+
+    if base_num_ctx == num_ctx:
+        if (
+            local_override_num_ctx is None
+            and settings.models[normalized_profile_name].num_ctx == num_ctx
+        ):
+            return settings
+        profile_overrides.pop(normalized_profile_name, None)
+        _prune_empty_mappings(models_payload)
+    else:
+        if (
+            local_override_num_ctx == num_ctx
+            and settings.models[normalized_profile_name].num_ctx == num_ctx
+        ):
+            return settings
+        override_payload = raw_local_override
+        if not isinstance(override_payload, dict):
+            override_payload = {}
+        profile_overrides[normalized_profile_name] = override_payload
+        override_payload["num_ctx"] = num_ctx
+        _prune_empty_mappings(models_payload)
+
+    _write_yaml_mapping(settings.paths.models_local_config_path, models_payload)
     return load_settings(project_root=settings.paths.project_root)
 
 
@@ -388,6 +456,26 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_optional_yaml_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return _load_yaml_file(path)
+
+
+def _merge_yaml_mappings(
+    base_payload: dict[str, Any],
+    override_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = dict(base_payload)
+    for key, override_value in override_payload.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, Mapping) and isinstance(override_value, Mapping):
+            merged[key] = _merge_yaml_mappings(dict(base_value), override_value)
+            continue
+        merged[key] = override_value
+    return merged
+
+
 def _load_text_file(path: Path, *, description: str) -> str:
     try:
         text = path.read_text(encoding="utf-8")
@@ -406,6 +494,7 @@ def _build_app_settings(
     payload: Mapping[str, Any],
     *,
     project_root: Path,
+    config_dir: Path,
 ) -> AppSettings:
     app_section = _get_mapping(payload, "app")
     paths_section = _get_mapping(payload, "paths")
@@ -466,6 +555,7 @@ def _build_app_settings(
         ),
     )
     control_preset, allowed_roots = _resolve_file_tool_security_settings(
+        config_dir=config_dir,
         file_security_section=file_security_section,
         project_root=project_root,
         directories=directories,
@@ -474,7 +564,9 @@ def _build_app_settings(
         tools=ToolSecuritySettings(
             files=FileToolSecuritySettings(
                 control_preset=control_preset,
-                allowed_roots=allowed_roots,
+                read_allowed_roots=allowed_roots[0],
+                write_allowed_roots=allowed_roots[1],
+                terminal_allowed_roots=allowed_roots[2],
                 allow_destructive_file_overwrite=_get_bool(
                     file_security_section,
                     "allow_destructive_file_overwrite",
@@ -517,10 +609,11 @@ def _build_app_settings(
 
 def _resolve_file_tool_security_settings(
     *,
+    config_dir: Path,
     file_security_section: Mapping[str, Any],
     project_root: Path,
     directories: DirectorySettings,
-) -> tuple[str, tuple[str, ...]]:
+) -> tuple[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]:
     configured_allowed_roots = _get_str_list(
         file_security_section,
         "allowed_roots",
@@ -533,11 +626,21 @@ def _resolve_file_tool_security_settings(
     )
     data_dir = _resolve_path(project_root, directories.data_dir)
     files_dir = _resolve_path(data_dir, directories.files_dir)
-    return resolve_control_surface(
+    resolved_surface = resolve_control_surface(
         configured_preset_name=configured_control_preset,
         configured_roots=configured_allowed_roots,
         project_root=project_root,
+        config_dir=config_dir,
+        data_dir=data_dir,
         files_dir=files_dir,
+    )
+    return (
+        resolved_surface.preset_name,
+        (
+            resolved_surface.read_roots,
+            resolved_surface.write_roots,
+            resolved_surface.terminal_roots,
+        ),
     )
 
 
@@ -755,7 +858,9 @@ def _build_runtime_paths(
     project_root: Path,
     config_dir: Path,
     app_config_path: Path,
+    app_local_config_path: Path,
     models_config_path: Path,
+    models_local_config_path: Path,
     app_settings: AppSettings,
 ) -> RuntimePaths:
     prompts_dir = config_dir / PROMPTS_DIRECTORY_NAME
@@ -774,7 +879,9 @@ def _build_runtime_paths(
         project_root=project_root,
         config_dir=config_dir,
         app_config_path=app_config_path,
+        app_local_config_path=app_local_config_path,
         models_config_path=models_config_path,
+        models_local_config_path=models_local_config_path,
         system_prompt_path=prompts_dir / SYSTEM_PROMPT_FILE_NAME,
         data_dir=data_dir,
         logs_dir=logs_dir,
@@ -997,6 +1104,12 @@ def _load_mutable_yaml_mapping(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_optional_mutable_yaml_mapping(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return _load_mutable_yaml_mapping(path)
+
+
 def _ensure_mutable_mapping(
     payload: dict[str, Any],
     key: str,
@@ -1012,9 +1125,17 @@ def _ensure_mutable_mapping(
 
 
 def _write_yaml_mapping(path: Path, payload: dict[str, Any]) -> None:
+    if not payload:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise OSError(f"Could not write {path}: {exc}") from exc
+        return
+
     rendered = yaml.safe_dump(payload, sort_keys=False, allow_unicode=False)
     temp_path = path.with_name(f".{path.name}.tmp")
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         temp_path.write_text(rendered, encoding="utf-8")
         temp_path.replace(path)
     except OSError as exc:
@@ -1022,3 +1143,13 @@ def _write_yaml_mapping(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if temp_path.exists():
             temp_path.unlink(missing_ok=True)
+
+
+def _prune_empty_mappings(payload: dict[str, Any]) -> bool:
+    empty_keys: list[str] = []
+    for key, value in payload.items():
+        if isinstance(value, dict) and _prune_empty_mappings(value):
+            empty_keys.append(key)
+    for key in empty_keys:
+        payload.pop(key, None)
+    return not payload

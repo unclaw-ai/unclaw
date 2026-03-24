@@ -46,7 +46,7 @@ def test_system_prompt_is_loaded_from_config_prompts(make_temp_project) -> None:
 
 
 def test_default_system_prompt_includes_compact_agent_behavior_rules() -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
     prompt = settings.system_prompt
 
     assert "privacy-first, local-first AI assistant running on local models only" in prompt
@@ -204,7 +204,7 @@ def test_run_update_fetch_failure_uses_a_single_actionable_detail_line(
 def test_startup_report_uses_secure_by_default_telegram_access_wording(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = load_settings(project_root=_repo_root())
+    settings = load_settings(project_root=_repo_root(), include_local_overrides=False)
 
     monkeypatch.setattr(
         "unclaw.startup.inspect_ollama",

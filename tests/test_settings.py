@@ -198,7 +198,13 @@ def test_load_settings_resolves_safe_control_preset_to_files_sandbox(
     settings = load_settings(project_root=project_root)
 
     assert settings.app.security.tools.files.control_preset == "safe"
-    assert settings.app.security.tools.files.allowed_roots == ("data/files",)
+    assert settings.app.security.tools.files.read_allowed_roots == (
+        "config",
+        "data",
+        "data/files",
+    )
+    assert settings.app.security.tools.files.write_allowed_roots == ("data",)
+    assert settings.app.security.tools.files.terminal_allowed_roots == ("data",)
 
 
 def test_load_settings_errors_when_control_preset_is_invalid(
@@ -532,11 +538,18 @@ def test_persist_control_preset_updates_app_config_and_reloads_settings(
 
     updated_settings = persist_control_preset(settings, "safe")
     app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    local_app_payload = _read_yaml(project_root / "config" / "app.local.yaml")
 
     assert updated_settings.app.security.tools.files.control_preset == "safe"
-    assert updated_settings.app.security.tools.files.allowed_roots == ("data/files",)
-    assert app_payload["security"]["tools"]["files"]["control_preset"] == "safe"
-    assert app_payload["security"]["tools"]["files"]["allowed_roots"] == ["data/files"]
+    assert updated_settings.app.security.tools.files.read_allowed_roots == (
+        "config",
+        "data",
+        "data/files",
+    )
+    assert updated_settings.app.security.tools.files.write_allowed_roots == ("data",)
+    assert updated_settings.app.security.tools.files.terminal_allowed_roots == ("data",)
+    assert app_payload["security"]["tools"]["files"]["control_preset"] == "workspace"
+    assert local_app_payload["security"]["tools"]["files"]["control_preset"] == "safe"
 
 
 def test_persist_profile_num_ctx_updates_models_config_and_reloads_settings(
@@ -551,10 +564,75 @@ def test_persist_profile_num_ctx_updates_models_config_and_reloads_settings(
         num_ctx=4096,
     )
     models_payload = _read_yaml(project_root / "config" / "models.yaml")
+    local_models_payload = _read_yaml(project_root / "config" / "models.local.yaml")
 
     assert updated_settings.models["main"].num_ctx == 4096
     assert updated_settings.profile_overrides["main"].num_ctx == 4096
-    assert models_payload["profile_overrides"]["main"]["num_ctx"] == 4096
+    assert "profile_overrides" not in models_payload
+    assert local_models_payload["profile_overrides"]["main"]["num_ctx"] == 4096
+
+
+def test_load_settings_can_ignore_local_override_files(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    persist_control_preset(settings, "safe")
+    persist_profile_num_ctx(
+        settings,
+        profile_name="main",
+        num_ctx=4096,
+    )
+
+    effective_settings = load_settings(project_root=project_root)
+    shipped_settings = load_settings(
+        project_root=project_root,
+        include_local_overrides=False,
+    )
+
+    assert effective_settings.app.security.tools.files.control_preset == "safe"
+    assert effective_settings.models["main"].num_ctx == 4096
+    assert shipped_settings.app.security.tools.files.control_preset == "workspace"
+    assert shipped_settings.models["main"].num_ctx == 8192
+
+
+def test_persist_control_preset_removes_local_override_when_reset_to_shipped_value(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    updated_settings = persist_control_preset(settings, "safe")
+    assert (project_root / "config" / "app.local.yaml").exists()
+
+    reset_settings = persist_control_preset(updated_settings, "workspace")
+
+    assert reset_settings.app.security.tools.files.control_preset == "workspace"
+    assert not (project_root / "config" / "app.local.yaml").exists()
+
+
+def test_persist_profile_num_ctx_removes_local_override_when_reset_to_shipped_value(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+
+    updated_settings = persist_profile_num_ctx(
+        settings,
+        profile_name="main",
+        num_ctx=4096,
+    )
+    assert (project_root / "config" / "models.local.yaml").exists()
+
+    reset_settings = persist_profile_num_ctx(
+        updated_settings,
+        profile_name="main",
+        num_ctx=8192,
+    )
+
+    assert reset_settings.models["main"].num_ctx == 8192
+    assert not (project_root / "config" / "models.local.yaml").exists()
 
 
 def test_load_telegram_config_errors_when_yaml_is_malformed(

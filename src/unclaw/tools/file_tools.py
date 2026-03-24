@@ -193,27 +193,41 @@ def register_file_tools(
     *,
     project_root: Path | None = None,
     configured_roots: tuple[str, ...] = (),
+    configured_read_roots: tuple[str, ...] = (),
+    configured_write_roots: tuple[str, ...] = (),
     default_write_dir: Path | None = None,
     default_read_dir: Path | None = None,
     allow_destructive_file_overwrite: bool = False,
 ) -> None:
     """Register the built-in local file tools."""
-    allowed_roots = resolve_allowed_roots(
+    read_allowed_roots = resolve_allowed_roots(
         project_root=project_root,
-        configured_roots=configured_roots,
+        configured_roots=(
+            configured_read_roots if configured_read_roots else configured_roots
+        ),
+    )
+    write_allowed_roots = resolve_allowed_roots(
+        project_root=project_root,
+        configured_roots=(
+            configured_write_roots if configured_write_roots else configured_roots
+        ),
     )
     delete_default_dir = default_write_dir if default_write_dir is not None else default_read_dir
 
     def read_handler(call: ToolCall) -> ToolResult:
-        return read_text_file(call, allowed_roots=allowed_roots, default_read_dir=default_read_dir)
+        return read_text_file(
+            call,
+            read_allowed_roots=read_allowed_roots,
+            default_read_dir=default_read_dir,
+        )
 
     def list_handler(call: ToolCall) -> ToolResult:
-        return list_directory(call, allowed_roots=allowed_roots)
+        return list_directory(call, read_allowed_roots=read_allowed_roots)
 
     def write_handler(call: ToolCall) -> ToolResult:
         return write_text_file(
             call,
-            allowed_roots=allowed_roots,
+            write_allowed_roots=write_allowed_roots,
             default_write_dir=default_write_dir,
             allow_destructive_file_overwrite=allow_destructive_file_overwrite,
         )
@@ -221,7 +235,8 @@ def register_file_tools(
     def move_handler(call: ToolCall) -> ToolResult:
         return move_file(
             call,
-            allowed_roots=allowed_roots,
+            read_allowed_roots=read_allowed_roots,
+            write_allowed_roots=write_allowed_roots,
             default_read_dir=default_read_dir,
             default_write_dir=default_write_dir,
         )
@@ -229,7 +244,8 @@ def register_file_tools(
     def copy_handler(call: ToolCall) -> ToolResult:
         return copy_file(
             call,
-            allowed_roots=allowed_roots,
+            read_allowed_roots=read_allowed_roots,
+            write_allowed_roots=write_allowed_roots,
             default_read_dir=default_read_dir,
             default_write_dir=default_write_dir,
         )
@@ -237,7 +253,8 @@ def register_file_tools(
     def rename_handler(call: ToolCall) -> ToolResult:
         return rename_file(
             call,
-            allowed_roots=allowed_roots,
+            read_allowed_roots=read_allowed_roots,
+            write_allowed_roots=write_allowed_roots,
             default_read_dir=default_read_dir,
             default_write_dir=default_write_dir,
         )
@@ -245,7 +262,7 @@ def register_file_tools(
     def delete_handler(call: ToolCall) -> ToolResult:
         return delete_file(
             call,
-            allowed_roots=allowed_roots,
+            write_allowed_roots=write_allowed_roots,
             default_write_dir=delete_default_dir,
         )
 
@@ -261,6 +278,7 @@ def register_file_tools(
 def read_text_file(
     call: ToolCall,
     *,
+    read_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_read_dir: Path | None = None,
 ) -> ToolResult:
@@ -277,7 +295,10 @@ def read_text_file(
     except ValueError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    normalized_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=read_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     path = _resolve_file_tool_path(
         path_value,
         default_dir=default_read_dir,
@@ -348,6 +369,7 @@ def read_text_file(
 def list_directory(
     call: ToolCall,
     *,
+    read_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
 ) -> ToolResult:
     """List one directory with a compact tree-like output."""
@@ -371,10 +393,14 @@ def list_directory(
         )
 
     path = _resolve_path(path_value)
+    normalized_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=read_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=path,
-        allowed_roots=_normalize_allowed_roots(allowed_roots),
+        allowed_roots=normalized_allowed_roots,
     )
     if access_error is not None:
         return access_error
@@ -420,6 +446,7 @@ def list_directory(
 def write_text_file(
     call: ToolCall,
     *,
+    write_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_write_dir: Path | None = None,
     allow_destructive_file_overwrite: bool = False,
@@ -467,7 +494,10 @@ def write_text_file(
         )
 
     path_str = path_value.strip()
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    normalized_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=write_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     requested_path = _resolve_file_tool_path(
         path_str,
         default_dir=default_write_dir,
@@ -593,6 +623,8 @@ def _generate_versioned_path(path: Path) -> Path:
 def move_file(
     call: ToolCall,
     *,
+    read_allowed_roots: tuple[Path, ...] | None = None,
+    write_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_read_dir: Path | None = None,
     default_write_dir: Path | None = None,
@@ -603,6 +635,8 @@ def move_file(
         tool_name=MOVE_FILE_DEFINITION.name,
         past_tense="moved",
         present_tense="move",
+        read_allowed_roots=read_allowed_roots,
+        write_allowed_roots=write_allowed_roots,
         allowed_roots=allowed_roots,
         default_read_dir=default_read_dir,
         default_write_dir=default_write_dir,
@@ -613,6 +647,8 @@ def move_file(
 def copy_file(
     call: ToolCall,
     *,
+    read_allowed_roots: tuple[Path, ...] | None = None,
+    write_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_read_dir: Path | None = None,
     default_write_dir: Path | None = None,
@@ -633,21 +669,28 @@ def copy_file(
             error="Argument 'overwrite' must be a boolean.",
         )
 
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    normalized_read_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=read_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
+    normalized_write_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=write_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     source_path = _resolve_file_tool_path(
         source_path_value,
         default_dir=default_read_dir,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_read_allowed_roots,
     )
     destination_path = _resolve_file_tool_path(
         destination_path_value,
         default_dir=default_write_dir,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_write_allowed_roots,
     )
     source_access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=source_path,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_read_allowed_roots,
     )
     if source_access_error is not None:
         return source_access_error
@@ -655,7 +698,7 @@ def copy_file(
     destination_access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=destination_path,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_write_allowed_roots,
     )
     if destination_access_error is not None:
         return destination_access_error
@@ -709,6 +752,8 @@ def copy_file(
 def rename_file(
     call: ToolCall,
     *,
+    read_allowed_roots: tuple[Path, ...] | None = None,
+    write_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_read_dir: Path | None = None,
     default_write_dir: Path | None = None,
@@ -719,6 +764,8 @@ def rename_file(
         tool_name=RENAME_FILE_DEFINITION.name,
         past_tense="renamed",
         present_tense="rename",
+        read_allowed_roots=read_allowed_roots,
+        write_allowed_roots=write_allowed_roots,
         allowed_roots=allowed_roots,
         default_read_dir=default_read_dir,
         default_write_dir=default_write_dir,
@@ -729,6 +776,7 @@ def rename_file(
 def delete_file(
     call: ToolCall,
     *,
+    write_allowed_roots: tuple[Path, ...] | None = None,
     allowed_roots: tuple[Path, ...] | None = None,
     default_write_dir: Path | None = None,
 ) -> ToolResult:
@@ -753,7 +801,10 @@ def delete_file(
             error="Deletion was not performed. Pass confirm=true to delete the file.",
         )
 
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    normalized_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=write_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     path = _resolve_file_tool_path(
         path_value,
         default_dir=default_write_dir,
@@ -803,6 +854,8 @@ def _relocate_file(
     tool_name: str,
     past_tense: str,
     present_tense: str,
+    read_allowed_roots: tuple[Path, ...] | None,
+    write_allowed_roots: tuple[Path, ...] | None,
     allowed_roots: tuple[Path, ...] | None,
     default_read_dir: Path | None,
     default_write_dir: Path | None,
@@ -821,21 +874,28 @@ def _relocate_file(
             error="Argument 'overwrite' must be a boolean.",
         )
 
-    normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
+    normalized_read_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=read_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
+    normalized_write_allowed_roots = _resolve_effective_allowed_roots(
+        primary_roots=write_allowed_roots,
+        fallback_roots=allowed_roots,
+    )
     source_path = _resolve_file_tool_path(
         source_path_value,
         default_dir=default_read_dir,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_read_allowed_roots,
     )
     destination_path = _resolve_file_tool_path(
         destination_path_value,
         default_dir=default_write_dir,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_write_allowed_roots,
     )
     source_access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=source_path,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_write_allowed_roots,
     )
     if source_access_error is not None:
         return source_access_error
@@ -843,7 +903,7 @@ def _relocate_file(
     destination_access_error = _restrict_to_allowed_roots(
         tool_name=tool_name,
         path=destination_path,
-        allowed_roots=normalized_allowed_roots,
+        allowed_roots=normalized_write_allowed_roots,
     )
     if destination_access_error is not None:
         return destination_access_error
@@ -1009,18 +1069,25 @@ def _resolve_explicit_root_relative_path(
         return None
 
     normalized_allowed_roots = _normalize_allowed_roots(allowed_roots)
-    base_root = normalized_allowed_roots[0]
-    try:
-        default_dir_relative = default_dir.expanduser().resolve().relative_to(base_root)
-    except ValueError:
-        return None
+    resolved_default_dir = default_dir.expanduser().resolve()
 
-    if not default_dir_relative.parts:
-        return None
-    if relative_path.parts[0] != default_dir_relative.parts[0]:
-        return None
+    for base_root in normalized_allowed_roots:
+        try:
+            default_dir_relative = resolved_default_dir.relative_to(base_root)
+        except ValueError:
+            default_dir_relative = None
 
-    return (base_root / relative_path).resolve()
+        if (
+            default_dir_relative is not None
+            and default_dir_relative.parts
+            and relative_path.parts[0] == default_dir_relative.parts[0]
+        ):
+            return (base_root / relative_path).resolve()
+
+        if relative_path.parts[0] == base_root.name:
+            return (base_root.parent / relative_path).resolve()
+
+    return None
 
 
 def resolve_allowed_roots(
@@ -1049,6 +1116,16 @@ def _normalize_allowed_roots(
     if not allowed_roots:
         return (Path.cwd().resolve(),)
     return tuple(dict.fromkeys(root.resolve() for root in allowed_roots))
+
+
+def _resolve_effective_allowed_roots(
+    *,
+    primary_roots: tuple[Path, ...] | None,
+    fallback_roots: tuple[Path, ...] | None,
+) -> tuple[Path, ...]:
+    return _normalize_allowed_roots(
+        primary_roots if primary_roots is not None else fallback_roots
+    )
 
 
 def _restrict_to_allowed_roots(
