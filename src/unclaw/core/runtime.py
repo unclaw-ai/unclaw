@@ -14,6 +14,7 @@ from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
     OrchestratorError,
+    OrchestratorTurnResult,
 )
 import unclaw.core.reply_discipline as _reply_discipline
 import unclaw.core.routing as _routing
@@ -151,10 +152,6 @@ def run_user_turn(
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
-        request_routing_note = _routing._build_request_routing_note(
-            user_input=user_input,
-            capability_summary=capability_summary,
-        )
         entity_anchor = _routing._resolve_entity_anchor_for_turn(
             session_manager=session_manager,
             session_id=session.id,
@@ -169,7 +166,6 @@ def run_user_turn(
             for note in (
                 memory_context_note,
                 local_access_note,
-                request_routing_note,
                 entity_recentering_note,
             )
             if note is not None
@@ -206,49 +202,104 @@ def run_user_turn(
                 session_manager=session_manager,
                 tracer=active_tracer,
             )
-            if assistant_reply is None:
-                response = orchestrator.run_turn(
+
+            def _run_responder_turn(
+                *,
+                system_notes: tuple[str, ...],
+                content_callback: LLMContentCallback | None,
+            ) -> tuple[OrchestratorTurnResult, str | None]:
+                turn_result = orchestrator.run_turn(
                     session_id=session.id,
                     user_message=user_input,
                     model_profile_name=selected_model_profile_name,
                     capability_summary=responder_capability_summary,
-                    system_context_notes=system_context_notes,
+                    system_context_notes=system_notes,
                     thinking_enabled=thinking_enabled,
-                    content_callback=_effective_stream_func,
+                    content_callback=content_callback,
                     tools=responder_tool_definitions,
                 )
                 active_tracer.trace_model_succeeded(
                     session_id=session.id,
-                    provider=response.response.provider,
-                    model_name=response.response.model_name,
-                    finish_reason=response.response.finish_reason,
-                    output_length=len(response.response.content),
-                    model_duration_ms=response.model_duration_ms,
-                    reasoning=response.response.reasoning,
+                    provider=turn_result.response.provider,
+                    model_name=turn_result.response.model_name,
+                    finish_reason=turn_result.response.finish_reason,
+                    output_length=len(turn_result.response.content),
+                    model_duration_ms=turn_result.model_duration_ms,
+                    reasoning=turn_result.response.reasoning,
                 )
 
-                # --- Inline tool-call recovery (codex regression fix) ---
-                # Some native-capable models (e.g. qwen2.5-coder:7b) emit tool
-                # call requests as JSON text in `content` instead of the
-                # structured `tool_calls` field that the Ollama API expects.
-                # When that happens `response.response.tool_calls` is None and
-                # the raw JSON reaches the user verbatim.  We recover here by
-                # trying to parse the content as a tool call.
-                # Explicitly required by BIG-FIX-ROUTER-1R3.  Complies with
-                # mandatory_rules rule 5 allowed exception: defensive, scoped to
-                # the native legacy path only, easy to audit and remove.
-                if not response.response.tool_calls:
+                inline_tool_reply: str | None = None
+                if not turn_result.response.tool_calls:
                     inline_tool_response, inline_tool_reply = (
                         _agent_loop._recover_inline_native_tool_response(
-                            response.response,
+                            turn_result.response,
                             tool_definitions=responder_tool_definitions or (),
                             max_agent_steps=max_agent_steps,
                         )
                     )
                     if inline_tool_response is not None:
-                        response = replace(response, response=inline_tool_response)
-                    elif inline_tool_reply is not None:
-                        assistant_reply = inline_tool_reply
+                        turn_result = replace(
+                            turn_result,
+                            response=inline_tool_response,
+                        )
+
+                return turn_result, inline_tool_reply
+
+            initial_stream_chunks: list[str] | None = None
+            initial_content_callback = _effective_stream_func
+            if responder_tool_definitions is not None and _effective_stream_func is not None:
+                initial_stream_chunks = []
+
+                def _buffer_initial_stream(text: str) -> None:
+                    initial_stream_chunks.append(text)
+
+                initial_content_callback = _buffer_initial_stream
+
+            def _flush_initial_stream_chunks() -> None:
+                if (
+                    initial_stream_chunks is None
+                    or _effective_stream_func is None
+                    or not initial_stream_chunks
+                ):
+                    return
+                for chunk in initial_stream_chunks:
+                    _effective_stream_func(chunk)
+                initial_stream_chunks.clear()
+
+            if assistant_reply is None:
+                response, assistant_reply = _run_responder_turn(
+                    system_notes=system_context_notes,
+                    content_callback=initial_content_callback,
+                )
+
+                if (
+                    assistant_reply is None
+                    and not response.response.tool_calls
+                    and responder_tool_definitions is not None
+                ):
+                    legacy_request_routing_note = _routing._build_request_routing_note(
+                        user_input=user_input,
+                        capability_summary=capability_summary,
+                    )
+                    if legacy_request_routing_note is not None:
+                        legacy_system_context_notes = tuple(
+                            note
+                            for note in (
+                                memory_context_note,
+                                local_access_note,
+                                legacy_request_routing_note,
+                                entity_recentering_note,
+                            )
+                            if note is not None
+                        )
+                        response, assistant_reply = _run_responder_turn(
+                            system_notes=legacy_system_context_notes,
+                            content_callback=_effective_stream_func,
+                        )
+                    else:
+                        _flush_initial_stream_chunks()
+                elif assistant_reply is None and not response.response.tool_calls:
+                    _flush_initial_stream_chunks()
 
                 # --- Legacy native tool loop fallback ---
                 if (

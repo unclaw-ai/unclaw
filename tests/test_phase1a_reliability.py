@@ -95,9 +95,8 @@ def test_runtime_adds_system_info_routing_note_for_obvious_local_runtime_request
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
             if call_count == 1:
-                assert any(
-                    "Current request routing hint: this is an obvious local machine or runtime question."
-                    in message
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -208,10 +207,8 @@ def test_runtime_identity_requests_prefer_fast_web_search_first(
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
             if call_count == 1:
-                assert any(
-                    "Current request routing hint: this is an identity or biography lookup."
-                    in message
-                    and "fast_web_search first" in message
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -337,9 +334,8 @@ def test_runtime_local_inspection_continues_to_second_tool_without_clarifying(
                 message.content for message in messages if message.role is LLMRole.TOOL
             ]
             if call_count == 1:
-                assert any(
-                    "Current request routing hint: this is an explicit local directory inspection request."
-                    in message
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -504,9 +500,8 @@ def test_runtime_explicit_web_lookup_uses_search_and_post_tool_grounding(
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
             if call_count == 1:
-                assert any(
-                    "Current request routing hint: this explicitly asks for a web lookup or current external information."
-                    in message
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
