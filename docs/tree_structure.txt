@@ -10,15 +10,16 @@ runtime artifacts.
 │   ├── models.yaml
 │   ├── prompts
 │   │   └── system.txt
-│   ├── router.yaml
 │   └── telegram.yaml
 ├── docs
 │   ├── architecture.md
 │   ├── engineering_guidelines.md
+│   ├── foundation_baseline.md
+│   ├── manual_smoke_test.md
 │   ├── project_brief.md
+│   ├── release_checklist.md
 │   ├── roadmap.md
 │   ├── skills_design.md
-│   ├── tree_structure.txt
 │   └── vision.md
 ├── .github
 │   ├── FUNDING.yml
@@ -29,12 +30,7 @@ runtime artifacts.
 ├── pyproject.toml
 ├── README.md
 ├── skills
-│   ├── __init__.py
-│   └── weather
-│       ├── contracts.py
-│       ├── __init__.py
-│       ├── SKILL.md
-│       └── tool.py
+│   └── __init__.py
 ├── src
 │   └── unclaw
 │       ├── async_utils.py
@@ -49,6 +45,7 @@ runtime artifacts.
 │       │   ├── telegram_formatting.py
 │       │   └── telegram_management.py
 │       ├── constants.py
+│       ├── control_surface.py
 │       ├── core
 │       │   ├── capabilities.py
 │       │   ├── capability_budget.py
@@ -59,7 +56,6 @@ runtime artifacts.
 │       │   ├── __init__.py
 │       │   ├── orchestrator.py
 │       │   ├── research_flow.py
-│       │   ├── router.py
 │       │   ├── runtime.py
 │       │   ├── search_grounding.py
 │       │   ├── search_payload_helpers.py
@@ -105,14 +101,18 @@ runtime artifacts.
 │       │   └── session.py
 │       ├── settings.py
 │       ├── skills
+│       │   ├── bundle_tools.py
 │       │   ├── catalog.py
+│       │   ├── cli.py
 │       │   ├── file_loader.py
 │       │   ├── file_models.py
 │       │   ├── __init__.py
-│       │   ├── manifests.py
-│       │   ├── models.py
-│       │   ├── registry.py
-│       │   └── runtime.py
+│       │   ├── installer.py
+│       │   ├── manager.py
+│       │   ├── remote_catalog.py
+│       │   ├── selector.py
+│       │   ├── status.py
+│       │   └── versioning.py
 │       ├── startup.py
 │       ├── terminal_styles.py
 │       ├── tools
@@ -125,15 +125,17 @@ runtime artifacts.
 │       │   ├── session_tools.py
 │       │   ├── system_tools.py
 │       │   ├── terminal_tools.py
-│       │   ├── weather_tools.py
+│       │   ├── web_entity_guard.py
 │       │   ├── web_fetch.py
 │       │   ├── web_html.py
+│       │   ├── web_research.py
 │       │   ├── web_retrieval.py
 │       │   ├── web_safety.py
 │       │   ├── web_search.py
 │       │   ├── web_synthesis.py
 │       │   ├── web_text.py
-│       │   └── web_tools.py
+│       │   ├── web_tools.py
+│       │   └── web_workspace.py
 │       └── update.py
 ├── TEST_PUSH_LAPTOP.txt
 ├── tests
@@ -142,16 +144,21 @@ runtime artifacts.
 │   ├── test_block4_cleanup.py
 │   ├── test_capability_budget_policy.py
 │   ├── test_capability_fragments.py
+│   ├── test_catalog_only_model.py
 │   ├── test_chat_memory_store.py
 │   ├── test_cli_channel.py
 │   ├── test_command_handler.py
 │   ├── test_context_budget.py
+│   ├── test_control_surface_permissions.py
 │   ├── test_copy_file.py
 │   ├── test_db_path_migration.py
 │   ├── test_delete_file.py
 │   ├── test_e2e_flows.py
+│   ├── test_entity_integrity.py
 │   ├── test_exact_recall.py
+│   ├── test_git_repo_skill.py
 │   ├── test_local_action_honesty.py
+│   ├── test_local_text_search_skill.py
 │   ├── test_logs_cli.py
 │   ├── test_long_term_memory_reliability.py
 │   ├── test_main.py
@@ -159,25 +166,33 @@ runtime artifacts.
 │   ├── test_memory_status.py
 │   ├── test_memory_summary.py
 │   ├── test_move_file.py
+│   ├── test_new_skills_integration.py
 │   ├── test_ollama_provider.py
 │   ├── test_onboarding.py
 │   ├── test_p34_capability_and_routing.py
+│   ├── test_p56_search_escalation.py
 │   ├── test_phase0_guardrails.py
+│   ├── test_phase1a_reliability.py
+│   ├── test_phase1b_reliability.py
 │   ├── test_phase5_weather_skill.py
 │   ├── test_prompt_ownership.py
 │   ├── test_read_text_file.py
 │   ├── test_real_ollama_runtime_integration.py
+│   ├── test_remote_catalog.py
 │   ├── test_rename_file.py
-│   ├── test_router.py
 │   ├── test_runtime_integration.py
 │   ├── test_search_grounding.py
 │   ├── test_search_payload_schema.py
 │   ├── test_session_history_reliability.py
 │   ├── test_session_history_tool.py
 │   ├── test_settings.py
+│   ├── test_skills_bundle_tools.py
 │   ├── test_skills_catalog_injection.py
 │   ├── test_skills_file_loader.py
-│   ├── test_skills_registry.py
+│   ├── test_skills_installer.py
+│   ├── test_skills_manager.py
+│   ├── test_skills_on_demand_loading.py
+│   ├── test_skills_versioning.py
 │   ├── test_startup.py
 │   ├── test_system_tools.py
 │   ├── test_telegram_bot.py
@@ -185,7 +200,10 @@ runtime artifacts.
 │   ├── test_tool_security.py
 │   ├── test_update.py
 │   ├── test_v1_validation.py
-│   ├── test_weather_tools.py
+│   ├── test_web_entity_guard.py
 │   ├── test_web_grounding_caps.py
+│   ├── test_web_research.py
+│   ├── test_web_search_quality.py
+│   ├── test_web_workspace.py
 │   └── test_write_text_file.py
 └── unclaw-animated.svg
