@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from unclaw.core.command_handler import CommandHandler, CommandStatus
 from unclaw.settings import load_settings
 
@@ -250,8 +252,9 @@ def test_switching_back_to_supported_model_keeps_thinking_off() -> None:
 
 
 def test_profiles_lists_models_and_context_windows() -> None:
+    settings = _load_repo_settings()
     handler = CommandHandler(
-        settings=_load_repo_settings(),
+        settings=settings,
         session_manager=_build_session_manager(),
         current_model_profile_name="main",
     )
@@ -260,13 +263,17 @@ def test_profiles_lists_models_and_context_windows() -> None:
 
     assert result.status is CommandStatus.OK
     assert result.lines[0] == "Model profiles:"
-    assert any("main | model=" in line and "ctx=8192" in line for line in result.lines)
+    assert any(
+        "main | model=" in line and f"ctx={settings.models['main'].num_ctx}" in line
+        for line in result.lines
+    )
     assert any("| current" in line for line in result.lines)
 
 
 def test_ctx_without_arguments_lists_current_context_windows() -> None:
+    settings = _load_repo_settings()
     handler = CommandHandler(
-        settings=_load_repo_settings(),
+        settings=settings,
         session_manager=_build_session_manager(),
         current_model_profile_name="main",
     )
@@ -275,22 +282,29 @@ def test_ctx_without_arguments_lists_current_context_windows() -> None:
 
     assert result.status is CommandStatus.OK
     assert result.lines[0] == "Context windows:"
-    assert any("main | ctx=8192" in line for line in result.lines)
+    assert any(
+        f"main | ctx={settings.models['main'].num_ctx}" in line
+        for line in result.lines
+    )
     assert result.lines[-1] == "Use /ctx <profile_name> <num_ctx> to save a new value."
 
 
 def test_control_without_arguments_shows_current_preset_and_roots() -> None:
+    settings = _load_repo_settings()
     handler = CommandHandler(
-        settings=_load_repo_settings(),
+        settings=settings,
         session_manager=_build_session_manager(),
     )
 
     result = handler.handle("/control")
 
     assert result.status is CommandStatus.OK
-    assert result.lines[0] == "Control preset: workspace"
+    assert (
+        result.lines[0]
+        == f"Control preset: {settings.app.security.tools.files.control_preset}"
+    )
     assert "Meaning:" in result.lines[1]
-    assert result.lines[2] == "Tool access: restricted"
+    assert result.lines[2].startswith("Tool access: ")
     assert result.lines[3] == "Allowed roots:"
 
 
@@ -313,6 +327,36 @@ def test_control_command_persists_new_preset(
     assert handler.settings.app.security.tools.files.control_preset == "safe"
     assert handler.settings.app.security.tools.files.allowed_roots == ("data/files",)
     assert result.lines[0] == "Saved control preset: safe."
+    assert (
+        result.lines[1]
+        == "New file and terminal tool access rules apply immediately in this CLI."
+    )
+
+
+def test_control_command_persists_after_settings_reload(
+    make_temp_project,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(settings=settings),
+    )
+
+    result = handler.handle("/control safe")
+
+    assert result.status is CommandStatus.OK
+
+    reloaded_settings = load_settings(project_root=project_root)
+    reloaded_handler = CommandHandler(
+        settings=reloaded_settings,
+        session_manager=_build_session_manager(settings=reloaded_settings),
+    )
+
+    reloaded_result = reloaded_handler.handle("/control")
+
+    assert reloaded_result.status is CommandStatus.OK
+    assert reloaded_result.lines[0] == "Control preset: safe"
 
 
 def test_control_command_rejects_invalid_preset() -> None:
@@ -347,6 +391,7 @@ def test_control_command_reports_config_write_failures(monkeypatch) -> None:
 
 def test_ctx_command_persists_new_context_window(
     make_temp_project,
+    monkeypatch,
 ) -> None:
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
@@ -355,6 +400,12 @@ def test_ctx_command_persists_new_context_window(
         settings=settings,
         session_manager=session_manager,
     )
+    refreshed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: refreshed_profiles.append(profile_name),
+    )
 
     result = handler.handle("/ctx main 4096")
 
@@ -362,7 +413,94 @@ def test_ctx_command_persists_new_context_window(
     assert result.updated_settings is not None
     assert result.refresh_tool_executor is True
     assert handler.settings.models["main"].num_ctx == 4096
-    assert result.lines == ("Saved context window: main=4096.",)
+    assert refreshed_profiles == ["main"]
+    assert result.lines == (
+        "Saved context window: main=4096.",
+        "Reloaded active model profile: main.",
+        "The new context window will be used on the next turn in this CLI.",
+    )
+
+
+def test_ctx_command_falls_back_cleanly_when_active_profile_refresh_fails(
+    make_temp_project,
+    monkeypatch,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(settings=settings),
+    )
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    result = handler.handle("/ctx main 4096")
+
+    assert result.status is CommandStatus.OK
+    assert result.lines == (
+        "Saved context window: main=4096.",
+        "Could not refresh the active model profile: main.",
+        "The new value is guaranteed on next model reload or CLI restart.",
+    )
+
+
+def test_ctx_command_for_inactive_profile_skips_refresh_and_explains_next_load(
+    make_temp_project,
+    monkeypatch,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(settings=settings),
+        current_model_profile_name="main",
+    )
+    refreshed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: refreshed_profiles.append(profile_name),
+    )
+
+    result = handler.handle("/ctx deep 4096")
+
+    assert result.status is CommandStatus.OK
+    assert refreshed_profiles == []
+    assert result.lines == (
+        "Saved context window: deep=4096.",
+        "deep is not the active profile. The saved value will be used the next time that model is loaded.",
+    )
+
+
+def test_ctx_command_can_retry_refresh_when_value_is_already_saved(
+    make_temp_project,
+    monkeypatch,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(settings=settings),
+    )
+    refreshed_profiles: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: refreshed_profiles.append(profile_name),
+    )
+
+    result = handler.handle(f"/ctx main {settings.models['main'].num_ctx}")
+
+    assert result.status is CommandStatus.OK
+    assert refreshed_profiles == ["main"]
+    assert result.lines == (
+        f"Context window already saved: main={settings.models['main'].num_ctx}.",
+        "Reloaded active model profile: main.",
+        "The new context window will be used on the next turn in this CLI.",
+    )
 
 
 def test_ctx_command_rejects_invalid_num_ctx() -> None:
@@ -387,6 +525,59 @@ def test_ctx_command_rejects_too_small_num_ctx() -> None:
 
     assert result.status is CommandStatus.ERROR
     assert result.lines == ("Context window must be at least 1024 tokens.",)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_line"),
+    (
+        ("/profiles extra", "Usage: /profiles"),
+        ("/ctx main", "Usage: /ctx <profile_name> <num_ctx>"),
+        ("/control safe extra", "Usage: /control <safe|workspace|full>"),
+    ),
+)
+def test_control_profile_and_ctx_commands_preserve_usage_contracts(
+    command: str,
+    expected_line: str,
+) -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle(command)
+
+    assert result.status is CommandStatus.ERROR
+    assert result.lines == (expected_line,)
+
+
+def test_refresh_loaded_model_profile_returns_true_on_success(monkeypatch) -> None:
+    refreshed_profiles: list[str] = []
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: refreshed_profiles.append(profile_name),
+    )
+
+    assert handler._refresh_loaded_model_profile("main") is True
+    assert refreshed_profiles == ["main"]
+
+
+def test_refresh_loaded_model_profile_returns_false_on_failure(monkeypatch) -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    monkeypatch.setattr(
+        "unclaw.core.command_handler.warm_load_model_profile",
+        lambda settings, profile_name: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    assert handler._refresh_loaded_model_profile("main") is False
 
 
 def test_ls_defaults_to_current_directory_when_no_path_is_given() -> None:

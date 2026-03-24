@@ -13,7 +13,13 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMProviderError
 from unclaw.schemas.events import EventLevel
 from unclaw.settings import load_settings
-from unclaw.startup import CheckStatus, OllamaStatus, build_banner, build_startup_report
+from unclaw.startup import (
+    CheckStatus,
+    OllamaStatus,
+    build_banner,
+    build_startup_report,
+    format_startup_report,
+)
 
 
 def test_startup_report_warns_for_missing_optional_models(monkeypatch) -> None:
@@ -73,10 +79,41 @@ def test_startup_report_includes_control_and_context_summary(monkeypatch) -> Non
     control_check = next(check for check in report.checks if check.label == "Control")
     profile_check = next(check for check in report.checks if check.label == "Profiles")
 
-    assert "Workspace preset" in control_check.detail
+    assert f"{settings.app.security.tools.files.control_preset.title()} preset" in control_check.detail
     assert "Allowed roots:" in control_check.detail
     assert "Context windows:" in profile_check.detail
-    assert "main=8192" in profile_check.detail
+    assert f"main={settings.models['main'].num_ctx}" in profile_check.detail
+
+
+def test_format_startup_report_renders_control_and_profile_context_summary(
+    monkeypatch,
+) -> None:
+    settings = load_settings(project_root=_repo_root())
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=True,
+            model_names=(settings.default_model.model_name,),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="terminal",
+        channel_enabled=True,
+        required_profile_names=(settings.app.default_model_profile,),
+    )
+    rendered = format_startup_report(report, use_color=False)
+
+    assert "Preflight: ready" in rendered
+    assert "Profiles" in rendered
+    assert "Context windows:" in rendered
+    assert f"main={settings.models['main'].num_ctx}" in rendered
+    assert "Control" in rendered
+    assert "Allowed roots:" in rendered
 
 
 def test_startup_report_uses_pack_resolved_default_model(

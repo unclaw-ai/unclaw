@@ -278,7 +278,7 @@ class CommandHandler:
             self._trace_thinking_changed(reason=self._thinking_disabled_reason())
 
         if previous_profile_name != profile_name:
-            self._warm_load_selected_model_profile(profile_name)
+            self._refresh_loaded_model_profile(profile_name)
 
         return self._ok(*lines)
 
@@ -343,11 +343,21 @@ class CommandHandler:
             return self._error(f"Could not save context window: {exc}")
 
         if updated_settings is previous_settings:
-            return self._ok(f"Context window unchanged: {profile_name}={num_ctx}.")
+            return self._ok(
+                *self._build_ctx_change_feedback(
+                    profile_name=profile_name,
+                    num_ctx=num_ctx,
+                    changed=False,
+                )
+            )
 
         self._apply_updated_settings(updated_settings)
         return self._ok(
-            f"Saved context window: {profile_name}={num_ctx}.",
+            *self._build_ctx_change_feedback(
+                profile_name=profile_name,
+                num_ctx=num_ctx,
+                changed=True,
+            ),
             updated_settings=updated_settings,
             refresh_tool_executor=True,
         )
@@ -375,7 +385,11 @@ class CommandHandler:
 
         if updated_settings is not previous_settings:
             self._apply_updated_settings(updated_settings)
-            lines = [f"Saved control preset: {preset_name}.", *self._build_control_summary_lines()]
+            lines = [
+                f"Saved control preset: {preset_name}.",
+                "New file and terminal tool access rules apply immediately in this CLI.",
+                *self._build_control_summary_lines(),
+            ]
             return self._ok(
                 *lines,
                 updated_settings=updated_settings,
@@ -665,6 +679,41 @@ class CommandHandler:
         lines.extend(f"- {root}" for root in summary.allowed_roots)
         return tuple(lines)
 
+    def _build_ctx_change_feedback(
+        self,
+        *,
+        profile_name: str,
+        num_ctx: int,
+        changed: bool,
+    ) -> tuple[str, ...]:
+        leading_line = (
+            f"Saved context window: {profile_name}={num_ctx}."
+            if changed
+            else f"Context window already saved: {profile_name}={num_ctx}."
+        )
+
+        if profile_name != self.current_model_profile_name:
+            return (
+                leading_line,
+                (
+                    f"{profile_name} is not the active profile. "
+                    "The saved value will be used the next time that model is loaded."
+                ),
+            )
+
+        if self._refresh_loaded_model_profile(profile_name):
+            return (
+                leading_line,
+                f"Reloaded active model profile: {profile_name}.",
+                "The new context window will be used on the next turn in this CLI.",
+            )
+
+        return (
+            leading_line,
+            f"Could not refresh the active model profile: {profile_name}.",
+            "The new value is guaranteed on next model reload or CLI restart.",
+        )
+
     def _apply_updated_settings(self, updated_settings: Settings) -> None:
         self.settings = updated_settings
         self.session_manager.settings = updated_settings
@@ -760,11 +809,12 @@ class CommandHandler:
             reason=reason,
         )
 
-    def _warm_load_selected_model_profile(self, profile_name: str) -> None:
+    def _refresh_loaded_model_profile(self, profile_name: str) -> bool:
         try:
             warm_load_model_profile(self.settings, profile_name=profile_name)
         except Exception:
-            return
+            return False
+        return True
 
     def _trace_thinking_changed(self, *, reason: str) -> None:
         if self.tracer is None:

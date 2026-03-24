@@ -4,7 +4,7 @@
 
 This document describes the **current shipped architecture** of Unclaw.
 
-It focuses on how the runtime is structured today. For product philosophy and long-term direction, see [docs/vision.md](vision.md). For contributor constraints and priorities, see [docs/project_brief.md](project_brief.md).
+It focuses on how the runtime is structured today. For product philosophy and long-term direction, see [docs/vision.md](vision.md). For contributor constraints and priorities, see [docs/project_brief.md](project_brief.md). For the regression-sensitive shipped baseline, see [docs/foundation_baseline.md](foundation_baseline.md).
 
 ---
 

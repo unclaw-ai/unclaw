@@ -172,11 +172,17 @@ def test_load_settings_reads_control_preset_from_config(
     make_temp_project,
 ) -> None:
     project_root = make_temp_project()
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
 
     settings = load_settings(project_root=project_root)
 
-    assert settings.app.security.tools.files.control_preset == "workspace"
-    assert settings.app.security.tools.files.allowed_roots == (".",)
+    assert (
+        settings.app.security.tools.files.control_preset
+        == app_payload["security"]["tools"]["files"]["control_preset"]
+    )
+    assert settings.app.security.tools.files.allowed_roots == tuple(
+        app_payload["security"]["tools"]["files"]["allowed_roots"]
+    )
 
 
 def test_load_settings_resolves_safe_control_preset_to_files_sandbox(
