@@ -6,11 +6,16 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import json
+import re
 import threading
 from time import perf_counter, sleep
 from typing import TYPE_CHECKING, Any
+import unicodedata
 
-from unclaw.core.capabilities import build_runtime_capability_summary
+from unclaw.core.capabilities import (
+    RuntimeCapabilitySummary,
+    build_runtime_capability_summary,
+)
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
@@ -48,6 +53,53 @@ _TURN_CANCELLED_REPLY = "This request was cancelled before tool work completed."
 _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
     "I couldn't safely execute a tool request because the model returned an "
     "invalid tool payload. Please try again or rephrase the request."
+)
+_CURRENT_REQUEST_ROUTING_NOTE_PREFIX = "Current request routing hint:"
+_POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
+_URL_PATTERN = re.compile(r"https?://\S+", flags=re.IGNORECASE)
+_DIRECTORY_SCOPE_PATTERN = re.compile(
+    r"\b(?:directory|folder|dossier|repertoire|repo|repository|project tree|tree)\b"
+)
+_DIRECTORY_REQUEST_PATTERN = re.compile(
+    r"\b(?:list|show|inspect|check|browse|display|see|contents? of|files? in|"
+    r"what(?:'s| is) in|liste|montre|affiche|contenu de)\b"
+)
+_FILE_REQUEST_PATTERN = re.compile(
+    r"\b(?:read|open|inspect|summarize|show|display|print|view|cat|lire|ouvre|"
+    r"ouvrir|affiche|inspecte|resume|resumer|voir)\b"
+)
+_FILE_EXTENSION_HINT_PATTERN = re.compile(
+    r"\.(?:txt|md|json|csv|py|js|ts|tsx|jsx|yaml|yml|toml|ini|cfg|log|"
+    r"html|css|sh|sql)\b"
+)
+_PATH_HINT_PATTERN = re.compile(
+    r"(?:^|[\s`])(?:\.{1,2}/|~/|/)?[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+/?"
+)
+_TERMINAL_REQUEST_PATTERN = re.compile(
+    r"\b(?:run|execute|launch)\b.*\b(?:terminal|shell|command|cmd|script)\b"
+)
+_TERMINAL_SNIPPET_PATTERN = re.compile(r"`[^`]+`")
+_SYSTEM_INFO_REQUEST_PATTERN = re.compile(
+    r"\b(?:operating system|os\b|hostname|locale|cpu|ram|memory|machine specs?|"
+    r"hardware specs?|system info|local machine|this machine|on this machine|"
+    r"local date|local time|local day|local datetime|today'?s date|current "
+    r"(?:local )?(?:date|time)|what day is it(?: today)?|what date is it(?: today)?|"
+    r"quelle heure locale|quelle date locale|quel jour sommes-nous|quel jour est-on|"
+    r"heure locale|date du jour)\b"
+)
+_IDENTITY_REQUEST_PATTERN = re.compile(
+    r"\b(?:who is|who's|qui est|c'?est qui|bio de|biographie de|"
+    r"biography of|bio of)\b"
+)
+_WEB_LOOKUP_REQUEST_PATTERN = re.compile(
+    r"\b(?:search(?: the)? (?:web|internet)|web search|look up|lookup|"
+    r"search online|find online|recherche en ligne|cherche sur (?:le )?"
+    r"(?:web|internet)|sur (?:le )?(?:web|internet)|news about|latest news|"
+    r"actualites sur)\b"
+)
+_URL_FETCH_REQUEST_PATTERN = re.compile(
+    r"\b(?:fetch|open|read|inspect|summarize|check|visit|load|show|analyze|"
+    r"look at|ouvre|lire|inspecte|resume|resumer|visite)\b"
 )
 
 
@@ -209,9 +261,17 @@ def run_user_turn(
         local_access_note = _build_local_access_control_note(
             command_handler=command_handler,
         )
+        request_routing_note = _build_request_routing_note(
+            user_input=user_input,
+            capability_summary=capability_summary,
+        )
         system_context_notes = tuple(
             note
-            for note in (memory_context_note, local_access_note)
+            for note in (
+                memory_context_note,
+                local_access_note,
+                request_routing_note,
+            )
             if note is not None
         )
 
@@ -448,6 +508,266 @@ def _build_default_search_grounding_transform(
     return _grounding_transform
 
 
+def _normalize_runtime_routing_text(text: str) -> str:
+    normalized = unicodedata.normalize(
+        "NFKD",
+        text.replace("’", "'").casefold(),
+    )
+    without_marks = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+    return " ".join(without_marks.split())
+
+
+def _looks_like_direct_url_fetch_request(
+    *,
+    user_input: str,
+    normalized_user_input: str,
+) -> bool:
+    if _URL_PATTERN.search(user_input) is None:
+        return False
+    if _URL_FETCH_REQUEST_PATTERN.search(normalized_user_input) is not None:
+        return True
+    return any(
+        token in normalized_user_input
+        for token in (" url ", " link ", " page ", " site ")
+    )
+
+
+def _looks_like_explicit_terminal_request(
+    *,
+    user_input: str,
+    normalized_user_input: str,
+) -> bool:
+    if _TERMINAL_REQUEST_PATTERN.search(normalized_user_input) is not None:
+        return True
+    if _TERMINAL_SNIPPET_PATTERN.search(user_input) is None:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:run|execute|launch|show|what does)\b",
+            normalized_user_input,
+        )
+    )
+
+
+def _looks_like_system_info_request(normalized_user_input: str) -> bool:
+    return _SYSTEM_INFO_REQUEST_PATTERN.search(normalized_user_input) is not None
+
+
+def _looks_like_identity_request(normalized_user_input: str) -> bool:
+    return _IDENTITY_REQUEST_PATTERN.search(normalized_user_input) is not None
+
+
+def _looks_like_local_directory_request(
+    *,
+    user_input: str,
+    normalized_user_input: str,
+) -> bool:
+    if _URL_PATTERN.search(user_input) is not None:
+        return False
+    if _DIRECTORY_REQUEST_PATTERN.search(normalized_user_input) is None:
+        return False
+    if _DIRECTORY_SCOPE_PATTERN.search(normalized_user_input) is not None:
+        return True
+    if re.search(r"\b(?:files|contents?)\s+in\b", normalized_user_input) is not None:
+        return True
+    return (
+        _PATH_HINT_PATTERN.search(normalized_user_input) is not None
+        and _FILE_EXTENSION_HINT_PATTERN.search(normalized_user_input) is None
+    )
+
+
+def _looks_like_local_file_request(
+    *,
+    user_input: str,
+    normalized_user_input: str,
+) -> bool:
+    if _URL_PATTERN.search(user_input) is not None:
+        return False
+    if _FILE_REQUEST_PATTERN.search(normalized_user_input) is None:
+        return False
+    if _FILE_EXTENSION_HINT_PATTERN.search(normalized_user_input) is not None:
+        return True
+    if _PATH_HINT_PATTERN.search(normalized_user_input) is None:
+        return False
+    return bool(re.search(r"\b(?:file|fichier)\b", normalized_user_input))
+
+
+def _looks_like_explicit_web_lookup_request(normalized_user_input: str) -> bool:
+    return _WEB_LOOKUP_REQUEST_PATTERN.search(normalized_user_input) is not None
+
+
+def _build_request_routing_note(
+    *,
+    user_input: str,
+    capability_summary: RuntimeCapabilitySummary,
+) -> str | None:
+    if capability_summary.model_can_call_tools is not True:
+        return None
+
+    normalized_user_input = _normalize_runtime_routing_text(user_input)
+    if not normalized_user_input:
+        return None
+
+    if (
+        capability_summary.url_fetch_available
+        and _looks_like_direct_url_fetch_request(
+            user_input=user_input,
+            normalized_user_input=normalized_user_input,
+        )
+    ):
+        return (
+            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+            "the user gave a specific public URL. Call fetch_url_text first and "
+            "answer from the fetched content before guessing or asking for clarification."
+        )
+
+    if (
+        capability_summary.shell_command_execution_available
+        and _looks_like_explicit_terminal_request(
+            user_input=user_input,
+            normalized_user_input=normalized_user_input,
+        )
+    ):
+        return (
+            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+            "this is an explicit local shell or terminal request. Call "
+            "run_terminal_command with the requested command before explaining "
+            "what you would do."
+        )
+
+    if (
+        capability_summary.system_info_available
+        and _looks_like_system_info_request(normalized_user_input)
+    ):
+        return (
+            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+            "this is an obvious local machine or runtime question. Call "
+            "system_info now and answer from its output instead of guessing or "
+            "asking whether you should check."
+        )
+
+    if _looks_like_identity_request(normalized_user_input):
+        if capability_summary.fast_web_search_available:
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this is an identity or biography lookup. Call fast_web_search "
+                "first with the exact entity wording from the user; use search_web "
+                "only if the fast grounding note is still too thin."
+            )
+        if capability_summary.web_search_available:
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this is an identity or biography lookup. Call search_web first "
+                "with the exact entity wording from the user instead of answering "
+                "from weak memory."
+            )
+
+    if _looks_like_local_directory_request(
+        user_input=user_input,
+        normalized_user_input=normalized_user_input,
+    ):
+        if capability_summary.local_directory_listing_available:
+            follow_up = (
+                " If the listing surfaces a relevant supported text file and the "
+                "user needs its contents, read that file next."
+                if capability_summary.local_file_read_available
+                else ""
+            )
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this is an explicit local directory inspection request. Call "
+                "list_directory on the provided path or scope before asking for "
+                f"clarification.{follow_up}"
+            )
+        if capability_summary.shell_command_execution_available:
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this is a local directory inspection request and list_directory "
+                "is unavailable. Use run_terminal_command for a bounded local listing "
+                "before asking for clarification."
+            )
+
+    if _looks_like_local_file_request(
+        user_input=user_input,
+        normalized_user_input=normalized_user_input,
+    ):
+        if capability_summary.local_file_read_available:
+            follow_up = (
+                " If the path turns out to be a directory or you need discovery first, "
+                "call list_directory before clarifying."
+                if capability_summary.local_directory_listing_available
+                else ""
+            )
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this is an explicit local file inspection request. Call "
+                f"read_text_file on the provided path.{follow_up}"
+            )
+        if capability_summary.local_directory_listing_available:
+            return (
+                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+                "this looks like a local file inspection request, but a direct "
+                "file read is unavailable. Start with list_directory on the provided "
+                "path or scope before asking for clarification."
+            )
+
+    if (
+        capability_summary.web_search_available
+        and _looks_like_explicit_web_lookup_request(normalized_user_input)
+    ):
+        return (
+            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
+            "this explicitly asks for a web lookup or current external information. "
+            "Call search_web first and use the user's exact wording in the first lookup."
+        )
+
+    return None
+
+
+def _build_post_tool_grounding_note(
+    *,
+    tool_results: Sequence[ToolResult],
+    tool_definitions: Sequence[ToolDefinition],
+) -> str:
+    success_count = sum(1 for tool_result in tool_results if tool_result.success)
+    error_count = len(tool_results) - success_count
+    available_tool_names = {
+        tool_definition.name for tool_definition in tool_definitions
+    }
+    latest_tool_names = {tool_result.tool_name for tool_result in tool_results}
+
+    lines = [
+        (
+            f"{_POST_TOOL_GROUNDING_NOTE_PREFIX} the latest tool step returned "
+            f"{success_count} success(es) and {error_count} error(s)."
+        ),
+        "Base the next reply on the latest tool results above.",
+        "If the user's request is now answered, reply directly from that evidence.",
+        "If one obvious missing fact remains and a listed tool can get it, call that tool now instead of stopping early.",
+        "Do not ask for clarification when the current request already gives enough information for the next obvious tool step.",
+        "Do not contradict successful tool output, and do not say a tool failed unless the tool result above says it failed.",
+    ]
+
+    if "fast_web_search" in latest_tool_names and "search_web" in available_tool_names:
+        lines.append(
+            "If the quick grounding note identified the entity but the request still "
+            "needs a fuller answer, call search_web next with the exact confirmed "
+            "entity wording."
+        )
+    if "list_directory" in latest_tool_names and "read_text_file" in available_tool_names:
+        lines.append(
+            "If the directory listing surfaced a relevant supported text file and "
+            "the user needs its contents, call read_text_file next instead of "
+            "stopping at the listing."
+        )
+
+    return "\n".join(lines)
+
+
 def _run_agent_loop(
     *,
     first_response: OrchestratorTurnResult,
@@ -524,6 +844,17 @@ def _run_agent_loop(
 
         if tool_guard_state.is_cancelled():
             return _TURN_CANCELLED_REPLY
+
+        if tool_results:
+            context_messages.append(
+                LLMMessage(
+                    role=LLMRole.SYSTEM,
+                    content=_build_post_tool_grounding_note(
+                        tool_results=tool_results,
+                        tool_definitions=tool_definitions,
+                    ),
+                )
+            )
 
         # Call the model again with extended context.
         current_response = orchestrator.call_model(

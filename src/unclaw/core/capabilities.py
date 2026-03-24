@@ -60,8 +60,10 @@ _MINIMAL_GUIDANCE_FRAGMENT_IDS: frozenset[str] = frozenset(
 )
 _COMPACT_GUIDANCE_LINE_SELECTIONS: dict[str, tuple[int, ...]] = {
     # 0: use listed tools  1: direct answer when complete  3: use tools only when needed
-    # 7: file write honesty  9: entity ambiguity guard  10: exact entity in tool calls
-    "guidance.model_callable.core_rules": (0, 1, 3, 7, 9, 10),
+    # 7: verify with tools before guessing  8: continue obvious next tool step
+    # 9: avoid premature clarification  10: file write honesty
+    # 12: entity ambiguity guard  13: exact entity in tool calls
+    "guidance.model_callable.core_rules": (0, 1, 3, 7, 8, 9, 10, 12, 13),
     # 0: identity/bio fast lookup  1: uncertainty guard  2: no normalization first
     # 5: correction follow-up  6: use liberally for cheap grounding
     "guidance.model_callable.fast_web_grounding": (0, 1, 2, 5, 6),

@@ -590,6 +590,12 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "Preserve the user's requested order when practical.",
             "Do not call tools for parts already answerable from the conversation.",
             "Combine tool results into one coherent final answer.",
+            "When a listed tool can directly verify the user's request, prefer "
+            "the tool over guessing, reinterpretation, or premature clarification.",
+            "If the first tool result is useful but incomplete and one obvious "
+            "next tool step remains, take that step before giving a vague answer.",
+            "Do not ask for clarification when the current request already gives "
+            "enough information for the first obvious tool call.",
             "Only claim a file was written, created, or modified if write_text_file "
             "output is present in this conversation. If no such tool ran, say the "
             "action has not happened yet.",
@@ -619,14 +625,20 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         "guidance.model_callable.local_choice.full": _static_prompt(
             "guidance.model_callable.local_choice.full",
             "Use list_directory for local directories and read_text_file for supported local text files.",
+            "For explicit local inspection requests with a concrete path or scope, "
+            "try the obvious local tool before asking for clarification.",
         ),
         "guidance.model_callable.local_choice.list_only": _static_prompt(
             "guidance.model_callable.local_choice.list_only",
             "Use list_directory for local directories.",
+            "For explicit local directory inspection requests with a concrete path "
+            "or scope, call list_directory before asking for clarification.",
         ),
         "guidance.model_callable.local_choice.read_only": _static_prompt(
             "guidance.model_callable.local_choice.read_only",
             "Use read_text_file for supported local text files.",
+            "For explicit local file inspection requests with a concrete path, "
+            "call read_text_file before asking for clarification.",
         ),
         "guidance.model_callable.web_choice.full": _static_prompt(
             "guidance.model_callable.web_choice.full",
@@ -634,12 +646,16 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "for a specific public URL.",
             "For live public facts (events, people, news, weather, scores), prefer "
             "search_web over run_terminal_command with curl/wget.",
+            "When the user explicitly asks you to look something up online, do the "
+            "lookup before answering from weak memory or asking unnecessary clarifications.",
         ),
         "guidance.model_callable.web_choice.search_only": _static_prompt(
             "guidance.model_callable.web_choice.search_only",
             "Use search_web for up-to-date external information.",
             "For live public facts (events, people, news, weather, scores), prefer "
             "search_web over run_terminal_command with curl/wget.",
+            "When the user explicitly asks you to look something up online, do the "
+            "lookup before answering from weak memory or asking unnecessary clarifications.",
         ),
         "guidance.model_callable.web_choice.fetch_only": _static_prompt(
             "guidance.model_callable.web_choice.fetch_only",
@@ -680,6 +696,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "as local date/time, day, OS, CPU, RAM, hostname, and locale.",
             "Do not claim you cannot know the current date, time, or OS when "
             "system_info is available — call the tool to get accurate local facts.",
+            "For obvious local date, time, day, OS, hostname, or machine-spec "
+            "questions, call system_info before answering or clarifying.",
         ),
         "guidance.model_callable.shell_command_execution": _static_prompt(
             "guidance.model_callable.shell_command_execution",
