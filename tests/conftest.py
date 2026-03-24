@@ -3,12 +3,14 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
+from unclaw.llm.base import LLMResponse
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
 
 
@@ -33,6 +35,105 @@ _REAL_OLLAMA_TOOL_CAPABLE_MODEL_PREFIXES = (
     "firefunction",
     "hermes",
 )
+
+
+class ScriptedFakeOllamaProvider:
+    """Lightweight fake Ollama provider with sequential scripted responses."""
+
+    provider_name = "ollama"
+    _scripted_steps: tuple[Any, ...] = ()
+    _captured_messages: list[list[Any]] | None = None
+    _captured_calls: list[dict[str, Any]] | None = None
+    _auto_stream_text: bool = False
+    _call_count: int = 0
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "http://127.0.0.1:11434",
+        default_timeout_seconds: float = 60.0,
+    ) -> None:
+        del base_url, default_timeout_seconds
+
+    @classmethod
+    def with_script(
+        cls,
+        steps: Sequence[LLMResponse | Callable[..., LLMResponse]],
+        *,
+        captured_messages: list[list[Any]] | None = None,
+        captured_calls: list[dict[str, Any]] | None = None,
+        auto_stream_text: bool = False,
+    ) -> type["ScriptedFakeOllamaProvider"]:
+        return type(
+            "ConfiguredScriptedFakeOllamaProvider",
+            (cls,),
+            {
+                "_scripted_steps": tuple(steps),
+                "_captured_messages": captured_messages,
+                "_captured_calls": captured_calls,
+                "_auto_stream_text": auto_stream_text,
+                "_call_count": 0,
+            },
+        )
+
+    @classmethod
+    def call_count(cls) -> int:
+        return cls._call_count
+
+    def chat(  # type: ignore[no-untyped-def]
+        self,
+        profile,
+        messages,
+        *,
+        timeout_seconds=None,
+        thinking_enabled=False,
+        content_callback=None,
+        tools=None,
+    ):
+        provider_cls = type(self)
+        if provider_cls._captured_messages is not None:
+            provider_cls._captured_messages.append(list(messages))
+        if provider_cls._captured_calls is not None:
+            provider_cls._captured_calls.append(
+                {
+                    "profile": profile,
+                    "messages": list(messages),
+                    "timeout_seconds": timeout_seconds,
+                    "thinking_enabled": thinking_enabled,
+                    "tools": tools,
+                }
+            )
+
+        step_index = provider_cls._call_count
+        if step_index >= len(provider_cls._scripted_steps):
+            raise AssertionError(
+                "ScriptedFakeOllamaProvider received more chat calls than scripted steps."
+            )
+        provider_cls._call_count += 1
+        step = provider_cls._scripted_steps[step_index]
+        if callable(step):
+            response = step(
+                profile=profile,
+                messages=messages,
+                timeout_seconds=timeout_seconds,
+                thinking_enabled=thinking_enabled,
+                content_callback=content_callback,
+                tools=tools,
+            )
+        else:
+            response = step
+
+        if (
+            provider_cls._auto_stream_text
+            and content_callback is not None
+            and response.content
+        ):
+            content_callback(response.content)
+        return response
+
+    def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+        del timeout_seconds
+        return True
 
 
 def _real_ollama_enabled() -> bool:
@@ -183,6 +284,24 @@ def set_profile_tool_mode():
         )
 
     return _set_profile_tool_mode
+
+
+@pytest.fixture
+def build_scripted_ollama_provider():
+    def _build(
+        *steps: LLMResponse | Callable[..., LLMResponse],
+        captured_messages: list[list[Any]] | None = None,
+        captured_calls: list[dict[str, Any]] | None = None,
+        auto_stream_text: bool = False,
+    ) -> type[ScriptedFakeOllamaProvider]:
+        return ScriptedFakeOllamaProvider.with_script(
+            steps,
+            captured_messages=captured_messages,
+            captured_calls=captured_calls,
+            auto_stream_text=auto_stream_text,
+        )
+
+    return _build
 
 
 def _serialize_profile_for_models_config(profile: object) -> dict[str, object]:

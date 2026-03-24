@@ -5813,6 +5813,7 @@ def test_agent_loop_marks_timed_out_tool_as_failure_and_continues(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
     app_config_path = project_root / "config" / "app.yaml"
@@ -5841,77 +5842,57 @@ def test_agent_loop_marks_timed_out_tool_as_failure_and_continues(
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-    call_count = 0
-
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url="http://127.0.0.1:11434",
-            default_timeout_seconds=60.0,
-        ):
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="",
-                    created_at="2026-03-13T12:00:00Z",
-                    finish_reason="stop",
-                    tool_calls=(
-                        ToolCall(
-                            tool_name="fetch_url_text",
-                            arguments={"url": "https://example.com/slow"},
-                        ),
-                    ),
-                    raw_payload={
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {
-                                    "function": {
-                                        "name": "fetch_url_text",
-                                        "arguments": {
-                                            "url": "https://example.com/slow"
-                                        },
-                                    }
-                                }
-                            ],
+    first_response = LLMResponse(
+        provider="ollama",
+        model_name=settings.models["main"].model_name,
+        content="",
+        created_at="2026-03-13T12:00:00Z",
+        finish_reason="stop",
+        tool_calls=(
+            ToolCall(
+                tool_name="fetch_url_text",
+                arguments={"url": "https://example.com/slow"},
+            ),
+        ),
+        raw_payload={
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "fetch_url_text",
+                            "arguments": {"url": "https://example.com/slow"},
                         }
-                    },
-                )
+                    }
+                ],
+            }
+        },
+    )
 
-            tool_messages = [
-                message.content
-                for message in messages
-                if message.role is LLMRole.TOOL
-            ]
-            assert len(tool_messages) == 1
-            assert "timed out after 0.05 seconds" in tool_messages[0]
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="The fetch tool timed out, so I could not inspect the page.",
-                created_at="2026-03-13T12:00:01Z",
-                finish_reason="stop",
-            )
+    def _second_step(  # type: ignore[no-untyped-def]
+        *,
+        profile,
+        messages,
+        timeout_seconds=None,
+        thinking_enabled=False,
+        content_callback=None,
+        tools=None,
+    ):
+        del timeout_seconds, thinking_enabled, content_callback, tools
+        tool_messages = [
+            message.content for message in messages if message.role is LLMRole.TOOL
+        ]
+        assert len(tool_messages) == 1
+        assert "timed out after 0.05 seconds" in tool_messages[0]
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content="The fetch tool timed out, so I could not inspect the page.",
+            created_at="2026-03-13T12:00:01Z",
+            finish_reason="stop",
+        )
 
+    FakeOllamaProvider = build_scripted_ollama_provider(first_response, _second_step)
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     tool_registry = ToolRegistry()
@@ -5943,7 +5924,7 @@ def test_agent_loop_marks_timed_out_tool_as_failure_and_continues(
         )
 
         assert reply == "The fetch tool timed out, so I could not inspect the page."
-        assert call_count == 2
+        assert FakeOllamaProvider.call_count() == 2
 
         tool_finished_events = [
             event for event in published_events if event.event_type == "tool.finished"
@@ -5971,6 +5952,7 @@ def test_agent_loop_cancellation_stops_additional_tool_execution(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     from unclaw.core.runtime import _TURN_CANCELLED_REPLY
 
@@ -5990,65 +5972,58 @@ def test_agent_loop_cancellation_stops_additional_tool_execution(
         session_manager=session_manager,
         memory_manager=SimpleNamespace(),
     )
-    call_count = 0
     tool_started = threading.Event()
     release_tool = threading.Event()
+    first_response = LLMResponse(
+        provider="ollama",
+        model_name=settings.models["main"].model_name,
+        content="",
+        created_at="2026-03-13T12:00:00Z",
+        finish_reason="stop",
+        tool_calls=(
+            ToolCall(
+                tool_name="fetch_url_text",
+                arguments={"url": "https://example.com/cancel"},
+            ),
+        ),
+        raw_payload={
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "fetch_url_text",
+                            "arguments": {"url": "https://example.com/cancel"},
+                        }
+                    }
+                ],
+            }
+        },
+    )
 
-    class FakeOllamaProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url="http://127.0.0.1:11434",
-            default_timeout_seconds=60.0,
-        ):
-            del base_url, default_timeout_seconds
-
-        def chat(
-            self,
+    def _unexpected_follow_up_step(  # type: ignore[no-untyped-def]
+        *,
+        profile,
+        messages,
+        timeout_seconds=None,
+        thinking_enabled=False,
+        content_callback=None,
+        tools=None,
+    ):
+        del (
             profile,
             messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del messages, timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal call_count
-            call_count += 1
-            if call_count > 1:
-                raise AssertionError("cancelled turns must not call the model again")
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="",
-                created_at="2026-03-13T12:00:00Z",
-                finish_reason="stop",
-                tool_calls=(
-                    ToolCall(
-                        tool_name="fetch_url_text",
-                        arguments={"url": "https://example.com/cancel"},
-                    ),
-                ),
-                raw_payload={
-                    "message": {
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "function": {
-                                    "name": "fetch_url_text",
-                                    "arguments": {
-                                        "url": "https://example.com/cancel"
-                                    },
-                                }
-                            }
-                        ],
-                    }
-                },
-            )
+            timeout_seconds,
+            thinking_enabled,
+            content_callback,
+            tools,
+        )
+        raise AssertionError("cancelled turns must not call the model again")
 
+    FakeOllamaProvider = build_scripted_ollama_provider(
+        first_response,
+        _unexpected_follow_up_step,
+    )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
 
     def _blocking_tool(call: ToolCall) -> ToolResult:
@@ -6090,7 +6065,7 @@ def test_agent_loop_cancellation_stops_additional_tool_execution(
         canceller_thread.join(timeout=1.0)
 
         assert reply == _TURN_CANCELLED_REPLY
-        assert call_count == 1
+        assert FakeOllamaProvider.call_count() == 1
 
         tool_finished_events = [
             event for event in published_events if event.event_type == "tool.finished"

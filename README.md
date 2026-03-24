@@ -12,7 +12,7 @@ Unclaw is a lightweight local-first runtime for AI models served through Ollama.
 
 Today it ships as a shared local runtime with terminal and Telegram channels, safe local tools, grounded web search, session persistence, onboarding, and local logs/traces.
 
-It also ships a bounded agent loop. Both the default `main` profile and the `deep` profile enable native tool calling; `fast` and `codex` remain conservative.
+It also ships a bounded agent loop. Both the default `main` profile and the `deep` profile enable native tool calling; `fast` and `codex` remain conservative `tool_mode: none` profiles.
 
 ---
 
@@ -36,7 +36,7 @@ Unclaw takes the opposite path:
 ### Implemented now
 
 - Local Ollama runtime with `fast`, `main`, `deep`, and `codex` profiles
-- `main` (default) and `deep` profiles are both configured for native tool calling; `fast` and `codex` remain `json_plan`; all profiles now have explicit `num_ctx` values (4096 or 8192) to prevent silent context overflow
+- `main` (default) and `deep` profiles are both configured for native tool calling; `fast` and `codex` remain `tool_mode: none`; all profiles now have explicit `num_ctx` values (4096 or 8192) to prevent silent context overflow
 - Interactive terminal via `unclaw start`
 - Telegram polling bot with local allowlist management
 - Session persistence plus deterministic session summaries
@@ -58,7 +58,7 @@ Unclaw takes the opposite path:
 
 ### Important current limits
 
-- `fast` and `codex` profiles remain `tool_mode: json_plan`; the agent loop activates only on `main` and `deep`.
+- `fast` and `codex` profiles remain `tool_mode: none`; on those profiles the model is not offered native tool definitions in the turn, so the agent loop activates only on `main` and `deep`.
 - `/read`, `/ls`, and `/fetch` remain mainly slash-command-driven in normal user flows.
 - Search is bounded and synchronous: DuckDuckGo HTML plus a small set of fetched public pages. Search quality depends on DuckDuckGo HTML stability and readable page text.
 - Private and local network fetches are blocked by default.
@@ -66,7 +66,7 @@ Unclaw takes the opposite path:
 - There is intentionally no shipped built-in notes or document-creation tool right now.
 - Long-term memory is not injected automatically — the model must call the recall tools explicitly; it is not yet a passive always-available context.
 - Session summaries are deterministic (no LLM call): reliable and fast but limited in depth for complex multi-turn sessions.
-- Small local models (`fast`, `main`) are less reliable on long multi-step tool chains than larger models; `deep` (9B) is more capable for complex agentic tasks.
+- Lighter local profiles (`fast`, `main`) are less reliable on long multi-step tool chains than `deep`; `deep` is more capable for complex agentic tasks.
 - There is no public GUI yet.
 - There is no full file or OS automation suite yet.
 - There is no shipped skills marketplace or plugin marketplace yet.
@@ -86,10 +86,16 @@ Unclaw takes the opposite path:
 - By default the fetch policy blocks `localhost`, `.localhost`, metadata-style hosts, literal private or local IPs, and DNS resolutions that land on loopback, link-local, private, reserved, multicast, or unspecified addresses. Redirect targets are checked again under the same rules.
 - `fetch_url_text` can be reconfigured locally with `security.tools.fetch.allow_private_networks: true` in `config/app.yaml`. The grounded `search_web` path stays public-web-only and does not use that override.
 
+### How terminal execution works today
+
+- `run_terminal_command` executes a real host command with Python `subprocess.run(..., shell=True, ...)`.
+- The runtime validates and restricts the working directory to allowed roots or the configured default local working directory, but the command string itself is not sandboxed beyond the configured timeout and output limits.
+- In practice this is real local shell execution on your machine, not a simulated terminal.
+
 ### What local logs and traces record today
 
 - The tracer publishes runtime events in-process and, in the normal CLI and Telegram startup paths, persists them locally in two places: the SQLite `events` table in `data/app.db` and the JSONL runtime log at `data/logs/runtime.log`.
-- Runtime trace payloads include timestamps, session IDs, route and model selections, tool names and arguments, success or failure state, durations, Telegram chat IDs for Telegram-only events, and reply or output lengths. This means local search queries, file paths, and fetched URLs can appear in local traces.
+- Runtime trace payloads include timestamps, session IDs, route and model selections, tool names and arguments, success or failure state, durations, Telegram chat IDs for Telegram-only events, and reply or output lengths. This means local search queries, file paths, fetched URLs, and terminal commands can appear in local traces.
 - On normal bootstrap/startup paths, Unclaw prunes runtime trace artifacts older than `logging.retention_days` from both the SQLite `events` table and `data/logs/runtime.log`. The default is 30 days; set `logging.retention_days: 0` to disable that automatic trace cleanup.
 - By default reasoning text is not persisted. The tracer records `reasoning_length` only. If you set `logging.include_reasoning_text: true`, raw reasoning text is stored in the same local event payloads and becomes visible in `unclaw logs full`.
 - `unclaw logs` reads the local JSONL runtime log, not the SQLite `events` table. If `logging.file_enabled` is off, that file stops updating even though local event publishing and local event persistence still exist.
@@ -104,7 +110,7 @@ Unclaw is currently an **early but real local-first agent/runtime MVP**.
 
 For ordinary turns it usually does one model call. For web-backed turns it can route the request into grounded search, persist the retrieved context, and answer with compact sources. On native-tool profiles, the same runtime can keep going through a bounded observation-action loop and let the model call built-in tools such as `search_web`.
 
-The `main` (default) and `deep` profiles are both native-tool-capable and can run the observation-action loop. The `fast` and `codex` profiles remain `json_plan`. Local model reliability varies by task complexity — small models work well for focused tasks but are less reliable on long multi-step chains. The `deep` profile (9B) is the recommended choice for complex or multi-step agentic tasks.
+The `main` (default) and `deep` profiles are both native-tool-capable and can run the observation-action loop. The `fast` and `codex` profiles remain `tool_mode: none`, which means the model itself is not offered native tool definitions on those profiles. Local model reliability varies by task complexity — lighter profiles work well for focused tasks but are less reliable on long multi-step chains. The `deep` profile is the recommended choice for complex or multi-step agentic tasks.
 
 ---
 
@@ -173,19 +179,19 @@ unclaw help
 
 ## Current model profiles
 
-- **fast** → quick lightweight replies, `tool_mode: json_plan`, `num_ctx: 4096`, `keep_alive: 10m`
+- **fast** → quick lightweight replies, `tool_mode: none`, `num_ctx: 4096`, `keep_alive: 10m`
 - **main** → default everyday assistant, `tool_mode: native`, `num_ctx: 8192`, `keep_alive: 30m`
 - **deep** → heavier reasoning, native-tool profile, `tool_mode: native`, `num_ctx: 8192`, `keep_alive: 10m`
-- **codex** → code-oriented tasks, `tool_mode: json_plan`, `num_ctx: 4096`, `keep_alive: 10m`
+- **codex** → code-oriented tasks, `tool_mode: none`, `num_ctx: 4096`, `keep_alive: 10m`
 
 Default lineup:
 
-- `fast` → `llama3.2:3b`
-- `main` → `qwen3.5:4b`
-- `deep` → `qwen3.5:9b`
-- `codex` → `qwen2.5-coder:7b`
+- `fast` → `ministral-3:8b`
+- `main` → `ministral-3:14b`
+- `deep` → `qwen3.5:27b`
+- `codex` → `deepcoder:14b`
 
-The default onboarding recommendations match this lineup. `main` is the default profile and runs native tool calling. Use `deep` for heavier reasoning or tasks that benefit from a larger model. `fast` and `codex` remain `json_plan` and do not activate the agent loop.
+The default onboarding recommendations match this lineup. `main` is the default profile and runs native tool calling. Use `deep` for heavier reasoning or tasks that benefit from a larger model. `fast` and `codex` remain `tool_mode: none`, so they do not activate the native agent loop.
 
 ---
 
