@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.orchestrator import ModelCallFailedError
 from unclaw.core.reply_discipline import (
+    _fast_web_search_result_is_mismatch,
     _fast_web_search_result_is_thin,
     _search_web_result_is_thin,
     _tool_result_timed_out,
@@ -237,6 +238,32 @@ def _find_latest_failed_non_write_tool_result(
     return None
 
 
+def _find_latest_completion_blocking_web_tool_result(
+    tool_results: Sequence[ToolResult],
+) -> ToolResult | None:
+    for tool_result in reversed(tool_results[:-1]):
+        if tool_result.success is not True:
+            continue
+        if tool_result.tool_name == "fast_web_search":
+            return (
+                tool_result if _fast_web_search_result_is_thin(tool_result) else None
+            )
+        if tool_result.tool_name == "search_web":
+            return tool_result if _search_web_result_is_thin(tool_result) else None
+    return None
+
+
+def _build_completion_blocking_web_detail(tool_result: ToolResult) -> str:
+    if tool_result.tool_name == "fast_web_search":
+        if _fast_web_search_result_is_mismatch(tool_result):
+            return (
+                "Quick web grounding matched a different entity or found no exact "
+                "usable match."
+            )
+        return "Quick web grounding was too thin to confirm requested details."
+    return "Web evidence was too thin to confirm requested details."
+
+
 def _turn_should_mark_goal_state_completed(
     *,
     tool_results: Sequence[ToolResult],
@@ -253,6 +280,7 @@ def _turn_should_mark_goal_state_completed(
         latest_tool_result.success is True
         and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
         and _find_latest_failed_non_write_tool_result(tool_results) is None
+        and _find_latest_completion_blocking_web_tool_result(tool_results) is None
     )
 
 
@@ -278,6 +306,9 @@ def _persist_session_goal_state_from_runtime_facts(
     latest_failed_non_write_tool_result = _find_latest_failed_non_write_tool_result(
         tool_results
     )
+    latest_completion_blocking_web_tool_result = (
+        _find_latest_completion_blocking_web_tool_result(tool_results)
+    )
     last_blocker: str | None = None
     status = "active"
     current_step = latest_tool_result.tool_name
@@ -300,6 +331,16 @@ def _persist_session_goal_state_from_runtime_facts(
         last_blocker = (
             latest_failed_non_write_tool_result.error
             or latest_failed_non_write_tool_result.output_text
+        )
+    elif (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+        and latest_completion_blocking_web_tool_result is not None
+    ):
+        status = "blocked"
+        current_step = latest_completion_blocking_web_tool_result.tool_name
+        last_blocker = _build_completion_blocking_web_detail(
+            latest_completion_blocking_web_tool_result
         )
     elif latest_tool_result.success is False:
         status = "blocked"
@@ -335,6 +376,9 @@ def _persist_session_progress_ledger_from_runtime_facts(
     latest_failed_non_write_tool_result = _find_latest_failed_non_write_tool_result(
         tool_results
     )
+    latest_completion_blocking_web_tool_result = (
+        _find_latest_completion_blocking_web_tool_result(tool_results)
+    )
     status = "active"
     detail = "tool succeeded"
     step = latest_tool_result.tool_name
@@ -350,6 +394,16 @@ def _persist_session_progress_ledger_from_runtime_facts(
         step = latest_failed_non_write_tool_result.tool_name
         detail = _build_progress_detail_from_failed_tool_result(
             latest_failed_non_write_tool_result
+        )
+    elif (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+        and latest_completion_blocking_web_tool_result is not None
+    ):
+        status = "blocked"
+        step = latest_completion_blocking_web_tool_result.tool_name
+        detail = _build_completion_blocking_web_detail(
+            latest_completion_blocking_web_tool_result
         )
     elif latest_tool_result.success is True:
         if latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME:

@@ -547,6 +547,196 @@ def test_search_web_failure_then_successful_write_text_file_turn_persists_blocke
         session_manager.close()
 
 
+def test_fast_web_search_mismatch_then_successful_write_text_file_turn_persists_blocked_ledger(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "progress-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="No exact top match; different entity found.",
+            payload={
+                "query": call.arguments["query"],
+                "result_count": 1,
+                "grounding_note": "",
+            },
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("fast_web_search", {"query": "Marine Leleu"}),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "progress"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Research Marine Leleu, then write a short local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        ledger = session_manager.get_session_progress_ledger(session.id)
+        assert reply == "I saved the note locally."
+        assert fake_provider.call_count() == 3
+        assert len(ledger) == 1
+        assert [(entry.status, entry.step, entry.detail) for entry in ledger] == [
+            (
+                "blocked",
+                "fast_web_search",
+                "Quick web grounding matched a different entity or found no exact "
+                "usable match.",
+            ),
+        ]
+        assert output_path.read_text(encoding="utf-8") == "progress"
+    finally:
+        session_manager.close()
+
+
+def test_search_web_thin_then_successful_write_text_file_turn_persists_blocked_ledger(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "progress-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 1 of 1 attempted\n"
+                "Evidence kept: 1\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": ["One thin supported point."],
+                "display_sources": [
+                    {
+                        "title": "Example source",
+                        "url": "https://example.com/source",
+                    }
+                ],
+                "evidence_count": 1,
+                "finding_count": 1,
+            },
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("search_web", {"query": "Marine Leleu biography"}),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "progress"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Research Marine Leleu, then write a short local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        ledger = session_manager.get_session_progress_ledger(session.id)
+        assert reply.startswith("I saved the note locally.")
+        assert "Sources:" in reply
+        assert "https://example.com/source" in reply
+        assert fake_provider.call_count() == 3
+        assert len(ledger) == 1
+        assert [(entry.status, entry.step, entry.detail) for entry in ledger] == [
+            (
+                "blocked",
+                "search_web",
+                "Web evidence was too thin to confirm requested details.",
+            ),
+        ]
+        assert output_path.read_text(encoding="utf-8") == "progress"
+    finally:
+        session_manager.close()
+
+
 def test_existing_goal_state_session_preserves_progress_ledger_across_trivial_system_info_turn(
     monkeypatch,
     make_temp_project,
