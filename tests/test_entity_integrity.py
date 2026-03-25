@@ -654,8 +654,8 @@ class TestExecutedQueriesObservability:
 # ---------------------------------------------------------------------------
 
 
-class TestCrossTurnEntityIsolation:
-    """Regression tests for cross-turn entity contamination (phase corrective patch)."""
+class TestDeterministicEntityAnchoringDisabled:
+    """Regression tests for the removal of deterministic entity anchoring."""
 
     def _make_msg(self, role: "MessageRole", content: str) -> "ChatMessage":
         from unclaw.schemas.chat import ChatMessage
@@ -667,8 +667,7 @@ class TestCrossTurnEntityIsolation:
             created_at="2026-03-24T00:00:00",
         )
 
-    def test_current_turn_entity_not_overwritten_by_history_anchor(self) -> None:
-        """An explicit entity in the current user turn must win over any entity from history."""
+    def test_current_turn_entity_no_longer_creates_anchor(self) -> None:
         from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
@@ -684,12 +683,9 @@ class TestCrossTurnEntityIsolation:
             session_id="test",
             user_input="Qui est Marine Leleu ?",
         )
-        assert anchor is not None
-        assert anchor.surface == "Marine Leleu"
-        assert anchor.from_current_turn is True
+        assert anchor is None
 
-    def test_history_anchor_is_not_from_current_turn(self) -> None:
-        """A follow-up turn that falls back to history must yield from_current_turn=False."""
+    def test_history_follow_up_no_longer_creates_anchor(self) -> None:
         from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
@@ -705,12 +701,9 @@ class TestCrossTurnEntityIsolation:
             session_id="test",
             user_input="Fais leur bio courte.",
         )
-        # Should fall back to history
-        assert anchor is not None
-        assert anchor.from_current_turn is False
+        assert anchor is None
 
-    def test_corrected_history_anchor_preserves_corrected_flag(self) -> None:
-        """A corrected entity from history must keep corrected=True."""
+    def test_corrected_history_no_longer_creates_anchor(self) -> None:
         from unclaw.core.routing import _resolve_entity_anchor_for_turn
         from unittest.mock import MagicMock
         from unclaw.schemas.chat import MessageRole
@@ -728,9 +721,7 @@ class TestCrossTurnEntityIsolation:
             session_id="test",
             user_input="Fais leur bio courte.",
         )
-        assert anchor is not None
-        assert anchor.corrected is True
-        assert "McFly" in anchor.surface
+        assert anchor is None
 
     def test_multi_entity_request_returns_no_anchor(self) -> None:
         """Multi-entity sequential requests must produce no enforcement anchor."""

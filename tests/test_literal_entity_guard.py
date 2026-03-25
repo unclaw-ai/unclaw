@@ -76,7 +76,7 @@ def test_explicit_literal_surface_wins_over_trailing_noise_tolerance() -> None:
 
 
 @pytest.mark.integration
-def test_runtime_literal_entity_guard_preserves_entity_without_extra_model_call(
+def test_runtime_no_longer_applies_literal_entity_guard_to_tool_calls(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -188,7 +188,7 @@ def test_runtime_literal_entity_guard_preserves_entity_without_extra_model_call(
         assert observed_tool_calls == [
             ToolCall(
                 tool_name="fast_web_search",
-                arguments={"query": "Marine Leleu"},
+                arguments={"query": "Marine Le Pen"},
             )
         ]
     finally:

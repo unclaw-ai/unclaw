@@ -1,13 +1,11 @@
-"""Tests for P5-6 helpers plus current post-tool grounding behavior.
+"""Tests for structural routing fallback plus current post-tool grounding behavior.
 
 Proves:
-- _looks_like_deep_search_request detects bio/research depth signals (FR + EN)
-- _looks_like_joint_entity_request detects duo/pair entities like 'McFly et Carlito'
-- _build_request_routing_note no longer retries semantic web/identity recovery
+- _build_request_routing_note routes only explicit structural hints
+- semantic prompts without structural hints do not trigger deterministic retry notes
 - _build_post_tool_grounding_note pushes search_web escalation after fast_web_search
 - timeout/partial-failure note is included when a tool timed out
-- _apply_post_tool_reply_discipline still clamps replies from thin fast_web results
-  (factual discipline regression guard)
+- _apply_post_tool_reply_discipline still preserves substantive replies from thin fast_web results
 - capability context describes search_web as the deeper grounded path
 """
 
@@ -27,7 +25,6 @@ from unclaw.core.reply_discipline import (
 from unclaw.core.routing import (
     _build_request_routing_note,
     _looks_like_deep_search_request,
-    _looks_like_joint_entity_request,
 )
 from unclaw.core.runtime_support import (
     _build_post_tool_grounding_note,
@@ -38,13 +35,7 @@ from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINI
 pytestmark = pytest.mark.unit
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _web_capable_summary(*, fast_web: bool = True) -> RuntimeCapabilitySummary:
-    """Capability summary with both search_web and optionally fast_web_search."""
     return RuntimeCapabilitySummary(
         available_builtin_tool_names=(
             ("fast_web_search", "search_web") if fast_web else ("search_web",)
@@ -63,219 +54,120 @@ def _web_capable_summary(*, fast_web: bool = True) -> RuntimeCapabilitySummary:
 def _thin_fast_web_result(query: str = "McFly et Carlito") -> ToolResult:
     return ToolResult.ok(
         tool_name="fast_web_search",
-        output_text=f"- {query}: résultat rapide",
+        output_text=f"- {query}: resultat rapide",
         payload={
             "query": query,
             "result_count": 1,
-            "grounding_note": f"- {query}: résultat rapide",
+            "grounding_note": f"- {query}: resultat rapide",
         },
     )
 
 
-# ---------------------------------------------------------------------------
-# _looks_like_deep_search_request — French signals
-# ---------------------------------------------------------------------------
+def _structural_summary(**overrides) -> RuntimeCapabilitySummary:
+    payload = {
+        "available_builtin_tool_names": (),
+        "local_file_read_available": False,
+        "local_directory_listing_available": False,
+        "url_fetch_available": False,
+        "web_search_available": False,
+        "system_info_available": False,
+        "memory_summary_available": False,
+        "model_can_call_tools": True,
+        "local_file_write_available": False,
+        "session_history_recall_available": False,
+        "long_term_memory_available": False,
+        "shell_command_execution_available": False,
+        "fast_web_search_available": False,
+    }
+    payload.update(overrides)
+    return RuntimeCapabilitySummary(**payload)
 
 
-def test_deep_search_bio_complete_fr() -> None:
-    assert _looks_like_deep_search_request("fais une bio complète")
-    assert _looks_like_deep_search_request("biographie complète de cet artiste")
-    assert _looks_like_deep_search_request("fais une biographie complète de Banksy")
+def test_deep_search_classifier_is_disabled() -> None:
+    for user_input in (
+        "fais une biographie complete de Banksy",
+        "tell me everything you know about them",
+        "deep dive into this topic",
+    ):
+        assert _looks_like_deep_search_request(user_input) is False
 
 
-def test_deep_search_recherche_complete_fr() -> None:
-    assert _looks_like_deep_search_request("fais une recherche complète")
-    assert _looks_like_deep_search_request("fais une recherche plus complète")
-    assert _looks_like_deep_search_request("cherche en détail")
-    assert _looks_like_deep_search_request("cherche plus en détail")
-
-
-def test_deep_search_file_output_fr() -> None:
-    assert _looks_like_deep_search_request("cherche puis écris une bio dans un fichier texte")
-    assert _looks_like_deep_search_request("écris une bio dans un fichier")
-    assert _looks_like_deep_search_request("écris une bio")
-
-
-def test_deep_search_en_profondeur_fr() -> None:
-    assert _looks_like_deep_search_request("cherche en profondeur")
-    assert _looks_like_deep_search_request("une fiche complète")
-    assert _looks_like_deep_search_request("un dossier complet sur lui")
-
-
-# ---------------------------------------------------------------------------
-# _looks_like_deep_search_request — English signals
-# ---------------------------------------------------------------------------
-
-
-def test_deep_search_full_bio_en() -> None:
-    assert _looks_like_deep_search_request("give me a full biography")
-    assert _looks_like_deep_search_request("complete bio please")
-    assert _looks_like_deep_search_request("detailed biography")
-
-
-def test_deep_search_everything_en() -> None:
-    assert _looks_like_deep_search_request("tell me everything you know about him")
-    assert _looks_like_deep_search_request("everything about Taylor Swift")
-
-
-def test_deep_search_file_en() -> None:
-    assert _looks_like_deep_search_request("write it in a file")
-    assert _looks_like_deep_search_request("save the bio in a text file")
-
-
-def test_deep_search_in_depth_en() -> None:
-    assert _looks_like_deep_search_request("give me an in-depth profile")
-    assert _looks_like_deep_search_request("do a deep research on this")
-    assert _looks_like_deep_search_request("deep dive into this topic")
-
-
-# ---------------------------------------------------------------------------
-# _looks_like_deep_search_request — negative cases
-# ---------------------------------------------------------------------------
-
-
-def test_deep_search_bio_courte_triggers_for_reply_discipline() -> None:
-    # "bio courte" / "biographie courte" must still trigger reply discipline
-    # (prevents inflating a thin fast_web_search note into a short bio)
-    assert _looks_like_deep_search_request("fais leur bio courte")
-    assert _looks_like_deep_search_request("biographie courte de cet artiste")
-
-
-def test_deep_search_plain_identity_is_false() -> None:
-    assert not _looks_like_deep_search_request("qui est Marie Curie")
-    assert not _looks_like_deep_search_request("who is Elon Musk")
-    assert not _looks_like_deep_search_request("bio de cet artiste")
-
-
-def test_deep_search_plain_chat_is_false() -> None:
-    assert not _looks_like_deep_search_request("bonjour comment ça va")
-    assert not _looks_like_deep_search_request("what is the capital of France")
-    assert not _looks_like_deep_search_request("résume ce texte")
-
-
-# ---------------------------------------------------------------------------
-# _looks_like_joint_entity_request
-# ---------------------------------------------------------------------------
-
-
-def test_joint_entity_mcfly_et_carlito() -> None:
-    # With identity or bio context — all should trigger duo routing
-    assert _looks_like_joint_entity_request("McFly et Carlito, fais leur bio")
-    assert _looks_like_joint_entity_request("qui sont McFly et Carlito")
-    assert _looks_like_joint_entity_request("bio de McFly et Carlito")
-    # With deep-search context
-    assert _looks_like_joint_entity_request("McFly et Carlito, fais leur bio complète")
-
-
-def test_joint_entity_and_en() -> None:
-    assert _looks_like_joint_entity_request("who are John and Jane biography")
-
-
-def test_joint_entity_not_sequential() -> None:
-    # Sequential (puis/then) should NOT be treated as joint entity
-    assert not _looks_like_joint_entity_request("Michou puis Cyprien puis Squeezie")
-
-
-def test_joint_entity_not_plain_chat() -> None:
-    # No identity/bio signal → not a joint entity bio request
-    assert not _looks_like_joint_entity_request("Python et Java sont des langages")
-
-
-def test_joint_entity_not_single_entity() -> None:
-    assert not _looks_like_joint_entity_request("qui est Marine Leleu")
-    assert not _looks_like_joint_entity_request("cherche Ada Lovelace")
-
-
-# ---------------------------------------------------------------------------
-# _build_request_routing_note — semantic web recovery removed in Phase 3.7
-# ---------------------------------------------------------------------------
-
-
-def test_routing_note_returns_none_for_bio_complete() -> None:
+def test_routing_note_routes_structural_url_request() -> None:
     note = _build_request_routing_note(
-        user_input="fais une bio complète de cet artiste",
+        user_input="https://example.com",
+        capability_summary=_structural_summary(
+            available_builtin_tool_names=("fetch_url_text",),
+            url_fetch_available=True,
+        ),
+    )
+
+    assert note is not None
+    assert "specific public URL" in note
+    assert "fetch_url_text" in note
+
+
+def test_routing_note_routes_structural_terminal_request() -> None:
+    note = _build_request_routing_note(
+        user_input="`pwd`",
+        capability_summary=_structural_summary(
+            available_builtin_tool_names=("run_terminal_command",),
+            shell_command_execution_available=True,
+        ),
+    )
+
+    assert note is not None
+    assert "explicit local shell or terminal request" in note
+    assert "run_terminal_command" in note
+
+
+def test_routing_note_routes_structural_directory_request() -> None:
+    note = _build_request_routing_note(
+        user_input="src/unclaw/core/",
+        capability_summary=_structural_summary(
+            available_builtin_tool_names=("list_directory", "read_text_file"),
+            local_directory_listing_available=True,
+            local_file_read_available=True,
+        ),
+    )
+
+    assert note is not None
+    assert "explicit local directory inspection request" in note
+    assert "list_directory" in note
+
+
+def test_routing_note_routes_structural_file_request() -> None:
+    note = _build_request_routing_note(
+        user_input="src/unclaw/core/runtime.py",
+        capability_summary=_structural_summary(
+            available_builtin_tool_names=("read_text_file", "list_directory"),
+            local_file_read_available=True,
+            local_directory_listing_available=True,
+        ),
+    )
+
+    assert note is not None
+    assert "explicit local file inspection request" in note
+    assert "read_text_file" in note
+
+
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        "qui est Marine Leleu",
+        "who is Ada Lovelace",
+        "McFly et Carlito, fais leur bio complete",
+        "tell me everything you know about them",
+        "fais une recherche complete",
+    ],
+)
+def test_routing_note_returns_none_for_semantic_prompts_without_structural_hints(
+    user_input: str,
+) -> None:
+    note = _build_request_routing_note(
+        user_input=user_input,
         capability_summary=_web_capable_summary(),
     )
     assert note is None
-
-
-def test_routing_note_returns_none_for_recherche_complete() -> None:
-    note = _build_request_routing_note(
-        user_input="fais une recherche complète",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-def test_routing_note_returns_none_for_file_output_request() -> None:
-    note = _build_request_routing_note(
-        user_input="cherche puis écris une bio dans un fichier texte",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-def test_routing_note_returns_none_for_full_bio_en() -> None:
-    note = _build_request_routing_note(
-        user_input="write me a full biography please",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-def test_routing_note_returns_none_for_everything_you_know() -> None:
-    note = _build_request_routing_note(
-        user_input="tell me everything you know about them",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-# ---------------------------------------------------------------------------
-# _build_request_routing_note — duo/group semantic routing removed in Phase 3.7
-# ---------------------------------------------------------------------------
-
-
-def test_routing_note_for_duo_identity_returns_none() -> None:
-    note = _build_request_routing_note(
-        user_input="qui sont McFly et Carlito",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-def test_routing_note_for_duo_deep_search_returns_none() -> None:
-    note = _build_request_routing_note(
-        user_input="McFly et Carlito, fais leur bio complète",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-# ---------------------------------------------------------------------------
-# _build_request_routing_note — plain identity retry removed in Phase 3.7
-# ---------------------------------------------------------------------------
-
-
-def test_routing_note_plain_identity_returns_none() -> None:
-    note = _build_request_routing_note(
-        user_input="qui est Marine Leleu",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-def test_routing_note_plain_identity_en_returns_none() -> None:
-    note = _build_request_routing_note(
-        user_input="who is Ada Lovelace",
-        capability_summary=_web_capable_summary(),
-    )
-    assert note is None
-
-
-# ---------------------------------------------------------------------------
-# _build_post_tool_grounding_note — search_web escalation signal
-# ---------------------------------------------------------------------------
 
 
 def test_post_tool_note_names_search_web_as_deeper_path_after_fast_web() -> None:
@@ -285,7 +177,6 @@ def test_post_tool_note_names_search_web_as_deeper_path_after_fast_web() -> None
         tool_definitions=[FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINITION],
     )
     assert "search_web" in note
-    # Must describe search_web as deeper/richer than fast_web_search
     assert any(
         word in note.lower()
         for word in ("deeper", "richer", "full", "complete", "bio", "research")
@@ -298,13 +189,7 @@ def test_post_tool_note_explicitly_discourages_inflating_fast_web_to_full_bio() 
         tool_results=[fast_result],
         tool_definitions=[FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINITION],
     )
-    # Must warn against writing a full bio from the grounding note alone
     assert "fast_web_search" in note or "grounding" in note.lower()
-
-
-# ---------------------------------------------------------------------------
-# _build_post_tool_grounding_note — timeout/partial-failure note
-# ---------------------------------------------------------------------------
 
 
 def test_post_tool_note_includes_timeout_guidance_when_tool_timed_out() -> None:
@@ -316,7 +201,7 @@ def test_post_tool_note_includes_timeout_guidance_when_tool_timed_out() -> None:
         tool_results=[timed_out_result],
         tool_definitions=[SEARCH_WEB_DEFINITION],
     )
-    assert "timed out" in note.lower() or "timeout" in note.lower() or "partial" in note.lower()
+    assert any(word in note.lower() for word in ("timed out", "timeout", "partial"))
 
 
 def test_post_tool_note_no_timeout_guidance_when_no_timeout() -> None:
@@ -329,45 +214,33 @@ def test_post_tool_note_no_timeout_guidance_when_no_timeout() -> None:
         tool_results=[ok_result],
         tool_definitions=[SEARCH_WEB_DEFINITION],
     )
-    # No timeout — should not mention timeout fallback
     assert "timed out" not in note.lower()
 
 
-# ---------------------------------------------------------------------------
-# Factual discipline regression guard
-# ---------------------------------------------------------------------------
-
-
-def test_discipline_preserves_substantive_thin_fast_web_result_for_deep_bio_request() -> None:
+def test_discipline_preserves_substantive_thin_fast_web_result_reply() -> None:
     thin_result = _thin_fast_web_result("McFly et Carlito")
-    rich_invented_reply = (
-        "McFly et Carlito sont un duo de YouTubeurs français fondé en 2010. "
-        "Ils ont 8 millions d'abonnés, ont sorti plusieurs livres et animent "
-        "une émission de radio hebdomadaire depuis 2018."
+    rich_reply = (
+        "McFly et Carlito sont un duo de YouTubeurs francais fonde en 2010. "
+        "Ils ont 8 millions d'abonnes, ont sorti plusieurs livres et animent "
+        "une emission de radio hebdomadaire depuis 2018."
     )
     result = _apply_post_tool_reply_discipline(
-        reply=rich_invented_reply,
-        user_input="fais une bio complète de McFly et Carlito",
+        reply=rich_reply,
+        user_input="fais une bio complete de McFly et Carlito",
         tool_results=[thin_result],
     )
-    assert result == rich_invented_reply
+    assert result == rich_reply
 
 
 def test_discipline_does_not_clamp_acknowledged_limitation_reply() -> None:
     thin_result = _thin_fast_web_result()
-    honest_reply = "Je ne peux pas confirmer une bio complète depuis ce résultat rapide."
+    honest_reply = "Je ne peux pas confirmer une bio complete depuis ce resultat rapide."
     result = _apply_post_tool_reply_discipline(
         reply=honest_reply,
-        user_input="fais une bio complète",
+        user_input="fais une bio complete",
         tool_results=[thin_result],
     )
-    # The honest, limited reply should be preserved
     assert "confirmer" in result or "ne peux pas" in result
-
-
-# ---------------------------------------------------------------------------
-# Capability context: search_web as deep grounded path
-# ---------------------------------------------------------------------------
 
 
 def test_capability_context_describes_search_web_as_deep_path() -> None:
@@ -379,7 +252,6 @@ def test_capability_context_describes_search_web_as_deep_path() -> None:
     )
     context = build_runtime_capability_context(summary)
     assert "search_web" in context
-    # New guidance: search_web as deeper grounded path should appear
     assert "deeper" in context or "grounded" in context or "condenses" in context
 
 
@@ -391,13 +263,7 @@ def test_capability_context_includes_duo_joint_entity_guidance() -> None:
         model_can_call_tools=True,
     )
     context = build_runtime_capability_context(summary)
-    # Duo/joint entity guidance should appear in the fast_web_grounding section
     assert "duo" in context.lower() or "unit" in context.lower() or "together" in context.lower()
-
-
-# ---------------------------------------------------------------------------
-# No regression: existing phase1a/phase1b behavior preserved
-# ---------------------------------------------------------------------------
 
 
 def test_routing_note_is_none_when_tools_not_callable() -> None:
@@ -412,30 +278,7 @@ def test_routing_note_is_none_when_tools_not_callable() -> None:
         model_can_call_tools=False,
     )
     note = _build_request_routing_note(
-        user_input="fais une bio complète",
+        user_input="fais une bio complete",
         capability_summary=no_tool_summary,
     )
     assert note is None
-
-
-def test_routing_note_no_web_no_search_web_escalation_possible() -> None:
-    # When web_search is not available, deep search routing note should not appear
-    no_web_summary = RuntimeCapabilitySummary(
-        available_builtin_tool_names=(),
-        local_file_read_available=True,
-        local_directory_listing_available=True,
-        url_fetch_available=False,
-        web_search_available=False,
-        system_info_available=False,
-        memory_summary_available=False,
-        model_can_call_tools=True,
-    )
-    note = _build_request_routing_note(
-        user_input="fais une bio complète",
-        capability_summary=no_web_summary,
-    )
-    # No web tools → no web routing note
-    assert note is None or "search_web" not in note
-
-
-_CURRENT_REQUEST_ROUTING_NOTE_PREFIX = "Current request routing hint:"

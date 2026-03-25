@@ -35,7 +35,7 @@ def _build_native_runtime(project_root, set_profile_tool_mode):
     return session_manager, tracer, command_handler
 
 
-def test_native_first_pass_skips_entity_recentering_note_even_when_anchor_exists(
+def test_native_first_pass_leaves_miscentered_query_untouched_without_entity_heuristics(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -180,13 +180,13 @@ def test_native_first_pass_skips_entity_recentering_note_even_when_anchor_exists
 
         assert reply == "McFly et Carlito are a French YouTube comedy duo."
         assert call_count == 2
-        assert executed_queries == ["McFly et Carlito"]
+        assert executed_queries == ["Marty McFly and Carlito"]
         assert len(system_messages_by_call) == 2
     finally:
         session_manager.close()
 
 
-def test_native_legacy_retry_injects_entity_recentering_note_only_on_fallback(
+def test_native_legacy_retry_never_injects_entity_recentering_note(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -245,9 +245,8 @@ def test_native_legacy_retry_injects_entity_recentering_note_only_on_fallback(
                     "Current request routing hint:" in message
                     for message in system_messages
                 )
-                assert any(
-                    "Entity recentering hint:" in message
-                    and "McFly et Carlito" in message
+                assert all(
+                    "Entity recentering hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(

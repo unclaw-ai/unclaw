@@ -135,7 +135,7 @@ def test_post_fast_web_search_preserves_substantive_reply(
         session_manager.close()
 
 
-def test_corrected_ambiguity_stays_centered_on_next_turn(
+def test_corrected_ambiguity_is_no_longer_recentered_by_runtime_heuristics(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -264,8 +264,7 @@ def test_corrected_ambiguity_stays_centered_on_next_turn(
         assert reply == "McFly et Carlito are a French YouTube comedy duo."
         assert call_count == 2
         assert len(observed_tool_calls) == 1
-        assert "McFly et Carlito" in observed_tool_calls[0].arguments["query"]
-        assert "Marty" not in observed_tool_calls[0].arguments["query"]
+        assert observed_tool_calls[0].arguments["query"] == "Marty McFly and Carlito"
     finally:
         session_manager.close()
 
