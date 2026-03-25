@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 _ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
 _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
+_SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
+_WRITE_SUCCESS_TOOL_NAME = "write_text_file"
 
 
 def _build_session_memory_context_note(
@@ -64,6 +66,29 @@ def _build_session_goal_state_context_note(
         f"last_blocker={_format_goal_state_note_value(goal_state.last_blocker)}; "
         f"updated_at={_format_goal_state_note_value(goal_state.updated_at)}."
     )
+
+
+def _build_session_progress_ledger_context_note(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+) -> str | None:
+    ledger = session_manager.get_session_progress_ledger(session_id)
+    if not ledger:
+        return None
+
+    entries = " | ".join(
+        (
+            "["
+            f"status={_format_goal_state_note_value(entry.status)}; "
+            f"step={_format_goal_state_note_value(entry.step)}; "
+            f"detail={_format_goal_state_note_value(entry.detail)}; "
+            f"updated_at={_format_goal_state_note_value(entry.updated_at)}"
+            "]"
+        )
+        for entry in ledger
+    )
+    return f"{_SESSION_PROGRESS_LEDGER_NOTE_PREFIX} {entries}."
 
 
 def _build_local_access_control_note(
@@ -107,6 +132,38 @@ def _persist_session_goal_state_from_runtime_facts(
         status=status,
         current_step=latest_tool_result.tool_name,
         last_blocker=last_blocker,
+    )
+
+
+def _persist_session_progress_ledger_from_runtime_facts(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> None:
+    if not tool_results:
+        return
+
+    latest_tool_result = tool_results[-1]
+    status = "active"
+    detail = "tool succeeded"
+    if assistant_reply.strip() == turn_cancelled_reply.strip():
+        status = "blocked"
+        detail = "request cancelled before tool work completed"
+    elif latest_tool_result.success is True:
+        if latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME:
+            detail = "file write succeeded"
+    else:
+        status = "blocked"
+        detail = _build_progress_detail_from_failed_tool_result(latest_tool_result)
+
+    session_manager.persist_session_progress_entry(
+        session_id=session_id,
+        status=status,
+        step=latest_tool_result.tool_name,
+        detail=detail,
     )
 
 
@@ -314,3 +371,20 @@ def _format_goal_state_note_value(value: str | None) -> str:
     if value is None:
         return "none"
     return json.dumps(value, ensure_ascii=False)
+
+
+def _build_progress_detail_from_failed_tool_result(tool_result: ToolResult) -> str:
+    raw_detail = tool_result.error or tool_result.output_text
+    if not raw_detail:
+        return "tool failed"
+
+    normalized_detail = " ".join(raw_detail.split()).strip()
+    if not normalized_detail:
+        return "tool failed"
+
+    tool_prefix = f"Tool '{tool_result.tool_name}' "
+    if normalized_detail.startswith(tool_prefix):
+        stripped_detail = normalized_detail[len(tool_prefix) :].strip()
+        if stripped_detail:
+            return stripped_detail
+    return normalized_detail

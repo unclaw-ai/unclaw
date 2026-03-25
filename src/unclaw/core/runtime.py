@@ -153,6 +153,12 @@ def run_user_turn(
             session_manager=session_manager,
             session_id=session.id,
         )
+        progress_ledger_note = (
+            _runtime_support._build_session_progress_ledger_context_note(
+                session_manager=session_manager,
+                session_id=session.id,
+            )
+        )
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
@@ -187,6 +193,7 @@ def run_user_turn(
             for note in (
                 memory_context_note,
                 goal_state_note,
+                progress_ledger_note,
                 local_access_note,
             )
             if note is not None
@@ -423,6 +430,13 @@ def run_user_turn(
         session_manager=session_manager,
         session_id=session.id,
         user_input=user_input,
+        tool_results=turn_tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
+    )
+    _runtime_support._persist_session_progress_ledger_from_runtime_facts(
+        session_manager=session_manager,
+        session_id=session.id,
         tool_results=turn_tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,

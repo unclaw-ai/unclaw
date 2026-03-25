@@ -19,10 +19,14 @@ from unclaw.schemas.session import SessionRecord, SessionSummary
 from unclaw.settings import Settings
 
 _SESSION_GOAL_STATE_EVENT_TYPE = "session.goal_state.updated"
+_SESSION_PROGRESS_LEDGER_EVENT_TYPE = "session.progress.ledger.updated"
 _SESSION_GOAL_STATUS_VALUES = frozenset({"active", "blocked", "completed"})
 _SESSION_GOAL_MAX_CHARS = 240
 _SESSION_GOAL_STEP_MAX_CHARS = 80
 _SESSION_GOAL_BLOCKER_MAX_CHARS = 200
+_SESSION_PROGRESS_LEDGER_MAX_ENTRIES = 3
+_SESSION_PROGRESS_STEP_MAX_CHARS = 80
+_SESSION_PROGRESS_DETAIL_MAX_CHARS = 120
 
 
 class SessionManagerError(UnclawError):
@@ -37,6 +41,16 @@ class SessionGoalState:
     status: str
     current_step: str | None
     last_blocker: str | None
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionProgressEntry:
+    """Compact persisted progress entry for one session."""
+
+    status: str
+    step: str
+    detail: str
     updated_at: str
 
 
@@ -275,6 +289,78 @@ class SessionManager:
         )
         return goal_state
 
+    def get_session_progress_ledger(
+        self,
+        session_id: str | None = None,
+    ) -> tuple[SessionProgressEntry, ...]:
+        """Return the latest persisted progress ledger snapshot for one session."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        row = self.connection.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE session_id = ?
+              AND event_type = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (resolved_session_id, _SESSION_PROGRESS_LEDGER_EVENT_TYPE),
+        ).fetchone()
+        if row is None:
+            return ()
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str):
+            return ()
+        return _parse_session_progress_ledger(payload_json)
+
+    def persist_session_progress_entry(
+        self,
+        *,
+        status: str,
+        step: str,
+        detail: str,
+        session_id: str | None = None,
+    ) -> tuple[SessionProgressEntry, ...]:
+        """Append one compact progress entry and persist the bounded latest tail."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        if self.load_session(resolved_session_id) is None:
+            raise SessionManagerError(
+                f"Session '{resolved_session_id}' is not available."
+            )
+
+        timestamp = utc_now_iso()
+        next_entry = SessionProgressEntry(
+            status=_normalize_goal_status(status),
+            step=_normalize_bounded_text(
+                step,
+                field_name="step",
+                max_chars=_SESSION_PROGRESS_STEP_MAX_CHARS,
+                required=True,
+            ),
+            detail=_normalize_bounded_text(
+                detail,
+                field_name="detail",
+                max_chars=_SESSION_PROGRESS_DETAIL_MAX_CHARS,
+                required=True,
+            ),
+            updated_at=timestamp,
+        )
+        existing_entries = list(
+            self.get_session_progress_ledger(resolved_session_id)
+        )
+        ledger = tuple(
+            (existing_entries + [next_entry])[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :]
+        )
+        self.event_repository.add_event(
+            session_id=resolved_session_id,
+            event_type=_SESSION_PROGRESS_LEDGER_EVENT_TYPE,
+            level=EventLevel.INFO,
+            message="Session progress ledger updated.",
+            payload_json=_serialize_session_progress_ledger(ledger),
+            created_at=timestamp,
+        )
+        return ledger
+
     def _restore_current_session(self) -> None:
         sessions = self.session_repository.list_sessions()
         if not sessions:
@@ -358,6 +444,79 @@ def _parse_session_goal_state(payload_json: str) -> SessionGoalState | None:
         )
     except ValueError:
         return None
+
+
+def _serialize_session_progress_ledger(
+    ledger: tuple[SessionProgressEntry, ...],
+) -> str:
+    return json.dumps(
+        [
+            {
+                "status": entry.status,
+                "step": entry.step,
+                "detail": entry.detail,
+                "updated_at": entry.updated_at,
+            }
+            for entry in ledger
+        ],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parse_session_progress_ledger(
+    payload_json: str,
+) -> tuple[SessionProgressEntry, ...]:
+    try:
+        parsed = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return ()
+
+    if not isinstance(parsed, list):
+        return ()
+
+    entries: list[SessionProgressEntry] = []
+    for raw_entry in parsed:
+        if not isinstance(raw_entry, dict):
+            return ()
+
+        status = raw_entry.get("status")
+        step = raw_entry.get("step")
+        detail = raw_entry.get("detail")
+        updated_at = raw_entry.get("updated_at")
+        if (
+            not isinstance(status, str)
+            or not isinstance(step, str)
+            or not isinstance(detail, str)
+            or not isinstance(updated_at, str)
+            or not updated_at.strip()
+        ):
+            return ()
+
+        try:
+            entries.append(
+                SessionProgressEntry(
+                    status=_normalize_goal_status(status),
+                    step=_normalize_bounded_text(
+                        step,
+                        field_name="step",
+                        max_chars=_SESSION_PROGRESS_STEP_MAX_CHARS,
+                        required=True,
+                    ),
+                    detail=_normalize_bounded_text(
+                        detail,
+                        field_name="detail",
+                        max_chars=_SESSION_PROGRESS_DETAIL_MAX_CHARS,
+                        required=True,
+                    ),
+                    updated_at=" ".join(updated_at.split()).strip(),
+                )
+            )
+        except ValueError:
+            return ()
+
+    return tuple(entries[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :])
 
 
 def _normalize_goal_status(value: str) -> str:
