@@ -32,6 +32,7 @@ _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
     "I couldn't safely execute a tool request because the model returned an "
     "invalid tool payload. Please try again or rephrase the request."
 )
+_SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS = 3
 
 
 @dataclass(slots=True)
@@ -57,6 +58,7 @@ class _RuntimeToolGuardState:
     max_tool_calls_per_turn: int
     cancellation: RuntimeTurnCancellation | None = None
     tool_calls_started: int = 0
+    search_web_timeout_retry_used: bool = False
 
     def is_cancelled(self) -> bool:
         return self.cancellation is not None and self.cancellation.is_cancelled()
@@ -231,6 +233,13 @@ def _execute_runtime_tool_calls(
     )
     tool_results: list[ToolResult] = []
     for pending_call, tool_result, finished_at in resolved_results:
+        tool_result, finished_at = _maybe_retry_timed_out_search_web_result(
+            pending_call=pending_call,
+            tool_result=tool_result,
+            finished_at=finished_at,
+            tool_registry=tool_registry,
+            tool_guard_state=tool_guard_state,
+        )
         _finalize_runtime_tool_call(
             session_manager=session_manager,
             session_id=session_id,
@@ -275,25 +284,39 @@ def _start_pending_tool_executions(
             arguments=normalized_tool_call.arguments,
             skill_id=tool_registry.get_owner_skill_id(normalized_tool_call.tool_name),
         )
-        done_event = threading.Event()
-        pending_call = _PendingToolExecution(
+        pending_call = _launch_pending_tool_execution(
             tool_call=normalized_tool_call,
+            tool_registry=tool_registry,
             started_at=started_at,
-            done_event=done_event,
         )
-        pending_call.thread = threading.Thread(
-            target=_run_pending_tool_execution,
-            kwargs={
-                "pending_call": pending_call,
-                "tool_registry": tool_registry,
-            },
-            daemon=True,
-        )
-        pending_call.thread.start()
         pending_calls.append(pending_call)
 
     tool_guard_state.tool_calls_started += len(pending_calls)
     return pending_calls
+
+
+def _launch_pending_tool_execution(
+    *,
+    tool_call: ToolCall,
+    tool_registry: ToolRegistry,
+    started_at: float | None = None,
+) -> _PendingToolExecution:
+    done_event = threading.Event()
+    pending_call = _PendingToolExecution(
+        tool_call=tool_call,
+        started_at=perf_counter() if started_at is None else started_at,
+        done_event=done_event,
+    )
+    pending_call.thread = threading.Thread(
+        target=_run_pending_tool_execution,
+        kwargs={
+            "pending_call": pending_call,
+            "tool_registry": tool_registry,
+        },
+        daemon=True,
+    )
+    pending_call.thread.start()
+    return pending_call
 
 
 def _run_pending_tool_execution(
@@ -369,6 +392,73 @@ def _collect_pending_tool_results(
     )
 
 
+def _maybe_retry_timed_out_search_web_result(
+    *,
+    pending_call: _PendingToolExecution,
+    tool_result: ToolResult,
+    finished_at: float,
+    tool_registry: ToolRegistry,
+    tool_guard_state: _RuntimeToolGuardState,
+) -> tuple[ToolResult, float]:
+    if not _should_retry_timed_out_search_web_result(
+        pending_call=pending_call,
+        tool_result=tool_result,
+        tool_guard_state=tool_guard_state,
+    ):
+        return tool_result, finished_at
+
+    tool_guard_state.search_web_timeout_retry_used = True
+    tool_guard_state.tool_calls_started += 1
+    retry_pending_call = _launch_pending_tool_execution(
+        tool_call=_build_search_web_timeout_retry_tool_call(pending_call.tool_call),
+        tool_registry=tool_registry,
+    )
+    retry_result, retry_finished_at = _collect_pending_tool_results(
+        pending_calls=(retry_pending_call,),
+        tool_guard_state=tool_guard_state,
+    )[0][1:]
+    return retry_result, retry_finished_at
+
+
+def _should_retry_timed_out_search_web_result(
+    *,
+    pending_call: _PendingToolExecution,
+    tool_result: ToolResult,
+    tool_guard_state: _RuntimeToolGuardState,
+) -> bool:
+    if pending_call.tool_call.tool_name != "search_web":
+        return False
+    if tool_result.success is not False or not _tool_result_timed_out(tool_result):
+        return False
+    if tool_guard_state.is_cancelled():
+        return False
+    if tool_guard_state.search_web_timeout_retry_used:
+        return False
+    return (
+        tool_guard_state.tool_calls_started
+        < tool_guard_state.max_tool_calls_per_turn
+    )
+
+
+def _build_search_web_timeout_retry_tool_call(tool_call: ToolCall) -> ToolCall:
+    retry_arguments = dict(tool_call.arguments)
+    retry_arguments["max_results"] = _resolve_search_web_timeout_retry_max_results(
+        retry_arguments.get("max_results")
+    )
+    return ToolCall(
+        tool_name=tool_call.tool_name,
+        arguments=retry_arguments,
+    )
+
+
+def _resolve_search_web_timeout_retry_max_results(raw_value: Any) -> int:
+    if isinstance(raw_value, int) and not isinstance(raw_value, bool):
+        if raw_value <= 2:
+            return 1
+        return min(raw_value - 1, _SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS)
+    return _SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS
+
+
 def _build_timed_out_tool_result(
     tool_call: ToolCall,
     *,
@@ -381,6 +471,13 @@ def _build_timed_out_tool_result(
             f"{timeout_seconds:g} seconds."
         ),
     )
+
+
+def _tool_result_timed_out(tool_result: ToolResult) -> bool:
+    haystack = " ".join(
+        part for part in (tool_result.error, tool_result.output_text) if part
+    )
+    return "timed out" in haystack.casefold()
 
 
 def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
