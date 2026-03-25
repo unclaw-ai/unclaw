@@ -30,7 +30,7 @@ def _summary(**overrides) -> RuntimeCapabilitySummary:
 
 def test_routing_note_routes_direct_public_url_fetch_requests() -> None:
     note = _build_request_routing_note(
-        user_input="Open https://example.com and summarize it.",
+        user_input="https://example.com",
         capability_summary=_summary(
             available_builtin_tool_names=("fetch_url_text",),
             url_fetch_available=True,
@@ -83,7 +83,7 @@ def test_routing_note_returns_none_for_joint_entity_requests() -> None:
 
 def test_routing_note_routes_explicit_terminal_requests() -> None:
     note = _build_request_routing_note(
-        user_input="Run `ls -la` in the terminal.",
+        user_input="`ls -la`",
         capability_summary=_summary(
             available_builtin_tool_names=("run_terminal_command",),
             shell_command_execution_available=True,
@@ -95,23 +95,9 @@ def test_routing_note_routes_explicit_terminal_requests() -> None:
     assert "run_terminal_command" in note
 
 
-def test_routing_note_routes_system_info_requests() -> None:
-    note = _build_request_routing_note(
-        user_input="What is the local date and time on this machine?",
-        capability_summary=_summary(
-            available_builtin_tool_names=("system_info",),
-            system_info_available=True,
-        ),
-    )
-
-    assert note is not None
-    assert "obvious local machine or runtime question" in note
-    assert "system_info now" in note
-
-
 def test_routing_note_routes_directory_listing_requests() -> None:
     note = _build_request_routing_note(
-        user_input="List the contents of src/unclaw/core directory.",
+        user_input="src/unclaw/core/",
         capability_summary=_summary(
             available_builtin_tool_names=("list_directory", "read_text_file"),
             local_directory_listing_available=True,
@@ -127,7 +113,7 @@ def test_routing_note_routes_directory_listing_requests() -> None:
 
 def test_routing_note_routes_file_read_requests() -> None:
     note = _build_request_routing_note(
-        user_input="Read src/unclaw/core/runtime.py",
+        user_input="src/unclaw/core/runtime.py",
         capability_summary=_summary(
             available_builtin_tool_names=("read_text_file", "list_directory"),
             local_file_read_available=True,
@@ -149,9 +135,40 @@ def test_routing_note_returns_none_without_any_routing_signal() -> None:
     assert note is None
 
 
+@pytest.mark.parametrize(
+    "user_input",
+    [
+        "What is the local date and time on this machine?",
+        "Read the config file for me.",
+        "List the current directory contents.",
+        "Run a shell command to show my current directory.",
+    ],
+)
+def test_routing_note_returns_none_for_lexical_requests_without_structural_hints(
+    user_input: str,
+) -> None:
+    note = _build_request_routing_note(
+        user_input=user_input,
+        capability_summary=_summary(
+            available_builtin_tool_names=(
+                "system_info",
+                "read_text_file",
+                "list_directory",
+                "run_terminal_command",
+            ),
+            system_info_available=True,
+            local_file_read_available=True,
+            local_directory_listing_available=True,
+            shell_command_execution_available=True,
+        ),
+    )
+
+    assert note is None
+
+
 def test_routing_note_returns_none_when_matching_tool_is_unavailable() -> None:
     note = _build_request_routing_note(
-        user_input="What is the local date and time on this machine?",
+        user_input="https://example.com",
         capability_summary=_summary(),
     )
 
@@ -184,7 +201,7 @@ def test_routing_note_handles_accents_via_normalized_text_without_web_retry() ->
 
 def test_routing_note_preserves_current_limitation_wording_when_file_read_is_unavailable() -> None:
     note = _build_request_routing_note(
-        user_input="Read src/unclaw/core/runtime.py",
+        user_input="src/unclaw/core/runtime.py",
         capability_summary=_summary(
             available_builtin_tool_names=("list_directory",),
             local_directory_listing_available=True,

@@ -14,17 +14,6 @@ from unclaw.core.capabilities import RuntimeCapabilitySummary
 
 _CURRENT_REQUEST_ROUTING_NOTE_PREFIX = "Current request routing hint:"
 _URL_PATTERN = re.compile(r"https?://\S+", flags=re.IGNORECASE)
-_DIRECTORY_SCOPE_PATTERN = re.compile(
-    r"\b(?:directory|folder|dossier|repertoire|repo|repository|project tree|tree)\b"
-)
-_DIRECTORY_REQUEST_PATTERN = re.compile(
-    r"\b(?:list|show|inspect|check|browse|display|see|contents? of|files? in|"
-    r"what(?:'s| is) in|liste|montre|affiche|contenu de)\b"
-)
-_FILE_REQUEST_PATTERN = re.compile(
-    r"\b(?:read|open|inspect|summarize|show|display|print|view|cat|lire|ouvre|"
-    r"ouvrir|affiche|inspecte|resume|resumer|voir)\b"
-)
 _FILE_EXTENSION_HINT_PATTERN = re.compile(
     r"\.(?:txt|md|json|csv|py|js|ts|tsx|jsx|yaml|yml|toml|ini|cfg|log|"
     r"html|css|sh|sql)\b"
@@ -32,25 +21,10 @@ _FILE_EXTENSION_HINT_PATTERN = re.compile(
 _PATH_HINT_PATTERN = re.compile(
     r"(?:^|[\s`])(?:\.{1,2}/|~/|/)?[a-z0-9_.-]+(?:/[a-z0-9_.-]+)+/?"
 )
-_TERMINAL_REQUEST_PATTERN = re.compile(
-    r"\b(?:run|execute|launch)\b.*\b(?:terminal|shell|command|cmd|script)\b"
-)
 _TERMINAL_SNIPPET_PATTERN = re.compile(r"`[^`]+`")
-_SYSTEM_INFO_REQUEST_PATTERN = re.compile(
-    r"\b(?:operating system|os\b|hostname|locale|cpu|ram|memory|machine specs?|"
-    r"hardware specs?|system info|local machine|this machine|on this machine|"
-    r"local date|local time|local day|local datetime|today'?s date|current "
-    r"(?:local )?(?:date|time)|what day is it(?: today)?|what date is it(?: today)?|"
-    r"quelle heure locale|quelle date locale|quel jour sommes-nous|quel jour est-on|"
-    r"heure locale|date du jour)\b"
-)
 _IDENTITY_REQUEST_PATTERN = re.compile(
     r"\b(?:who is|who are|who's|qui est|qui sont|c'?est qui|bio de|biographie de|"
     r"biography of|bio of)\b"
-)
-_URL_FETCH_REQUEST_PATTERN = re.compile(
-    r"\b(?:fetch|open|read|inspect|summarize|check|visit|load|show|analyze|"
-    r"look at|ouvre|lire|inspecte|resume|resumer|visite)\b"
 )
 _FOLLOW_UP_ENTITYLESS_PATTERN = re.compile(
     r"\b(?:their|them|they|that|this|those|it|him|her|his|its|"
@@ -143,37 +117,15 @@ def _looks_like_follow_up_entity_request(
 def _looks_like_direct_url_fetch_request(
     *,
     user_input: str,
-    normalized_user_input: str,
 ) -> bool:
-    if _URL_PATTERN.search(user_input) is None:
-        return False
-    if _URL_FETCH_REQUEST_PATTERN.search(normalized_user_input) is not None:
-        return True
-    return any(
-        token in normalized_user_input
-        for token in (" url ", " link ", " page ", " site ")
-    )
+    return _URL_PATTERN.search(user_input) is not None
 
 
 def _looks_like_explicit_terminal_request(
     *,
     user_input: str,
-    normalized_user_input: str,
 ) -> bool:
-    if _TERMINAL_REQUEST_PATTERN.search(normalized_user_input) is not None:
-        return True
-    if _TERMINAL_SNIPPET_PATTERN.search(user_input) is None:
-        return False
-    return bool(
-        re.search(
-            r"\b(?:run|execute|launch|show|what does)\b",
-            normalized_user_input,
-        )
-    )
-
-
-def _looks_like_system_info_request(normalized_user_input: str) -> bool:
-    return _SYSTEM_INFO_REQUEST_PATTERN.search(normalized_user_input) is not None
+    return _TERMINAL_SNIPPET_PATTERN.search(user_input) is not None
 
 
 def _looks_like_identity_request(normalized_user_input: str) -> bool:
@@ -187,16 +139,22 @@ def _looks_like_local_directory_request(
 ) -> bool:
     if _URL_PATTERN.search(user_input) is not None:
         return False
-    if _DIRECTORY_REQUEST_PATTERN.search(normalized_user_input) is None:
+    path_hint = _PATH_HINT_PATTERN.search(normalized_user_input)
+    if path_hint is None:
         return False
-    if _DIRECTORY_SCOPE_PATTERN.search(normalized_user_input) is not None:
-        return True
-    if re.search(r"\b(?:files|contents?)\s+in\b", normalized_user_input) is not None:
-        return True
-    return (
-        _PATH_HINT_PATTERN.search(normalized_user_input) is not None
-        and _FILE_EXTENSION_HINT_PATTERN.search(normalized_user_input) is None
-    )
+    return _FILE_EXTENSION_HINT_PATTERN.search(path_hint.group(0)) is None
+
+
+def _looks_like_standalone_file_hint(user_input: str) -> bool:
+    stripped = user_input.strip().strip("`'\"")
+    if not stripped or any(character.isspace() for character in stripped):
+        return False
+    if _URL_PATTERN.search(stripped) is not None:
+        return False
+    if _FILE_EXTENSION_HINT_PATTERN.search(stripped) is None:
+        return False
+    base, _, _ = stripped.rpartition(".")
+    return bool(base) and any(character.isalnum() for character in base)
 
 
 def _looks_like_local_file_request(
@@ -206,13 +164,13 @@ def _looks_like_local_file_request(
 ) -> bool:
     if _URL_PATTERN.search(user_input) is not None:
         return False
-    if _FILE_REQUEST_PATTERN.search(normalized_user_input) is None:
-        return False
-    if _FILE_EXTENSION_HINT_PATTERN.search(normalized_user_input) is not None:
+    path_hint = _PATH_HINT_PATTERN.search(normalized_user_input)
+    if (
+        path_hint is not None
+        and _FILE_EXTENSION_HINT_PATTERN.search(path_hint.group(0)) is not None
+    ):
         return True
-    if _PATH_HINT_PATTERN.search(normalized_user_input) is None:
-        return False
-    return bool(re.search(r"\b(?:file|fichier)\b", normalized_user_input))
+    return _looks_like_standalone_file_hint(user_input)
 
 
 def _looks_like_multi_entity_request(user_input: str) -> bool:
@@ -279,7 +237,6 @@ def _build_request_routing_note(
         capability_summary.url_fetch_available
         and _looks_like_direct_url_fetch_request(
             user_input=user_input,
-            normalized_user_input=normalized_user_input,
         )
     ):
         return (
@@ -292,7 +249,6 @@ def _build_request_routing_note(
         capability_summary.shell_command_execution_available
         and _looks_like_explicit_terminal_request(
             user_input=user_input,
-            normalized_user_input=normalized_user_input,
         )
     ):
         return (
@@ -300,17 +256,6 @@ def _build_request_routing_note(
             "this is an explicit local shell or terminal request. Call "
             "run_terminal_command with the requested command before explaining "
             "what you would do."
-        )
-
-    if (
-        capability_summary.system_info_available
-        and _looks_like_system_info_request(normalized_user_input)
-    ):
-        return (
-            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-            "this is an obvious local machine or runtime question. Call "
-            "system_info now and answer from its output instead of guessing or "
-            "asking whether you should check."
         )
 
     if _looks_like_local_directory_request(

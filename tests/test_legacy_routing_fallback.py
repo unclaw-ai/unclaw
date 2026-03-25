@@ -519,7 +519,7 @@ def test_native_no_legacy_routing_note_means_no_retry(
     ("user_input", "tool_definition", "tool_call", "note_fragment"),
     [
         (
-            "Fetch https://example.com and summarize it.",
+            "https://example.com",
             FETCH_URL_TEXT_DEFINITION,
             ToolCall(
                 tool_name="fetch_url_text",
@@ -528,7 +528,7 @@ def test_native_no_legacy_routing_note_means_no_retry(
             "Current request routing hint: the user gave a specific public URL.",
         ),
         (
-            "Run `pwd` in the terminal.",
+            "`pwd`",
             RUN_TERMINAL_COMMAND_DEFINITION,
             ToolCall(
                 tool_name="run_terminal_command",
@@ -537,13 +537,7 @@ def test_native_no_legacy_routing_note_means_no_retry(
             "Current request routing hint: this is an explicit local shell or terminal request.",
         ),
         (
-            "What is the local date and time on this machine?",
-            SYSTEM_INFO_DEFINITION,
-            ToolCall(tool_name="system_info", arguments={}),
-            "Current request routing hint: this is an obvious local machine or runtime question.",
-        ),
-        (
-            "List the contents of src/unclaw/core directory.",
+            "src/unclaw/core/",
             LIST_DIRECTORY_DEFINITION,
             ToolCall(
                 tool_name="list_directory",
@@ -552,7 +546,7 @@ def test_native_no_legacy_routing_note_means_no_retry(
             "Current request routing hint: this is an explicit local directory inspection request.",
         ),
         (
-            "Read src/unclaw/core/runtime.py",
+            "src/unclaw/core/runtime.py",
             READ_TEXT_FILE_DEFINITION,
             ToolCall(
                 tool_name="read_text_file",
@@ -668,6 +662,106 @@ def test_native_legacy_routing_retry_recovers_operational_tool_call(
 
         assert reply == f"Recovered reply after {tool_call.tool_name}."
         assert call_count == 3
+        assert build_calls == [user_input]
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize(
+    ("user_input", "tool_definition"),
+    [
+        ("What is the local date and time on this machine?", SYSTEM_INFO_DEFINITION),
+        ("Read the config file for me.", READ_TEXT_FILE_DEFINITION),
+        ("List the current directory contents.", LIST_DIRECTORY_DEFINITION),
+        (
+            "Run a shell command to show my current directory.",
+            RUN_TERMINAL_COMMAND_DEFINITION,
+        ),
+    ],
+)
+def test_native_legacy_routing_retry_skips_lexical_requests_without_structural_hints(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    user_input: str,
+    tool_definition,
+) -> None:
+    project_root = make_temp_project()
+    session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    build_calls = _track_legacy_routing_note_builder(monkeypatch)
+    call_count = 0
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        tool_definition,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Executed {call.tool_name}.",
+        ),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            call_count += 1
+            system_messages = [
+                message.content for message in messages if message.role is LLMRole.SYSTEM
+            ]
+            assert all(
+                "Current request routing hint:" not in message
+                for message in system_messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Direct answer without any retry.",
+                created_at="2026-03-25T09:30:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            user_input,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=user_input,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Direct answer without any retry."
+        assert call_count == 1
         assert build_calls == [user_input]
     finally:
         session_manager.close()
