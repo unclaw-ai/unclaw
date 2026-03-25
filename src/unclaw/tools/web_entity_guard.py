@@ -82,7 +82,7 @@ def _guard_search_tool_call(
     if not isinstance(query, str) or not query.strip():
         return tool_call
 
-    if not _entity_drift_detected(query, user_entity_surface):
+    if not _literal_entity_preservation_needed(query, user_entity_surface):
         return tool_call
 
     corrected_query = _build_corrected_query(query, user_entity_surface)
@@ -90,6 +90,47 @@ def _guard_search_tool_call(
         tool_call,
         arguments={**tool_call.arguments, "query": corrected_query},
     )
+
+
+def _literal_entity_preservation_needed(
+    model_query: str,
+    user_entity_surface: str,
+) -> bool:
+    """Return True only for execution-time literal entity preservation.
+
+    This is the narrow mutation gate used by ``apply_entity_guard_to_tool_calls``.
+    It only restores the user's literal surface when a guarded search query
+    clearly contains a different proper-name-like entity.
+
+    Unlike the broader legacy drift helper below, this path does not waive
+    correction for trailing single-letter noise. If the user explicitly typed a
+    literal surface, the execution guard preserves that literal text.
+    """
+    if not user_entity_surface or not model_query:
+        return False
+
+    user_entity_folded = _fold_for_match(user_entity_surface)
+    model_query_folded = _fold_for_match(model_query)
+
+    if user_entity_folded in model_query_folded:
+        return False
+
+    model_discipline = _analyze_query_discipline(model_query)
+    if not model_discipline.entity_surface:
+        return False
+
+    has_proper_noun = any(
+        tok[0].isupper()
+        for tok in model_discipline.entity_surface.split()
+        if tok and tok[0].isalpha()
+    )
+    if not has_proper_noun and '"' not in model_discipline.entity_surface:
+        return False
+
+    if model_discipline.normalized_entity == user_entity_folded:
+        return False
+
+    return True
 
 
 def _entity_drift_detected(model_query: str, user_entity_surface: str) -> bool:
