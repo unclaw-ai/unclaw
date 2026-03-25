@@ -26,6 +26,7 @@ _ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
 _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 _SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
+_SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session task continuity:"
 _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
 
 
@@ -92,6 +93,44 @@ def _build_session_progress_ledger_context_note(
         for entry in ledger
     )
     return f"{_SESSION_PROGRESS_LEDGER_NOTE_PREFIX} {entries}."
+
+
+def _build_session_task_continuity_note(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+) -> str | None:
+    goal_state = session_manager.get_session_goal_state(session_id)
+    if goal_state is None:
+        return None
+
+    parts = [
+        f"{_SESSION_TASK_CONTINUITY_NOTE_PREFIX} "
+        f"goal={_format_goal_state_note_value(goal_state.goal)}",
+        f"status={_format_goal_state_note_value(goal_state.status)}",
+    ]
+    if goal_state.current_step is not None:
+        parts.append(
+            f"current_step={_format_goal_state_note_value(goal_state.current_step)}"
+        )
+
+    if goal_state.status == "blocked" and goal_state.last_blocker is not None:
+        parts.append(
+            f"last_blocker={_format_goal_state_note_value(goal_state.last_blocker)}"
+        )
+    elif goal_state.status == "active":
+        progress_ledger = session_manager.get_session_progress_ledger(session_id)
+        if progress_ledger:
+            latest_entry = progress_ledger[-1]
+            parts.append(
+                "latest_progress=["
+                f"status={_format_goal_state_note_value(latest_entry.status)}; "
+                f"step={_format_goal_state_note_value(latest_entry.step)}; "
+                f"detail={_format_goal_state_note_value(latest_entry.detail)}"
+                "]"
+            )
+
+    return "; ".join(parts) + "."
 
 
 def _build_local_access_control_note(

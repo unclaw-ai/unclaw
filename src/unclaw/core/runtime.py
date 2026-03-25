@@ -149,15 +149,9 @@ def run_user_turn(
             command_handler=command_handler,
             session_id=session.id,
         )
-        goal_state_note = _runtime_support._build_session_goal_state_context_note(
+        task_continuity_note = _runtime_support._build_session_task_continuity_note(
             session_manager=session_manager,
             session_id=session.id,
-        )
-        progress_ledger_note = (
-            _runtime_support._build_session_progress_ledger_context_note(
-                session_manager=session_manager,
-                session_id=session.id,
-            )
         )
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
@@ -192,8 +186,7 @@ def run_user_turn(
             note
             for note in (
                 memory_context_note,
-                goal_state_note,
-                progress_ledger_note,
+                task_continuity_note,
                 local_access_note,
             )
             if note is not None
@@ -315,6 +308,7 @@ def run_user_turn(
                             note
                             for note in (
                                 memory_context_note,
+                                task_continuity_note,
                                 local_access_note,
                                 legacy_request_routing_note,
                                 entity_recentering_note,

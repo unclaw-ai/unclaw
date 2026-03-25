@@ -7,7 +7,7 @@ import pytest
 
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.runtime import run_user_turn
-from unclaw.core.runtime_support import _build_session_goal_state_context_note
+from unclaw.core.runtime_support import _build_session_task_continuity_note
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
@@ -543,7 +543,7 @@ def test_existing_goal_state_is_preserved_after_later_one_shot_fast_web_search_t
         session_manager.close()
 
 
-def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
+def test_later_turn_injects_compact_completed_task_continuity_note_without_extra_model_call(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -640,7 +640,7 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session goal state:")
+            not message.startswith("Session task continuity:")
             for message in first_turn_system_messages
         )
 
@@ -649,16 +649,23 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             for message in captured_messages[2]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
-        goal_notes = [
+        continuity_notes = [
             message
             for message in second_turn_system_messages
-            if message.startswith("Session goal state:")
+            if message.startswith("Session task continuity:")
         ]
-        assert len(goal_notes) == 1
-        assert 'goal="Write a short local note file."' in goal_notes[0]
-        assert 'status="completed"' in goal_notes[0]
-        assert 'current_step="write_text_file"' in goal_notes[0]
-        assert "last_blocker=none" in goal_notes[0]
+        assert len(continuity_notes) == 1
+        assert all(
+            not message.startswith("Session goal state:")
+            and not message.startswith("Session progress ledger:")
+            for message in second_turn_system_messages
+        )
+        assert 'goal="Write a short local note file."' in continuity_notes[0]
+        assert 'status="completed"' in continuity_notes[0]
+        assert 'current_step="write_text_file"' in continuity_notes[0]
+        assert "last_blocker=" not in continuity_notes[0]
+        assert "latest_progress=" not in continuity_notes[0]
+        assert "\n" not in continuity_notes[0]
     finally:
         session_manager.close()
 
@@ -720,7 +727,7 @@ def test_chat_only_sessions_remain_unchanged_without_goal_state(
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session goal state:")
+            not message.startswith("Session task continuity:")
             for message in system_messages
         )
         event_types = [
@@ -809,17 +816,20 @@ def test_session_goal_state_stays_bounded_and_tracks_runtime_blockers(
         assert len(goal_state.goal) <= 240
         assert len(goal_state.goal) < len(long_prompt)
 
-        goal_note = _build_session_goal_state_context_note(
+        continuity_note = _build_session_task_continuity_note(
             session_manager=session_manager,
             session_id=session.id,
         )
-        assert goal_note is not None
-        assert len(goal_note) < 700
-        assert "Earlier conversation fragment" not in goal_note
-        assert 'status="blocked"' in goal_note
+        assert continuity_note is not None
+        assert continuity_note.startswith("Session task continuity:")
+        assert len(continuity_note) < 600
+        assert "Earlier conversation fragment" not in continuity_note
+        assert 'status="blocked"' in continuity_note
+        assert 'current_step="system_info"' in continuity_note
         assert (
             'last_blocker="Tool \'system_info\' timed out after 5 seconds."'
-            in goal_note
+            in continuity_note
         )
+        assert "latest_progress=" not in continuity_note
     finally:
         session_manager.close()
