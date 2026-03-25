@@ -115,11 +115,63 @@ def _turn_qualifies_for_session_goal_state_persistence(
     assistant_reply: str,
     turn_cancelled_reply: str,
 ) -> bool:
+    return _turn_may_create_session_goal_state(
+        session_manager=session_manager,
+        session_id=session_id,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ) or _turn_may_update_existing_session_goal_state(
+        session_manager=session_manager,
+        session_id=session_id,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    )
+
+
+def _turn_may_create_session_goal_state(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if session_manager.get_session_goal_state(session_id) is not None:
+        return False
+    return _turn_has_task_like_runtime_facts(
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    )
+
+
+def _turn_may_update_existing_session_goal_state(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if session_manager.get_session_goal_state(session_id) is None:
+        return False
+    return _turn_has_task_like_runtime_facts(
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    )
+
+
+def _turn_has_task_like_runtime_facts(
+    *,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
     if not tool_results:
         return False
-
-    if session_manager.get_session_goal_state(session_id) is not None:
-        return True
 
     latest_tool_result = tool_results[-1]
     if len(tool_results) >= 2:
