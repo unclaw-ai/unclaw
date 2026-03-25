@@ -15,7 +15,7 @@ from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
-from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
+from unclaw.tools.file_tools import READ_TEXT_FILE_DEFINITION, WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
 from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINITION
@@ -1125,6 +1125,478 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
         assert "last_blocker=" not in continuity_notes[0]
         assert "latest_progress=" not in continuity_notes[0]
         assert "\n" not in continuity_notes[0]
+    finally:
+        session_manager.close()
+
+
+def test_blocked_task_resume_turn_keeps_original_goal_text_and_can_complete(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "resumed-session-goal-note.txt"
+    source_path = project_root / "data" / "files" / "resume-source.txt"
+    tool_registry = ToolRegistry()
+    captured_messages: list[list[object]] = []
+
+    def _read_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        if not path.exists():
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error=f"File not found: {path}",
+            )
+
+        content = path.read_text(encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=content,
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(READ_TEXT_FILE_DEFINITION, _read_tool)
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("read_text_file", {"path": str(source_path)}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="Please try again.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response("read_text_file", {"path": str(source_path)}),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "session note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Read the local source note, then write a short local note file."
+    second_prompt = "Please continue working on it."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("Recovered local source note.", encoding="utf-8")
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+        assert second_reply == "I saved the note locally."
+        assert fake_provider.call_count() == 5
+        assert goal_state is not None
+        assert goal_state.goal == first_prompt
+        assert goal_state.status == "completed"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker is None
+        assert output_path.read_text(encoding="utf-8") == "session note"
+
+        second_turn_system_messages = [
+            message.content
+            for message in captured_messages[2]
+            if getattr(message, "role", None) is LLMRole.SYSTEM
+        ]
+        continuity_notes = [
+            message
+            for message in second_turn_system_messages
+            if message.startswith("Session task continuity:")
+        ]
+        assert len(continuity_notes) == 1
+        assert 'goal="Read the local source note, then write a short local note file."' in (
+            continuity_notes[0]
+        )
+        assert 'status="blocked"' in continuity_notes[0]
+        assert 'current_step="read_text_file"' in continuity_notes[0]
+        assert f'last_blocker="File not found: {source_path}"' in (
+            continuity_notes[0]
+        )
+    finally:
+        session_manager.close()
+
+
+def test_active_task_resume_turn_keeps_original_goal_text_and_can_complete(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "active-session-goal-note.txt"
+    source_path = project_root / "data" / "files" / "active-source.txt"
+    tool_registry = ToolRegistry()
+    captured_messages: list[list[object]] = []
+    source_path.parent.mkdir(parents=True, exist_ok=True)
+    source_path.write_text("Local source note for the active task.", encoding="utf-8")
+    tool_registry.register(
+        SYSTEM_INFO_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="OS: ExampleOS 1.0",
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=Path(str(call.arguments["path"])).read_text(encoding="utf-8"),
+            payload={
+                "path": str(call.arguments["path"]),
+                "size": len(
+                    Path(str(call.arguments["path"])).read_text(encoding="utf-8")
+                ),
+            },
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("system_info", {}),
+        _tool_call_response("read_text_file", {"path": str(source_path)}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I gathered the local context for the note.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "session note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = (
+        "Inspect the machine, read the local source note, then write a short local note file."
+    )
+    second_prompt = "Finish the same task."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == "I gathered the local context for the note."
+        assert second_reply == "I saved the note locally."
+        assert fake_provider.call_count() == 5
+        assert goal_state is not None
+        assert goal_state.goal == first_prompt
+        assert goal_state.status == "completed"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker is None
+        assert output_path.read_text(encoding="utf-8") == "session note"
+
+        second_turn_system_messages = [
+            message.content
+            for message in captured_messages[3]
+            if getattr(message, "role", None) is LLMRole.SYSTEM
+        ]
+        continuity_notes = [
+            message
+            for message in second_turn_system_messages
+            if message.startswith("Session task continuity:")
+        ]
+        assert len(continuity_notes) == 1
+        assert (
+            'goal="Inspect the machine, read the local source note, then write a short local note file."'
+            in continuity_notes[0]
+        )
+        assert 'status="active"' in continuity_notes[0]
+        assert 'current_step="read_text_file"' in continuity_notes[0]
+        assert (
+            'latest_progress=[status="active"; step="read_text_file"; '
+            'detail="tool succeeded"]'
+            in continuity_notes[0]
+        )
+    finally:
+        session_manager.close()
+
+
+def test_blocked_task_retry_turn_keeps_original_goal_text_and_blocked_state(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    tool_registry = ToolRegistry()
+    missing_path = project_root / "data" / "files" / "retry-source.txt"
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error=f"File not found: {call.arguments['path']}",
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("read_text_file", {"path": str(missing_path)}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="Please try again.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response("read_text_file", {"path": str(missing_path)}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="Please try again.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Read the local source note, then write a short local note file."
+    second_prompt = "Try the same task again."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+        assert second_reply == first_reply
+        assert fake_provider.call_count() == 4
+        assert goal_state is not None
+        assert goal_state.goal == first_prompt
+        assert goal_state.status == "blocked"
+        assert goal_state.current_step == "read_text_file"
+        assert goal_state.last_blocker == f"File not found: {missing_path}"
+    finally:
+        session_manager.close()
+
+
+def test_blocked_task_can_be_replaced_by_clearly_new_successful_task(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "new-session-goal-note.txt"
+    missing_path = project_root / "data" / "files" / "replacement-source.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error=f"File not found: {call.arguments['path']}",
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("read_text_file", {"path": str(missing_path)}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="Please try again.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "fresh note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Read the local source note, then write a short local note file."
+    second_prompt = "Write a short standalone local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+        assert second_reply == "I saved the note locally."
+        assert fake_provider.call_count() == 4
+        assert goal_state is not None
+        assert goal_state.goal == second_prompt
+        assert goal_state.status == "completed"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker is None
+        assert output_path.read_text(encoding="utf-8") == "fresh note"
     finally:
         session_manager.close()
 

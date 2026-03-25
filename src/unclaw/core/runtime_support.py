@@ -14,7 +14,7 @@ from unclaw.core.reply_discipline import (
     _search_web_result_is_thin,
     _tool_result_timed_out,
 )
-from unclaw.core.session_manager import SessionManager
+from unclaw.core.session_manager import SessionGoalState, SessionManager
 from unclaw.constants import RUNTIME_ERROR_REPLY
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.tools.contracts import ToolDefinition, ToolResult
@@ -284,6 +284,84 @@ def _turn_should_mark_goal_state_completed(
     )
 
 
+def _resolve_session_goal_text_for_runtime_persistence(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> str:
+    existing_goal_state = session_manager.get_session_goal_state(session_id)
+    if existing_goal_state is None:
+        return user_input
+
+    if existing_goal_state.status == "active":
+        return existing_goal_state.goal
+
+    if existing_goal_state.status != "blocked":
+        return user_input
+
+    if _turn_clearly_replaces_blocked_session_goal_state(
+        session_manager=session_manager,
+        session_id=session_id,
+        goal_state=existing_goal_state,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
+        return user_input
+
+    return existing_goal_state.goal
+
+
+def _turn_clearly_replaces_blocked_session_goal_state(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    goal_state: SessionGoalState,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if not _turn_should_mark_goal_state_completed(
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
+        return False
+
+    prior_runtime_steps = _collect_session_goal_runtime_steps(
+        session_manager=session_manager,
+        session_id=session_id,
+        goal_state=goal_state,
+    )
+    if not prior_runtime_steps:
+        return False
+
+    current_turn_tool_names = {tool_result.tool_name for tool_result in tool_results}
+    return prior_runtime_steps.isdisjoint(current_turn_tool_names)
+
+
+def _collect_session_goal_runtime_steps(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    goal_state: SessionGoalState,
+) -> frozenset[str]:
+    runtime_steps = set()
+    if isinstance(goal_state.current_step, str) and goal_state.current_step:
+        runtime_steps.add(goal_state.current_step)
+
+    runtime_steps.update(
+        entry.step
+        for entry in session_manager.get_session_progress_ledger(session_id)
+        if isinstance(entry.step, str) and entry.step
+    )
+    return frozenset(runtime_steps)
+
+
 def _persist_session_goal_state_from_runtime_facts(
     *,
     session_manager: SessionManager,
@@ -346,9 +424,18 @@ def _persist_session_goal_state_from_runtime_facts(
         status = "blocked"
         last_blocker = latest_tool_result.error or latest_tool_result.output_text
 
+    goal_text = _resolve_session_goal_text_for_runtime_persistence(
+        session_manager=session_manager,
+        session_id=session_id,
+        user_input=user_input,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    )
+
     session_manager.persist_session_goal_state(
         session_id=session_id,
-        goal=user_input,
+        goal=goal_text,
         status=status,
         current_step=current_step,
         last_blocker=last_blocker,
