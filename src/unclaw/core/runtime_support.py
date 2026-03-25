@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+import json
 from typing import TYPE_CHECKING, Any
 
 from unclaw.core.command_handler import CommandHandler
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 _ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
+_SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 
 
 def _build_session_memory_context_note(
@@ -45,6 +47,25 @@ def _build_session_memory_context_note(
     return normalized_note or None
 
 
+def _build_session_goal_state_context_note(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+) -> str | None:
+    goal_state = session_manager.get_session_goal_state(session_id)
+    if goal_state is None:
+        return None
+
+    return (
+        f"{_SESSION_GOAL_STATE_NOTE_PREFIX} "
+        f"goal={_format_goal_state_note_value(goal_state.goal)}; "
+        f"status={_format_goal_state_note_value(goal_state.status)}; "
+        f"current_step={_format_goal_state_note_value(goal_state.current_step)}; "
+        f"last_blocker={_format_goal_state_note_value(goal_state.last_blocker)}; "
+        f"updated_at={_format_goal_state_note_value(goal_state.updated_at)}."
+    )
+
+
 def _build_local_access_control_note(
     *,
     command_handler: CommandHandler,
@@ -55,6 +76,37 @@ def _build_local_access_control_note(
         f"('{preset_name}') only changes elevated file and terminal boundaries. "
         "It never disables system_info, web tools, session history, long-term "
         "memory, or active skill tools when the active model profile can call tools."
+    )
+
+
+def _persist_session_goal_state_from_runtime_facts(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> None:
+    if not tool_results:
+        return
+
+    latest_tool_result = tool_results[-1]
+    last_blocker: str | None = None
+    status = "active"
+    if assistant_reply.strip() == turn_cancelled_reply.strip():
+        status = "blocked"
+        last_blocker = turn_cancelled_reply
+    elif latest_tool_result.success is False:
+        status = "blocked"
+        last_blocker = latest_tool_result.error or latest_tool_result.output_text
+
+    session_manager.persist_session_goal_state(
+        session_id=session_id,
+        goal=user_input,
+        status=status,
+        current_step=latest_tool_result.tool_name,
+        last_blocker=last_blocker,
     )
 
 
@@ -256,3 +308,9 @@ def _build_model_failure_reply(error: ModelCallFailedError) -> str:
     if message:
         return message
     return RUNTIME_ERROR_REPLY
+
+
+def _format_goal_state_note_value(value: str | None) -> str:
+    if value is None:
+        return "none"
+    return json.dumps(value, ensure_ascii=False)

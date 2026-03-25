@@ -149,6 +149,10 @@ def run_user_turn(
             command_handler=command_handler,
             session_id=session.id,
         )
+        goal_state_note = _runtime_support._build_session_goal_state_context_note(
+            session_manager=session_manager,
+            session_id=session.id,
+        )
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
@@ -182,6 +186,7 @@ def run_user_turn(
             note
             for note in (
                 memory_context_note,
+                goal_state_note,
                 local_access_note,
             )
             if note is not None
@@ -413,6 +418,14 @@ def run_user_turn(
         MessageRole.ASSISTANT,
         assistant_reply,
         session_id=session.id,
+    )
+    _runtime_support._persist_session_goal_state_from_runtime_facts(
+        session_manager=session_manager,
+        session_id=session.id,
+        user_input=user_input,
+        tool_results=turn_tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
     )
     active_tracer.trace_assistant_reply_persisted(
         session_id=session.id,

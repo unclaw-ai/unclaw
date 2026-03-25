@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -10,14 +11,33 @@ from typing import Self
 from unclaw.db.repositories import EventRepository, MessageRepository, SessionRepository
 from unclaw.db.sqlite import initialize_schema, open_connection
 from unclaw.errors import UnclawError
+from unclaw.llm.base import utc_now_iso
 from unclaw.memory.chat_store import ChatMemoryStore
 from unclaw.schemas.chat import ChatMessage, MessageRole
+from unclaw.schemas.events import EventLevel
 from unclaw.schemas.session import SessionRecord, SessionSummary
 from unclaw.settings import Settings
+
+_SESSION_GOAL_STATE_EVENT_TYPE = "session.goal_state.updated"
+_SESSION_GOAL_STATUS_VALUES = frozenset({"active", "blocked", "completed"})
+_SESSION_GOAL_MAX_CHARS = 240
+_SESSION_GOAL_STEP_MAX_CHARS = 80
+_SESSION_GOAL_BLOCKER_MAX_CHARS = 200
 
 
 class SessionManagerError(UnclawError):
     """Raised when session lifecycle operations fail."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionGoalState:
+    """Compact persisted goal state for one session."""
+
+    goal: str
+    status: str
+    current_step: str | None
+    last_blocker: str | None
+    updated_at: str
 
 
 @dataclass(slots=True)
@@ -184,6 +204,77 @@ class SessionManager:
             raise SessionManagerError("No active session is available.")
         return self.message_repository.list_messages(resolved_session_id)
 
+    def get_session_goal_state(
+        self,
+        session_id: str | None = None,
+    ) -> SessionGoalState | None:
+        """Return the latest persisted goal state for one session, if present."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        row = self.connection.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE session_id = ?
+              AND event_type = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (resolved_session_id, _SESSION_GOAL_STATE_EVENT_TYPE),
+        ).fetchone()
+        if row is None:
+            return None
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str):
+            return None
+        return _parse_session_goal_state(payload_json)
+
+    def persist_session_goal_state(
+        self,
+        *,
+        goal: str,
+        status: str,
+        current_step: str | None = None,
+        last_blocker: str | None = None,
+        session_id: str | None = None,
+    ) -> SessionGoalState:
+        """Persist one compact goal-state snapshot for a session."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        if self.load_session(resolved_session_id) is None:
+            raise SessionManagerError(
+                f"Session '{resolved_session_id}' is not available."
+            )
+
+        timestamp = utc_now_iso()
+        goal_state = SessionGoalState(
+            goal=_normalize_bounded_text(
+                goal,
+                field_name="goal",
+                max_chars=_SESSION_GOAL_MAX_CHARS,
+                required=True,
+            ),
+            status=_normalize_goal_status(status),
+            current_step=_normalize_bounded_text(
+                current_step,
+                field_name="current_step",
+                max_chars=_SESSION_GOAL_STEP_MAX_CHARS,
+            ),
+            last_blocker=_normalize_bounded_text(
+                last_blocker,
+                field_name="last_blocker",
+                max_chars=_SESSION_GOAL_BLOCKER_MAX_CHARS,
+            ),
+            updated_at=timestamp,
+        )
+        self.event_repository.add_event(
+            session_id=resolved_session_id,
+            event_type=_SESSION_GOAL_STATE_EVENT_TYPE,
+            level=EventLevel.INFO,
+            message="Session goal state updated.",
+            payload_json=_serialize_session_goal_state(goal_state),
+            created_at=timestamp,
+        )
+        return goal_state
+
     def _restore_current_session(self) -> None:
         sessions = self.session_repository.list_sessions()
         if not sessions:
@@ -198,3 +289,102 @@ class SessionManager:
     def _default_session_title(self) -> str:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         return f"Session {timestamp}"
+
+    def _resolve_session_id(self, session_id: str | None) -> str:
+        resolved_session_id = session_id or self.current_session_id
+        if resolved_session_id is None:
+            raise SessionManagerError("No active session is available.")
+        return resolved_session_id
+
+
+def _serialize_session_goal_state(goal_state: SessionGoalState) -> str:
+    return json.dumps(
+        {
+            "goal": goal_state.goal,
+            "status": goal_state.status,
+            "current_step": goal_state.current_step,
+            "last_blocker": goal_state.last_blocker,
+            "updated_at": goal_state.updated_at,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _parse_session_goal_state(payload_json: str) -> SessionGoalState | None:
+    try:
+        parsed = json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    goal = parsed.get("goal")
+    status = parsed.get("status")
+    current_step = parsed.get("current_step")
+    last_blocker = parsed.get("last_blocker")
+    updated_at = parsed.get("updated_at")
+    if not isinstance(goal, str) or not isinstance(status, str):
+        return None
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        return None
+    if current_step is not None and not isinstance(current_step, str):
+        return None
+    if last_blocker is not None and not isinstance(last_blocker, str):
+        return None
+
+    try:
+        return SessionGoalState(
+            goal=_normalize_bounded_text(
+                goal,
+                field_name="goal",
+                max_chars=_SESSION_GOAL_MAX_CHARS,
+                required=True,
+            ),
+            status=_normalize_goal_status(status),
+            current_step=_normalize_bounded_text(
+                current_step,
+                field_name="current_step",
+                max_chars=_SESSION_GOAL_STEP_MAX_CHARS,
+            ),
+            last_blocker=_normalize_bounded_text(
+                last_blocker,
+                field_name="last_blocker",
+                max_chars=_SESSION_GOAL_BLOCKER_MAX_CHARS,
+            ),
+            updated_at=" ".join(updated_at.split()).strip(),
+        )
+    except ValueError:
+        return None
+
+
+def _normalize_goal_status(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized not in _SESSION_GOAL_STATUS_VALUES:
+        raise ValueError(f"Unsupported session goal status: {value!r}.")
+    return normalized
+
+
+def _normalize_bounded_text(
+    value: str | None,
+    *,
+    field_name: str,
+    max_chars: int,
+    required: bool = False,
+) -> str | None:
+    if value is None:
+        if required:
+            raise ValueError(f"{field_name} must be a non-empty string.")
+        return None
+
+    normalized = " ".join(value.split()).strip()
+    if not normalized:
+        if required:
+            raise ValueError(f"{field_name} must be a non-empty string.")
+        return None
+
+    if len(normalized) <= max_chars:
+        return normalized
+    return f"{normalized[: max_chars - 3].rstrip(' ,;:.')}..."
