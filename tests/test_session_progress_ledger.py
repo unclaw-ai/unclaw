@@ -234,7 +234,7 @@ def test_runtime_progress_ledger_tracks_last_tool_fact_and_injects_compact_note(
         assert len(ledger) == 1
         assert goal_state is not None
         assert goal_state.goal == first_prompt
-        assert goal_state.status == "active"
+        assert goal_state.status == "completed"
         assert goal_state.current_step == "write_text_file"
         assert ledger[0].status == "active"
         assert ledger[0].step == "write_text_file"
@@ -589,7 +589,7 @@ def test_existing_goal_state_session_preserves_progress_ledger_across_trivial_sy
         assert fake_provider.call_count() == 4
         assert goal_state is not None
         assert goal_state.goal == first_prompt
-        assert goal_state.status == "active"
+        assert goal_state.status == "completed"
         assert goal_state.current_step == "write_text_file"
         assert len(ledger) == 1
         assert [(entry.status, entry.step, entry.detail) for entry in ledger] == [
@@ -699,7 +699,7 @@ def test_existing_goal_state_session_preserves_progress_ledger_across_trivial_fa
         assert fake_provider.call_count() == 4
         assert goal_state is not None
         assert goal_state.goal == first_prompt
-        assert goal_state.status == "active"
+        assert goal_state.status == "completed"
         assert goal_state.current_step == "write_text_file"
         assert len(ledger) == 1
         assert [(entry.status, entry.step, entry.detail) for entry in ledger] == [

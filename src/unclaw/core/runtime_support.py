@@ -186,6 +186,24 @@ def _turn_has_task_like_runtime_facts(
     )
 
 
+def _turn_should_mark_goal_state_completed(
+    *,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if not tool_results:
+        return False
+    if assistant_reply.strip() == turn_cancelled_reply.strip():
+        return False
+
+    latest_tool_result = tool_results[-1]
+    return (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+    )
+
+
 def _persist_session_goal_state_from_runtime_facts(
     *,
     session_manager: SessionManager,
@@ -207,7 +225,13 @@ def _persist_session_goal_state_from_runtime_facts(
     latest_tool_result = tool_results[-1]
     last_blocker: str | None = None
     status = "active"
-    if assistant_reply.strip() == turn_cancelled_reply.strip():
+    if _turn_should_mark_goal_state_completed(
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
+        status = "completed"
+    elif assistant_reply.strip() == turn_cancelled_reply.strip():
         status = "blocked"
         last_blocker = turn_cancelled_reply
     elif latest_tool_result.success is False:
