@@ -1,12 +1,9 @@
-"""Tests for P5-6 — deep-search escalation, duo/group routing, timeout fallback.
+"""Tests for P5-6 helpers plus current post-tool grounding behavior.
 
 Proves:
 - _looks_like_deep_search_request detects bio/research depth signals (FR + EN)
 - _looks_like_joint_entity_request detects duo/pair entities like 'McFly et Carlito'
-- _build_request_routing_note prefers search_web for deep/complete requests
-- _build_request_routing_note emits duo-aware notes for joint entity requests
-- _build_request_routing_note still uses fast_web_search for plain identity lookups
-  and mentions search_web as the escalation path
+- _build_request_routing_note no longer retries semantic web/identity recovery
 - _build_post_tool_grounding_note pushes search_web escalation after fast_web_search
 - timeout/partial-failure note is included when a tool timed out
 - _apply_post_tool_reply_discipline still clamps replies from thin fast_web results
@@ -190,110 +187,90 @@ def test_joint_entity_not_single_entity() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _build_request_routing_note — deep search escalation
+# _build_request_routing_note — semantic web recovery removed in Phase 3.7
 # ---------------------------------------------------------------------------
 
 
-def test_routing_note_uses_search_web_for_bio_complete() -> None:
+def test_routing_note_returns_none_for_bio_complete() -> None:
     note = _build_request_routing_note(
         user_input="fais une bio complète de cet artiste",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
-    assert _CURRENT_REQUEST_ROUTING_NOTE_PREFIX in note
-    # Must NOT only suggest fast_web_search as the endpoint
-    assert "deep" in note.lower() or "grounded" in note.lower() or "complete" in note.lower()
+    assert note is None
 
 
-def test_routing_note_uses_search_web_for_recherche_complete() -> None:
+def test_routing_note_returns_none_for_recherche_complete() -> None:
     note = _build_request_routing_note(
         user_input="fais une recherche complète",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
+    assert note is None
 
 
-def test_routing_note_uses_search_web_for_file_output_request() -> None:
+def test_routing_note_returns_none_for_file_output_request() -> None:
     note = _build_request_routing_note(
         user_input="cherche puis écris une bio dans un fichier texte",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
+    assert note is None
 
 
-def test_routing_note_uses_search_web_for_full_bio_en() -> None:
+def test_routing_note_returns_none_for_full_bio_en() -> None:
     note = _build_request_routing_note(
         user_input="write me a full biography please",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
+    assert note is None
 
 
-def test_routing_note_uses_search_web_for_everything_you_know() -> None:
+def test_routing_note_returns_none_for_everything_you_know() -> None:
     note = _build_request_routing_note(
         user_input="tell me everything you know about them",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
+    assert note is None
 
 
 # ---------------------------------------------------------------------------
-# _build_request_routing_note — duo/group routing
+# _build_request_routing_note — duo/group semantic routing removed in Phase 3.7
 # ---------------------------------------------------------------------------
 
 
-def test_routing_note_for_duo_identity_uses_duo_language() -> None:
+def test_routing_note_for_duo_identity_returns_none() -> None:
     note = _build_request_routing_note(
         user_input="qui sont McFly et Carlito",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert any(
-        word in note.lower()
-        for word in ("duo", "unit", "together", "pair", "joint", "both")
-    )
+    assert note is None
 
 
-def test_routing_note_for_duo_deep_search_uses_search_web_directly() -> None:
+def test_routing_note_for_duo_deep_search_returns_none() -> None:
     note = _build_request_routing_note(
         user_input="McFly et Carlito, fais leur bio complète",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "search_web" in note
-    # Deep search + duo: should go straight to search_web
-    assert "deeper" in note.lower() or "grounded" in note.lower() or "complete" in note.lower()
+    assert note is None
 
 
 # ---------------------------------------------------------------------------
-# _build_request_routing_note — plain identity still uses fast_web first
+# _build_request_routing_note — plain identity retry removed in Phase 3.7
 # ---------------------------------------------------------------------------
 
 
-def test_routing_note_plain_identity_uses_fast_web_first() -> None:
+def test_routing_note_plain_identity_returns_none() -> None:
     note = _build_request_routing_note(
         user_input="qui est Marine Leleu",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    assert "fast_web_search" in note
-    # Should also mention search_web as escalation path
-    assert "search_web" in note
+    assert note is None
 
 
-def test_routing_note_plain_identity_mentions_escalation() -> None:
+def test_routing_note_plain_identity_en_returns_none() -> None:
     note = _build_request_routing_note(
         user_input="who is Ada Lovelace",
         capability_summary=_web_capable_summary(),
     )
-    assert note is not None
-    # The note should now mention escalating to search_web if thin or full answer needed
-    assert "search_web" in note
+    assert note is None
 
 
 # ---------------------------------------------------------------------------

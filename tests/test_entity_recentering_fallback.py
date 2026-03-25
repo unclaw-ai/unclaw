@@ -282,7 +282,7 @@ def test_native_legacy_retry_injects_entity_recentering_note_only_on_fallback(
             "Compris.",
             session_id=session.id,
         )
-        user_input = "Fais leur bio courte."
+        user_input = "Fetch https://example.com and summarize it."
         session_manager.add_message(
             MessageRole.USER,
             user_input,

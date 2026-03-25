@@ -48,12 +48,6 @@ _IDENTITY_REQUEST_PATTERN = re.compile(
     r"\b(?:who is|who are|who's|qui est|qui sont|c'?est qui|bio de|biographie de|"
     r"biography of|bio of)\b"
 )
-_WEB_LOOKUP_REQUEST_PATTERN = re.compile(
-    r"\b(?:search(?: the)? (?:web|internet)|web search|look up|lookup|"
-    r"search online|find online|recherche en ligne|cherche sur (?:le )?"
-    r"(?:web|internet)|sur (?:le )?(?:web|internet)|news about|latest news|"
-    r"actualites sur)\b"
-)
 _URL_FETCH_REQUEST_PATTERN = re.compile(
     r"\b(?:fetch|open|read|inspect|summarize|check|visit|load|show|analyze|"
     r"look at|ouvre|lire|inspecte|resume|resumer|visite)\b"
@@ -221,10 +215,6 @@ def _looks_like_local_file_request(
     return bool(re.search(r"\b(?:file|fichier)\b", normalized_user_input))
 
 
-def _looks_like_explicit_web_lookup_request(normalized_user_input: str) -> bool:
-    return _WEB_LOOKUP_REQUEST_PATTERN.search(normalized_user_input) is not None
-
-
 def _looks_like_multi_entity_request(user_input: str) -> bool:
     """Return True when the request clearly sequences multiple entity lookups.
 
@@ -273,7 +263,11 @@ def _build_request_routing_note(
     user_input: str,
     capability_summary: RuntimeCapabilitySummary,
 ) -> str | None:
-    """Build the deterministic routing note used only by the legacy fallback retry."""
+    """Build the bounded legacy routing note used only by the retry path.
+
+    The legacy retry is intentionally limited to obvious operational or
+    local-first requests. Semantic web-intent recovery stays model-driven.
+    """
     if capability_summary.model_can_call_tools is not True:
         return None
 
@@ -318,56 +312,6 @@ def _build_request_routing_note(
             "system_info now and answer from its output instead of guessing or "
             "asking whether you should check."
         )
-
-    # Deep search signal: skip fast_web_search, route directly to search_web.
-    # This check comes before the identity check so that 'fais une bio complète'
-    # does not fall into the lighter fast_web_search-first identity path.
-    if _looks_like_deep_search_request(user_input) and capability_summary.web_search_available:
-        is_duo = _looks_like_joint_entity_request(user_input)
-        is_identity = _looks_like_identity_request(normalized_user_input)
-        if is_duo:
-            entity_hint = (
-                "with the exact duo/pair name as the user wrote it (both names as a unit). "
-                "Do not split the duo into separate unrelated lookups."
-            )
-        elif is_identity:
-            entity_hint = "with the exact entity wording from the user."
-        else:
-            entity_hint = "with the user's exact query terms."
-        return (
-            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-            "the user explicitly asked for deep, complete, or file-output research. "
-            f"Call search_web {entity_hint} "
-            "search_web is the deeper grounded path — it fetches and condenses pages "
-            "for richer answers. Do not stop at fast_web_search alone."
-        )
-
-    if _looks_like_identity_request(normalized_user_input):
-        is_duo = _looks_like_joint_entity_request(user_input)
-        if capability_summary.fast_web_search_available:
-            if is_duo:
-                return (
-                    f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-                    "this is a duo or joint entity biography lookup. Call fast_web_search "
-                    "with the duo name as a unit exactly as the user wrote it (both names "
-                    "together). Do not separate the duo into unrelated single-entity lookups. "
-                    "If the grounding note is thin or the user wants more, call search_web "
-                    "next with the same duo name — it is the deeper grounded path."
-                )
-            return (
-                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-                "this is an identity or biography lookup. Call fast_web_search "
-                "first with the exact entity wording from the user. If the result "
-                "is thin or the user wants a full answer, call search_web next — "
-                "it is the deeper grounded web path for complete biographies."
-            )
-        if capability_summary.web_search_available:
-            return (
-                f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-                "this is an identity or biography lookup. Call search_web first "
-                "with the exact entity wording from the user instead of answering "
-                "from weak memory."
-            )
 
     if _looks_like_local_directory_request(
         user_input=user_input,
@@ -417,15 +361,5 @@ def _build_request_routing_note(
                 "file read is unavailable. Start with list_directory on the provided "
                 "path or scope before asking for clarification."
             )
-
-    if (
-        capability_summary.web_search_available
-        and _looks_like_explicit_web_lookup_request(normalized_user_input)
-    ):
-        return (
-            f"{_CURRENT_REQUEST_ROUTING_NOTE_PREFIX} "
-            "this explicitly asks for a web lookup or current external information. "
-            "Call search_web first and use the user's exact wording in the first lookup."
-        )
 
     return None

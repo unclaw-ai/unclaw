@@ -42,7 +42,7 @@ def test_routing_note_routes_direct_public_url_fetch_requests() -> None:
     assert "fetch_url_text first" in note
 
 
-def test_routing_note_routes_french_identity_requests_to_fast_web_search() -> None:
+def test_routing_note_returns_none_for_identity_requests() -> None:
     note = _build_request_routing_note(
         user_input="Qui est Marine Leleu ?",
         capability_summary=_summary(
@@ -52,12 +52,10 @@ def test_routing_note_routes_french_identity_requests_to_fast_web_search() -> No
         ),
     )
 
-    assert note is not None
-    assert "fast_web_search" in note
-    assert "exact entity wording from the user" in note
+    assert note is None
 
 
-def test_routing_note_routes_french_deep_research_to_search_web() -> None:
+def test_routing_note_returns_none_for_deep_research_requests() -> None:
     note = _build_request_routing_note(
         user_input="Fais une bio complete de Marine Leleu.",
         capability_summary=_summary(
@@ -67,12 +65,10 @@ def test_routing_note_routes_french_deep_research_to_search_web() -> None:
         ),
     )
 
-    assert note is not None
-    assert "Call search_web" in note
-    assert "Do not stop at fast_web_search alone" in note
+    assert note is None
 
 
-def test_routing_note_keeps_duo_entities_grouped() -> None:
+def test_routing_note_returns_none_for_joint_entity_requests() -> None:
     note = _build_request_routing_note(
         user_input="Qui sont McFly et Carlito ?",
         capability_summary=_summary(
@@ -82,9 +78,7 @@ def test_routing_note_keeps_duo_entities_grouped() -> None:
         ),
     )
 
-    assert note is not None
-    assert "duo or joint entity biography lookup" in note
-    assert "Do not separate the duo" in note
+    assert note is None
 
 
 def test_routing_note_routes_explicit_terminal_requests() -> None:
@@ -164,7 +158,19 @@ def test_routing_note_returns_none_when_matching_tool_is_unavailable() -> None:
     assert note is None
 
 
-def test_routing_note_handles_accents_via_normalized_text() -> None:
+def test_routing_note_returns_none_for_explicit_web_lookup_requests() -> None:
+    note = _build_request_routing_note(
+        user_input="Search the web for the latest news about Marine Leleu.",
+        capability_summary=_summary(
+            available_builtin_tool_names=("search_web",),
+            web_search_available=True,
+        ),
+    )
+
+    assert note is None
+
+
+def test_routing_note_handles_accents_via_normalized_text_without_web_retry() -> None:
     note = _build_request_routing_note(
         user_input="Fais une recherche détaillée sur Joséphine Baker.",
         capability_summary=_summary(
@@ -173,9 +179,7 @@ def test_routing_note_handles_accents_via_normalized_text() -> None:
         ),
     )
 
-    assert note is not None
-    assert "Call search_web" in note
-    assert "exact query terms" in note
+    assert note is None
 
 
 def test_routing_note_preserves_current_limitation_wording_when_file_read_is_unavailable() -> None:
