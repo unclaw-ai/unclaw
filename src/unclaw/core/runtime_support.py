@@ -225,6 +225,18 @@ def _turn_has_task_like_runtime_facts(
     )
 
 
+def _find_latest_failed_non_write_tool_result(
+    tool_results: Sequence[ToolResult],
+) -> ToolResult | None:
+    for tool_result in reversed(tool_results[:-1]):
+        if (
+            tool_result.success is False
+            and tool_result.tool_name != _WRITE_SUCCESS_TOOL_NAME
+        ):
+            return tool_result
+    return None
+
+
 def _turn_should_mark_goal_state_completed(
     *,
     tool_results: Sequence[ToolResult],
@@ -240,6 +252,7 @@ def _turn_should_mark_goal_state_completed(
     return (
         latest_tool_result.success is True
         and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+        and _find_latest_failed_non_write_tool_result(tool_results) is None
     )
 
 
@@ -262,8 +275,12 @@ def _persist_session_goal_state_from_runtime_facts(
         return
 
     latest_tool_result = tool_results[-1]
+    latest_failed_non_write_tool_result = _find_latest_failed_non_write_tool_result(
+        tool_results
+    )
     last_blocker: str | None = None
     status = "active"
+    current_step = latest_tool_result.tool_name
     if _turn_should_mark_goal_state_completed(
         tool_results=tool_results,
         assistant_reply=assistant_reply,
@@ -273,6 +290,17 @@ def _persist_session_goal_state_from_runtime_facts(
     elif assistant_reply.strip() == turn_cancelled_reply.strip():
         status = "blocked"
         last_blocker = turn_cancelled_reply
+    elif (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+        and latest_failed_non_write_tool_result is not None
+    ):
+        status = "blocked"
+        current_step = latest_failed_non_write_tool_result.tool_name
+        last_blocker = (
+            latest_failed_non_write_tool_result.error
+            or latest_failed_non_write_tool_result.output_text
+        )
     elif latest_tool_result.success is False:
         status = "blocked"
         last_blocker = latest_tool_result.error or latest_tool_result.output_text
@@ -281,7 +309,7 @@ def _persist_session_goal_state_from_runtime_facts(
         session_id=session_id,
         goal=user_input,
         status=status,
-        current_step=latest_tool_result.tool_name,
+        current_step=current_step,
         last_blocker=last_blocker,
     )
 
@@ -304,11 +332,25 @@ def _persist_session_progress_ledger_from_runtime_facts(
         return
 
     latest_tool_result = tool_results[-1]
+    latest_failed_non_write_tool_result = _find_latest_failed_non_write_tool_result(
+        tool_results
+    )
     status = "active"
     detail = "tool succeeded"
+    step = latest_tool_result.tool_name
     if assistant_reply.strip() == turn_cancelled_reply.strip():
         status = "blocked"
         detail = "request cancelled before tool work completed"
+    elif (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+        and latest_failed_non_write_tool_result is not None
+    ):
+        status = "blocked"
+        step = latest_failed_non_write_tool_result.tool_name
+        detail = _build_progress_detail_from_failed_tool_result(
+            latest_failed_non_write_tool_result
+        )
     elif latest_tool_result.success is True:
         if latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME:
             detail = "file write succeeded"
@@ -319,7 +361,7 @@ def _persist_session_progress_ledger_from_runtime_facts(
     session_manager.persist_session_progress_entry(
         session_id=session_id,
         status=status,
-        step=latest_tool_result.tool_name,
+        step=step,
         detail=detail,
     )
 

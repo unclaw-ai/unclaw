@@ -18,7 +18,7 @@ from unclaw.tools.contracts import ToolCall, ToolResult
 from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
-from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION
+from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION, SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.integration
 
@@ -271,6 +271,86 @@ def test_one_shot_write_text_file_turn_creates_completed_session_goal_state(
         session_manager.close()
 
 
+def test_search_web_failure_then_successful_write_text_file_turn_stays_blocked(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "session-goal-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error="Tool 'search_web' timed out after 15 seconds.",
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("search_web", {"query": "session goal note"}),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "session note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Research the topic, then write a short local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert reply == "I saved the note locally."
+        assert fake_provider.call_count() == 3
+        assert goal_state is not None
+        assert goal_state.goal == prompt
+        assert goal_state.status == "blocked"
+        assert goal_state.current_step == "search_web"
+        assert goal_state.last_blocker == "Tool 'search_web' timed out after 15 seconds."
+        assert output_path.read_text(encoding="utf-8") == "session note"
+    finally:
+        session_manager.close()
+
+
 def test_failed_write_text_file_turn_persists_blocked_session_goal_state(
     monkeypatch,
     make_temp_project,
@@ -332,6 +412,91 @@ def test_failed_write_text_file_turn_persists_blocked_session_goal_state(
         assert goal_state.current_step == "write_text_file"
         assert goal_state.last_blocker == f"Permission denied: {output_path}"
         assert not output_path.exists()
+    finally:
+        session_manager.close()
+
+
+def test_failed_write_text_file_then_successful_write_text_file_turn_can_complete(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "session-goal-note.txt"
+    tool_registry = ToolRegistry()
+    write_attempt_count = 0
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        nonlocal write_attempt_count
+        write_attempt_count += 1
+        if write_attempt_count == 1:
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error=f"File already exists: {call.arguments['path']}",
+            )
+
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "first draft"},
+        ),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "session note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Write a short local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert reply == "I saved the note locally."
+        assert fake_provider.call_count() == 3
+        assert goal_state is not None
+        assert goal_state.goal == prompt
+        assert goal_state.status == "completed"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker is None
+        assert output_path.read_text(encoding="utf-8") == "session note"
     finally:
         session_manager.close()
 
