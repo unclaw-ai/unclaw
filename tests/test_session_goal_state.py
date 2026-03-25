@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +15,10 @@ from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.system_tools import SYSTEM_INFO_DEFINITION
+from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION
 
 pytestmark = pytest.mark.integration
 
@@ -60,89 +63,7 @@ def _tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResp
     )
 
 
-def test_session_goal_state_persists_across_session_manager_reloads(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-    build_scripted_ollama_provider,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        SYSTEM_INFO_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text="Local datetime: 2026-03-25 10:00:00 CET",
-        ),
-    )
-    fake_provider = build_scripted_ollama_provider(
-        _tool_call_response("system_info", {}),
-        LLMResponse(
-            provider="ollama",
-            model_name="fake-model",
-            content="It is 10:00 CET.",
-            created_at="2026-03-25T09:00:01Z",
-            finish_reason="stop",
-        ),
-    )
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
-
-    session_id: str | None = None
-    goal_state = None
-    prompt = "What is the local time on this machine?"
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_id = session.id
-        session_manager.add_message(
-            MessageRole.USER,
-            prompt,
-            session_id=session.id,
-        )
-
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert reply == "It is 10:00 CET."
-        goal_state = session_manager.get_session_goal_state(session.id)
-        assert goal_state is not None
-        assert goal_state.goal == prompt
-        assert goal_state.status == "active"
-        assert goal_state.current_step == "system_info"
-        assert goal_state.last_blocker is None
-        assert goal_state.updated_at
-    finally:
-        session_manager.close()
-
-    assert session_id is not None
-    reloaded_manager = SessionManager.from_settings(settings)
-    try:
-        reloaded_session = reloaded_manager.ensure_current_session()
-        assert reloaded_session.id == session_id
-        reloaded_goal_state = reloaded_manager.get_session_goal_state(session_id)
-        assert reloaded_goal_state == goal_state
-        event_types = [
-            event.event_type
-            for event in reloaded_manager.event_repository.list_recent_events(
-                session_id,
-                limit=10,
-            )
-        ]
-        assert "session.goal_state.updated" in event_types
-    finally:
-        reloaded_manager.close()
-
-
-def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
+def test_one_shot_system_info_turn_does_not_create_session_goal_state(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -161,7 +82,6 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             output_text="Local datetime: 2026-03-25 10:00:00 CET",
         ),
     )
-    captured_messages: list[list[object]] = []
     fake_provider = build_scripted_ollama_provider(
         _tool_call_response("system_info", {}),
         LLMResponse(
@@ -171,10 +91,157 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             created_at="2026-03-25T09:00:01Z",
             finish_reason="stop",
         ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "What is the local time on this machine?"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "It is 10:00 CET."
+        assert fake_provider.call_count() == 2
+        assert session_manager.get_session_goal_state(session.id) is None
+        event_types = [
+            event.event_type
+            for event in session_manager.event_repository.list_recent_events(
+                session.id,
+                limit=10,
+            )
+        ]
+        assert "session.goal_state.updated" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_one_shot_fast_web_search_turn_does_not_create_session_goal_state(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Inoxtag\n- Inoxtag is a French content creator.",
+            payload={
+                "query": call.arguments["query"],
+                "result_count": 2,
+                "grounding_note": (
+                    "Inoxtag\n"
+                    "- Inoxtag is a French content creator.\n"
+                    "- He is known for online videos."
+                ),
+            },
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response("fast_web_search", {"query": "Inoxtag"}),
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
-            content="You were checking the machine's local time.",
+            content="Inoxtag is a French content creator.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Qui est Inoxtag ?"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Inoxtag is a French content creator."
+        assert fake_provider.call_count() == 2
+        assert session_manager.get_session_goal_state(session.id) is None
+        event_types = [
+            event.event_type
+            for event in session_manager.event_repository.list_recent_events(
+                session.id,
+                limit=10,
+            )
+        ]
+        assert "session.goal_state.updated" not in event_types
+    finally:
+        session_manager.close()
+
+
+def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "session-goal-note.txt"
+    tool_registry = ToolRegistry()
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    captured_messages: list[list[object]] = []
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "session note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="You were writing a local note file.",
             created_at="2026-03-25T09:00:02Z",
             finish_reason="stop",
         ),
@@ -182,7 +249,7 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
-    first_prompt = "Check the machine local time and report it."
+    first_prompt = "Write a short local note file."
     second_prompt = "What are we working on in this session?"
 
     try:
@@ -212,9 +279,16 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             tool_registry=tool_registry,
         )
 
-        assert first_reply == "It is 10:00 CET."
-        assert second_reply == "You were checking the machine's local time."
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == "I saved the note locally."
+        assert second_reply == "You were writing a local note file."
         assert fake_provider.call_count() == 3
+        assert goal_state is not None
+        assert goal_state.goal == first_prompt
+        assert goal_state.status == "active"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker is None
+        assert output_path.read_text(encoding="utf-8") == "session note"
 
         first_turn_system_messages = [
             message.content
@@ -237,12 +311,9 @@ def test_later_turn_injects_compact_goal_state_note_without_extra_model_call(
             if message.startswith("Session goal state:")
         ]
         assert len(goal_notes) == 1
-        assert (
-            'goal="Check the machine local time and report it."'
-            in goal_notes[0]
-        )
+        assert 'goal="Write a short local note file."' in goal_notes[0]
         assert 'status="active"' in goal_notes[0]
-        assert 'current_step="system_info"' in goal_notes[0]
+        assert 'current_step="write_text_file"' in goal_notes[0]
         assert "last_blocker=none" in goal_notes[0]
     finally:
         session_manager.close()

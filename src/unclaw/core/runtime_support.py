@@ -73,6 +73,9 @@ def _build_session_progress_ledger_context_note(
     session_manager: SessionManager,
     session_id: str,
 ) -> str | None:
+    if session_manager.get_session_goal_state(session_id) is None:
+        return None
+
     ledger = session_manager.get_session_progress_ledger(session_id)
     if not ledger:
         return None
@@ -104,6 +107,33 @@ def _build_local_access_control_note(
     )
 
 
+def _turn_qualifies_for_session_goal_state_persistence(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if not tool_results:
+        return False
+
+    if session_manager.get_session_goal_state(session_id) is not None:
+        return True
+
+    latest_tool_result = tool_results[-1]
+    if len(tool_results) >= 2:
+        return True
+    if assistant_reply.strip() == turn_cancelled_reply.strip():
+        return True
+    if latest_tool_result.success is False:
+        return True
+    return (
+        latest_tool_result.success is True
+        and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+    )
+
+
 def _persist_session_goal_state_from_runtime_facts(
     *,
     session_manager: SessionManager,
@@ -113,7 +143,13 @@ def _persist_session_goal_state_from_runtime_facts(
     assistant_reply: str,
     turn_cancelled_reply: str,
 ) -> None:
-    if not tool_results:
+    if not _turn_qualifies_for_session_goal_state_persistence(
+        session_manager=session_manager,
+        session_id=session_id,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
         return
 
     latest_tool_result = tool_results[-1]
@@ -143,7 +179,13 @@ def _persist_session_progress_ledger_from_runtime_facts(
     assistant_reply: str,
     turn_cancelled_reply: str,
 ) -> None:
-    if not tool_results:
+    if not _turn_qualifies_for_session_goal_state_persistence(
+        session_manager=session_manager,
+        session_id=session_id,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
         return
 
     latest_tool_result = tool_results[-1]
