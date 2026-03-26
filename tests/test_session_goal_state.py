@@ -384,6 +384,7 @@ def test_fast_web_search_mismatch_then_successful_write_text_file_turn_stays_blo
             payload={
                 "query": call.arguments["query"],
                 "result_count": 1,
+                "match_quality": "mismatch",
                 "grounding_note": "",
             },
         ),
@@ -1097,6 +1098,13 @@ def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_u
             created_at="2026-03-25T09:00:03Z",
             finish_reason="stop",
         ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="You are researching topic two for the fresh note.",
+            created_at="2026-03-25T09:00:04Z",
+            finish_reason="stop",
+        ),
         captured_messages=captured_messages,
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
@@ -1158,7 +1166,7 @@ def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_u
         assert "Sources:" in second_reply
         assert "https://example.com/topic-two-profile" in second_reply
         assert third_reply == "You are researching topic two for the fresh note."
-        assert fake_provider.call_count() == 5
+        assert fake_provider.call_count() == 6
         assert goal_state is not None
         assert goal_state.goal == second_prompt
         assert goal_state.status == "active"
@@ -1169,7 +1177,7 @@ def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_u
         responder_calls = _non_finalizer_calls(captured_messages)
         third_turn_system_messages = [
             message.content
-            for message in responder_calls[4]
+            for message in responder_calls[-1]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [
@@ -1456,7 +1464,7 @@ def test_terminal_task_compact_search_follow_up_keeps_original_goal_text(
         session_manager.close()
 
 
-def test_later_turn_injects_compact_completed_task_continuity_note_without_extra_model_call(
+def test_later_turn_injects_compact_completed_task_continuity_note_with_model_reconsideration(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1502,6 +1510,13 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
             created_at="2026-03-25T09:00:02Z",
             finish_reason="stop",
         ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="You were writing a local note file.",
+            created_at="2026-03-25T09:00:03Z",
+            finish_reason="stop",
+        ),
         captured_messages=captured_messages,
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
@@ -1539,7 +1554,7 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
         goal_state = session_manager.get_session_goal_state(session.id)
         assert first_reply == "I saved the note locally."
         assert second_reply == "You were writing a local note file."
-        assert fake_provider.call_count() == 3
+        assert fake_provider.call_count() == 4
         assert goal_state is not None
         assert goal_state.goal == first_prompt
         assert goal_state.status == "completed"
@@ -1560,7 +1575,7 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
         responder_calls = _non_finalizer_calls(captured_messages)
         second_turn_system_messages = [
             message.content
-            for message in responder_calls[2]
+            for message in responder_calls[-1]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [

@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
 _ENTITY_RECENTERING_NOTE_PREFIX = "Entity recentering hint:"
 _POST_TOOL_GROUNDING_NOTE_PREFIX = "Post-tool grounding note:"
+_MODEL_NATIVE_TOOL_RECOVERY_NOTE_PREFIX = "Tool reconsideration note:"
+_SEARCH_REPAIR_FACTS_NOTE_PREFIX = "Search repair facts:"
 _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 _SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
 _SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session task continuity:"
@@ -68,9 +70,6 @@ def _fast_web_search_match_quality(tool_result: ToolResult) -> str | None:
     result_count = payload.get("result_count")
     if isinstance(result_count, int) and result_count <= 0:
         return "no_results"
-    grounding_note = payload.get("grounding_note")
-    if isinstance(grounding_note, str) and not grounding_note.strip():
-        return "mismatch"
     return None
 
 
@@ -113,6 +112,41 @@ def _search_web_result_is_thin(tool_result: ToolResult) -> bool:
     if isinstance(display_sources, list) and len(display_sources) <= 1:
         return True
     return False
+
+
+def _tool_result_needs_model_native_search_repair(tool_result: ToolResult) -> bool:
+    if tool_result.tool_name == "fast_web_search":
+        return _fast_web_search_result_is_thin(tool_result)
+    if tool_result.tool_name == "search_web":
+        return _search_web_result_is_thin(tool_result)
+    return False
+
+
+def _build_model_native_search_repair_fact_line(tool_result: ToolResult) -> str:
+    payload = _tool_result_payload_dict(tool_result)
+    parts = [
+        f"tool_name={tool_result.tool_name}",
+        f"success={tool_result.success}",
+    ]
+
+    for field_name in (
+        "result_count",
+        "supported_point_count",
+        "evidence_count",
+        "finding_count",
+        "match_quality",
+    ):
+        field_value = payload.get(field_name)
+        if isinstance(field_value, bool):
+            continue
+        if isinstance(field_value, (int, str)):
+            parts.append(f"{field_name}={field_value}")
+
+    display_sources = payload.get("display_sources")
+    if isinstance(display_sources, list):
+        parts.append(f"display_sources_count={len(display_sources)}")
+
+    return "; ".join(parts) + "."
 
 
 def _serialize_grounded_reply_facts(facts: dict[str, Any]) -> str:
@@ -937,6 +971,20 @@ def _build_default_search_grounding_transform(
     return _grounding_transform
 
 
+def _build_model_native_tool_recovery_note() -> str:
+    return "\n".join(
+        (
+            (
+                f"{_MODEL_NATIVE_TOOL_RECOVERY_NOTE_PREFIX} "
+                "the first pass returned no tool calls."
+            ),
+            "Reconsider the same user request using the current context and available tools.",
+            "If any available tool is needed for a better-grounded answer, emit the tool call now.",
+            "If no tool is needed, answer directly.",
+        )
+    )
+
+
 def _build_entity_recentering_note(
     *,
     entity_anchor: _EntityAnchor | None,
@@ -1008,6 +1056,22 @@ def _build_post_tool_grounding_note(
     ):
         lines.append(
             "One or more latest tool outputs are thin or partial. Say that they are limited and give only the supported fragment."
+        )
+    repair_fact_lines = [
+        _build_model_native_search_repair_fact_line(tool_result)
+        for tool_result in tool_results
+        if _tool_result_needs_model_native_search_repair(tool_result)
+    ]
+    if repair_fact_lines:
+        lines.append(
+            (
+                f"{_SEARCH_REPAIR_FACTS_NOTE_PREFIX} "
+                "use the latest structured search facts plus the user request to decide the next step."
+            )
+        )
+        lines.extend(f"- {fact_line}" for fact_line in repair_fact_lines)
+        lines.append(
+            "If another available tool call or a better-grounded retry is needed, emit it now. Otherwise answer only with the supported fragment and say the evidence is limited."
         )
     if any(tool_result.success is False for tool_result in tool_results):
         lines.append(

@@ -243,6 +243,10 @@ def test_native_legacy_retry_never_injects_entity_recentering_note(
                     "Entity recentering hint:" not in message
                     for message in system_messages
                 )
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -253,7 +257,11 @@ def test_native_legacy_retry_never_injects_entity_recentering_note(
 
             if call_count == 2:
                 assert any(
-                    "Current request routing hint:" in message
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 assert all(
@@ -263,7 +271,7 @@ def test_native_legacy_retry_never_injects_entity_recentering_note(
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
-                    content="Fallback answer after one legacy retry.",
+                    content="Fallback answer after one model recovery pass.",
                     created_at="2026-03-24T12:00:01Z",
                     finish_reason="stop",
                 )
@@ -306,7 +314,7 @@ def test_native_legacy_retry_never_injects_entity_recentering_note(
             tracer=tracer,
         )
 
-        assert reply == "Fallback answer after one legacy retry."
+        assert reply == "Fallback answer after one model recovery pass."
         assert call_count == 2
         assert len(system_messages_by_call) == 2
     finally:
@@ -355,10 +363,20 @@ def test_native_direct_success_never_injects_entity_recentering_note_without_ret
             assert all(
                 "Entity recentering hint:" not in message for message in system_messages
             )
+            if call_count == 1:
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
+            else:
+                assert any(
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content="Follow-up answer without legacy retry.",
+                content="Follow-up answer without entity recentering.",
                 created_at="2026-03-24T13:00:00Z",
                 finish_reason="stop",
             )
@@ -391,8 +409,8 @@ def test_native_direct_success_never_injects_entity_recentering_note_without_ret
             tracer=tracer,
         )
 
-        assert reply == "Follow-up answer without legacy retry."
-        assert call_count == 1
+        assert reply == "Follow-up answer without entity recentering."
+        assert call_count == 2
     finally:
         session_manager.close()
 
@@ -440,6 +458,11 @@ def test_native_legacy_retry_without_anchor_skips_entity_recentering_note(
                 "Entity recentering hint:" not in message for message in system_messages
             )
             if call_count == 1:
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
+            if call_count == 1:
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -450,8 +473,12 @@ def test_native_legacy_retry_without_anchor_skips_entity_recentering_note(
 
             if call_count == 2:
                 assert any(
-                    "Current request routing hint: the user gave a specific public URL."
+                    "Tool reconsideration note:"
                     in message
+                    for message in system_messages
+                )
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -484,7 +511,7 @@ def test_native_legacy_retry_without_anchor_skips_entity_recentering_note(
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content="Recovered summary after one legacy retry.",
+                content="Recovered summary after one model recovery pass.",
                 created_at="2026-03-24T14:00:02Z",
                 finish_reason="stop",
             )
@@ -517,7 +544,7 @@ def test_native_legacy_retry_without_anchor_skips_entity_recentering_note(
             tool_registry=tool_registry,
         )
 
-        assert reply == "Recovered summary after one legacy retry."
+        assert reply == "Recovered summary after one model recovery pass."
         assert call_count == 3
     finally:
         session_manager.close()

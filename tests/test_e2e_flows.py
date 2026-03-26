@@ -278,7 +278,7 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
             for messages in captured_messages
             if not _is_grounded_finalizer_call(messages)
         ]
-    ) == 3
+    ) == 4
 
     session_manager = SessionManager.from_settings(settings)
     try:

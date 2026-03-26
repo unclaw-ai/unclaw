@@ -272,12 +272,13 @@ def test_phase0_direct_runtime_profiles_keep_expected_tool_guidance(
         )
 
         assert reply == f"{profile_name} direct reply"
-        assert len(captured_capability_messages) == 1
-        assert len(captured_tools) == 1
-        capability_message = captured_capability_messages[0]
+        expected_call_count = 2 if expected_native_runtime else 1
+        assert len(captured_capability_messages) == expected_call_count
+        assert len(captured_tools) == expected_call_count
+        capability_message = captured_capability_messages[-1]
 
         if expected_native_runtime:
-            assert captured_tools[0] is not None
+            assert all(tools is not None for tools in captured_tools)
             assert "you may call tools directly this turn" in capability_message
             assert "user-initiated slash commands only" not in capability_message
         else:

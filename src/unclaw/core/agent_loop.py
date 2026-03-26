@@ -11,7 +11,6 @@ from typing import Any
 
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.orchestrator import Orchestrator, OrchestratorTurnResult
-from unclaw.core.routing import _deduplicate_search_tool_calls
 from unclaw.core.session_manager import SessionManager
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS
 from unclaw.llm.base import LLMContentCallback, LLMMessage, LLMResponse, LLMRole
@@ -96,12 +95,9 @@ def _run_agent_loop(
     tool_guard_state: _RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None,
     build_post_tool_grounding_note: Callable[..., str],
-    user_entity_surface: str = "",
     collected_tool_results: list[ToolResult] | None = None,
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
-    from unclaw.tools.web_entity_guard import apply_entity_guard_to_tool_calls
-
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
 
@@ -125,18 +121,12 @@ def _run_agent_loop(
             )
         )
 
-        guarded_tool_calls = apply_entity_guard_to_tool_calls(
-            tool_calls,
-            user_entity_surface,
-        )
-        guarded_tool_calls = _deduplicate_search_tool_calls(guarded_tool_calls)
-
         tool_results = _execute_runtime_tool_calls(
             session_manager=session_manager,
             session_id=session_id,
             tracer=tracer,
             tool_registry=tool_registry,
-            tool_calls=guarded_tool_calls,
+            tool_calls=tool_calls,
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
         )

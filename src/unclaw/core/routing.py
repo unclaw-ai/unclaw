@@ -1,17 +1,14 @@
-"""Public routing helpers and minimal compatibility wrappers.
+"""Legacy routing compatibility helpers.
 
-The runtime keeps only structural legacy retry hints plus search dedup here.
-Deterministic semantic routing and entity recentering are intentionally
-disabled.
+Active runtime execution is model-first and does not use deterministic routing
+or entity recentering. This module keeps inactive compatibility wrappers for
+legacy unit tests and bounded helper calls outside the runtime path.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from unclaw.core.routing_legacy import (
-    _build_request_routing_note,
-)
 from unclaw.core.session_manager import SessionManager
 from unclaw.tools.contracts import ToolCall
 
@@ -25,6 +22,16 @@ class _EntityAnchor:
     surface: str
     corrected: bool = False
     from_current_turn: bool = False
+
+
+def _build_request_routing_note(*, user_input: str, capability_summary: object) -> str | None:
+    """Compatibility wrapper for the inactive legacy routing-note builder."""
+    from unclaw.core.routing_legacy import _build_request_routing_note as _legacy_builder
+
+    return _legacy_builder(
+        user_input=user_input,
+        capability_summary=capability_summary,
+    )
 
 
 def _looks_like_deep_search_request(user_input: str) -> bool:

@@ -280,6 +280,13 @@ def test_one_shot_turn_without_goal_state_does_not_inject_task_continuity_note_l
             created_at="2026-03-25T09:00:02Z",
             finish_reason="stop",
         ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="There is no persisted task progress for this session.",
+            created_at="2026-03-25T09:00:03Z",
+            finish_reason="stop",
+        ),
         captured_messages=captured_messages,
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
@@ -319,10 +326,10 @@ def test_one_shot_turn_without_goal_state_does_not_inject_task_continuity_note_l
         )
 
         assert second_reply == "There is no persisted task progress for this session."
-        assert fake_provider.call_count() == 3
+        assert fake_provider.call_count() == 4
         second_turn_system_messages = [
             message.content
-            for message in captured_messages[2]
+            for message in captured_messages[-1]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
@@ -568,6 +575,7 @@ def test_fast_web_search_mismatch_then_successful_write_text_file_turn_persists_
             payload={
                 "query": call.arguments["query"],
                 "result_count": 1,
+                "match_quality": "mismatch",
                 "grounding_note": "",
             },
         ),

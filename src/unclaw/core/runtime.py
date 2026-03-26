@@ -16,7 +16,6 @@ from unclaw.core.orchestrator import (
     OrchestratorError,
     OrchestratorTurnResult,
 )
-import unclaw.core.routing as _routing
 import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
@@ -26,7 +25,7 @@ from unclaw.constants import (
     RUNTIME_ERROR_REPLY,
 )
 from unclaw.errors import ConfigurationError, UnclawError
-from unclaw.llm.base import LLMContentCallback, LLMError
+from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
@@ -151,31 +150,6 @@ def run_user_turn(
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
-        entity_anchor = None
-        entity_anchor_resolved = False
-        entity_recentering_note = None
-        entity_recentering_note_built = False
-
-        def _get_entity_anchor():
-            nonlocal entity_anchor, entity_anchor_resolved
-            if not entity_anchor_resolved:
-                entity_anchor = _routing._resolve_entity_anchor_for_turn(
-                    session_manager=session_manager,
-                    session_id=session.id,
-                    user_input=user_input,
-                )
-                entity_anchor_resolved = True
-            return entity_anchor
-
-        def _get_entity_recentering_note():
-            nonlocal entity_recentering_note, entity_recentering_note_built
-            if not entity_recentering_note_built:
-                entity_recentering_note = _runtime_support._build_entity_recentering_note(
-                    entity_anchor=_get_entity_anchor(),
-                    user_input=user_input,
-                )
-                entity_recentering_note_built = True
-            return entity_recentering_note
 
         system_context_notes = tuple(
             note
@@ -220,21 +194,9 @@ def run_user_turn(
                     tracer=active_tracer,
                 )
 
-            def _run_responder_turn(
-                *,
-                system_notes: tuple[str, ...],
-                content_callback: LLMContentCallback | None,
+            def _finalize_responder_turn(
+                turn_result: OrchestratorTurnResult,
             ) -> tuple[OrchestratorTurnResult, str | None]:
-                turn_result = orchestrator.run_turn(
-                    session_id=session.id,
-                    user_message=user_input,
-                    model_profile_name=selected_model_profile_name,
-                    capability_summary=responder_capability_summary,
-                    system_context_notes=system_notes,
-                    thinking_enabled=thinking_enabled,
-                    content_callback=content_callback,
-                    tools=responder_tool_definitions,
-                )
                 active_tracer.trace_model_succeeded(
                     session_id=session.id,
                     provider=turn_result.response.provider,
@@ -261,6 +223,49 @@ def run_user_turn(
                         )
 
                 return turn_result, inline_tool_reply
+
+            def _run_responder_turn(
+                *,
+                system_notes: tuple[str, ...],
+                content_callback: LLMContentCallback | None,
+            ) -> tuple[OrchestratorTurnResult, str | None]:
+                turn_result = orchestrator.run_turn(
+                    session_id=session.id,
+                    user_message=user_input,
+                    model_profile_name=selected_model_profile_name,
+                    capability_summary=responder_capability_summary,
+                    system_context_notes=system_notes,
+                    thinking_enabled=thinking_enabled,
+                    content_callback=content_callback,
+                    tools=responder_tool_definitions,
+                )
+                return _finalize_responder_turn(turn_result)
+
+            def _run_responder_recovery_turn(
+                *,
+                prior_context_messages: tuple[LLMMessage, ...],
+                recovery_note: str,
+                content_callback: LLMContentCallback | None,
+            ) -> tuple[OrchestratorTurnResult, str | None]:
+                recovery_messages = list(prior_context_messages)
+                insert_index = len(recovery_messages)
+                for index in range(len(recovery_messages) - 1, -1, -1):
+                    if recovery_messages[index].role is LLMRole.USER:
+                        insert_index = index
+                        break
+                recovery_messages.insert(
+                    insert_index,
+                    LLMMessage(role=LLMRole.SYSTEM, content=recovery_note),
+                )
+                turn_result = orchestrator.call_model(
+                    session_id=session.id,
+                    messages=tuple(recovery_messages),
+                    model_profile_name=selected_model_profile_name,
+                    thinking_enabled=thinking_enabled,
+                    content_callback=content_callback,
+                    tools=responder_tool_definitions,
+                )
+                return _finalize_responder_turn(turn_result)
 
             initial_stream_chunks: list[str] | None = None
             initial_content_callback = _effective_stream_func
@@ -293,30 +298,16 @@ def run_user_turn(
                     assistant_reply is None
                     and not response.response.tool_calls
                     and responder_tool_definitions is not None
+                    and not turn_tool_results
+                    and not tool_guard_state.is_cancelled()
                 ):
-                    legacy_request_routing_note = _routing._build_request_routing_note(
-                        user_input=user_input,
-                        capability_summary=capability_summary,
+                    response, assistant_reply = _run_responder_recovery_turn(
+                        prior_context_messages=response.context_messages,
+                        recovery_note=(
+                            _runtime_support._build_model_native_tool_recovery_note()
+                        ),
+                        content_callback=_effective_stream_func,
                     )
-                    if legacy_request_routing_note is not None:
-                        entity_recentering_note = _get_entity_recentering_note()
-                        legacy_system_context_notes = tuple(
-                            note
-                            for note in (
-                                memory_context_note,
-                                task_continuity_note,
-                                local_access_note,
-                                legacy_request_routing_note,
-                                entity_recentering_note,
-                            )
-                            if note is not None
-                        )
-                        response, assistant_reply = _run_responder_turn(
-                            system_notes=legacy_system_context_notes,
-                            content_callback=_effective_stream_func,
-                        )
-                    else:
-                        _flush_initial_stream_chunks()
                 elif assistant_reply is None and not response.response.tool_calls:
                     _flush_initial_stream_chunks()
 
@@ -343,20 +334,6 @@ def run_user_turn(
                         tool_call_callback=tool_call_callback,
                         build_post_tool_grounding_note=(
                             _runtime_support._build_post_tool_grounding_note
-                        ),
-                        user_entity_surface=(
-                            # Only activate the pre-tool entity guard when the anchor
-                            # came from the current turn (explicit mention) or from an
-                            # explicit correction by the user.  History-fallback anchors
-                            # must not override the model's entity choice — they only
-                            # inform the recentering note injected into the system prompt.
-                            resolved_entity_anchor.surface
-                            if (resolved_entity_anchor := _get_entity_anchor()) is not None
-                            and (
-                                resolved_entity_anchor.from_current_turn
-                                or resolved_entity_anchor.corrected
-                            )
-                            else ""
                         ),
                         collected_tool_results=turn_tool_results,
                     )

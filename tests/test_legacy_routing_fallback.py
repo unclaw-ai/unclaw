@@ -243,6 +243,10 @@ def test_native_legacy_routing_retry_recovers_tool_call(
                     "Current request routing hint:" not in message
                     for message in system_messages
                 )
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -253,8 +257,11 @@ def test_native_legacy_routing_retry_recovers_tool_call(
 
             if call_count == 2:
                 assert any(
-                    "Current request routing hint: the user gave a specific public URL."
-                    in message
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
+                assert all(
+                    "Current request routing hint:" not in message
                     for message in system_messages
                 )
                 return LLMResponse(
@@ -285,8 +292,12 @@ def test_native_legacy_routing_retry_recovers_tool_call(
                 )
 
             assert any(
-                "Current request routing hint: the user gave a specific public URL."
+                "Tool reconsideration note:"
                 in message
+                for message in system_messages
+            )
+            assert all(
+                "Current request routing hint:" not in message
                 for message in system_messages
             )
             assert any(
@@ -322,7 +333,7 @@ def test_native_legacy_routing_retry_recovers_tool_call(
 
         assert reply == "Recovered summary after one legacy retry."
         assert call_count == 3
-        assert build_calls == [user_input]
+        assert build_calls == []
     finally:
         session_manager.close()
 
@@ -381,6 +392,10 @@ def test_native_legacy_routing_retry_stops_after_one_no_tool_retry(
                     "Current request routing hint:" not in message
                     for message in system_messages
                 )
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -390,8 +405,12 @@ def test_native_legacy_routing_retry_stops_after_one_no_tool_retry(
                 )
 
             assert any(
-                "Current request routing hint: the user gave a specific public URL."
+                "Tool reconsideration note:"
                 in message
+                for message in system_messages
+            )
+            assert all(
+                "Current request routing hint:" not in message
                 for message in system_messages
             )
             return LLMResponse(
@@ -423,7 +442,7 @@ def test_native_legacy_routing_retry_stops_after_one_no_tool_retry(
 
         assert reply == "Second pass still stayed text-only."
         assert call_count == 2
-        assert build_calls == [user_input]
+        assert build_calls == []
     finally:
         session_manager.close()
 
@@ -477,10 +496,17 @@ def test_native_no_legacy_routing_note_means_no_retry(
             system_messages = [
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
-            assert all(
-                "Current request routing hint:" not in message
-                for message in system_messages
-            )
+            assert all("Current request routing hint:" not in message for message in system_messages)
+            if call_count == 1:
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
+            else:
+                assert any(
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -509,8 +535,8 @@ def test_native_no_legacy_routing_note_means_no_retry(
         )
 
         assert reply == "Direct answer without any retry."
-        assert call_count == 1
-        assert build_calls == [user_input]
+        assert call_count == 2
+        assert build_calls == []
     finally:
         session_manager.close()
 
@@ -565,6 +591,7 @@ def test_native_legacy_routing_retry_recovers_operational_tool_call(
     tool_call: ToolCall,
     note_fragment: str,
 ) -> None:
+    del note_fragment
     project_root = make_temp_project()
     session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
@@ -614,6 +641,10 @@ def test_native_legacy_routing_retry_recovers_operational_tool_call(
                     "Current request routing hint:" not in message
                     for message in system_messages
                 )
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -623,7 +654,14 @@ def test_native_legacy_routing_retry_recovers_operational_tool_call(
                 )
 
             if call_count == 2:
-                assert any(note_fragment in message for message in system_messages)
+                assert any(
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
+                assert all(
+                    "Current request routing hint:" not in message
+                    for message in system_messages
+                )
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
@@ -662,7 +700,7 @@ def test_native_legacy_routing_retry_recovers_operational_tool_call(
 
         assert reply == f"Recovered reply after {tool_call.tool_name}."
         assert call_count == 3
-        assert build_calls == [user_input]
+        assert build_calls == []
     finally:
         session_manager.close()
 
@@ -730,10 +768,17 @@ def test_native_legacy_routing_retry_skips_lexical_requests_without_structural_h
             system_messages = [
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
-            assert all(
-                "Current request routing hint:" not in message
-                for message in system_messages
-            )
+            assert all("Current request routing hint:" not in message for message in system_messages)
+            if call_count == 1:
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
+            else:
+                assert any(
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -761,8 +806,8 @@ def test_native_legacy_routing_retry_skips_lexical_requests_without_structural_h
         )
 
         assert reply == "Direct answer without any retry."
-        assert call_count == 1
-        assert build_calls == [user_input]
+        assert call_count == 2
+        assert build_calls == []
     finally:
         session_manager.close()
 
@@ -825,10 +870,17 @@ def test_native_semantic_requests_no_longer_trigger_legacy_retry(
             system_messages = [
                 message.content for message in messages if message.role is LLMRole.SYSTEM
             ]
-            assert all(
-                "Current request routing hint:" not in message
-                for message in system_messages
-            )
+            assert all("Current request routing hint:" not in message for message in system_messages)
+            if call_count == 1:
+                assert all(
+                    "Tool reconsideration note:" not in message
+                    for message in system_messages
+                )
+            else:
+                assert any(
+                    "Tool reconsideration note:" in message
+                    for message in system_messages
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -856,7 +908,7 @@ def test_native_semantic_requests_no_longer_trigger_legacy_retry(
         )
 
         assert reply == "Direct answer without any retry."
-        assert call_count == 1
-        assert build_calls == [user_input]
+        assert call_count == 2
+        assert build_calls == []
     finally:
         session_manager.close()
