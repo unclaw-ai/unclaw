@@ -666,11 +666,12 @@ def test_v1_native_search_turn_keeps_shared_native_responder_tools(
 
         assert reply == "Marine Leleu is a French endurance athlete."
         assert captured_search_queries == [native_query]
-        assert captured_responder_tools == [
+        assert [tools for tools in captured_responder_tools if tools is not None] == [
             ("search_web", "write_text_file"),
             ("search_web", "write_text_file"),
             ("search_web", "write_text_file"),
         ]
+        assert captured_responder_tools[-1] is None
     finally:
         session_manager.close()
 

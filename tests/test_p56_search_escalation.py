@@ -1,11 +1,10 @@
-"""Tests for structural routing fallback plus current post-tool grounding behavior.
+"""Tests for structural routing fallback plus post-tool grounding guidance.
 
 Proves:
 - _build_request_routing_note routes only explicit structural hints
 - semantic prompts without structural hints do not trigger deterministic retry notes
 - _build_post_tool_grounding_note pushes search_web escalation after fast_web_search
 - timeout/partial-failure note is included when a tool timed out
-- _apply_post_tool_reply_discipline still preserves substantive replies from thin fast_web results
 - capability context describes search_web as the deeper grounded path
 """
 
@@ -19,9 +18,6 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.reply_discipline import (
-    _apply_post_tool_reply_discipline,
-)
 from unclaw.core.routing import (
     _build_request_routing_note,
     _looks_like_deep_search_request,
@@ -58,6 +54,8 @@ def _thin_fast_web_result(query: str = "McFly et Carlito") -> ToolResult:
         payload={
             "query": query,
             "result_count": 1,
+            "match_quality": "exact",
+            "supported_point_count": 1,
             "grounding_note": f"- {query}: resultat rapide",
         },
     )
@@ -215,35 +213,6 @@ def test_post_tool_note_no_timeout_guidance_when_no_timeout() -> None:
         tool_definitions=[SEARCH_WEB_DEFINITION],
     )
     assert "timed out" not in note.lower()
-
-
-def test_discipline_clamps_substantive_thin_fast_web_result_reply() -> None:
-    thin_result = _thin_fast_web_result("McFly et Carlito")
-    rich_reply = (
-        "McFly et Carlito sont un duo de YouTubeurs francais fonde en 2010. "
-        "Ils ont 8 millions d'abonnes, ont sorti plusieurs livres et animent "
-        "une emission de radio hebdomadaire depuis 2018."
-    )
-    result = _apply_post_tool_reply_discipline(
-        reply=rich_reply,
-        user_input="fais une bio complete de McFly et Carlito",
-        tool_results=[thin_result],
-    )
-    assert result == (
-        "McFly et Carlito: resultat rapide I couldn't confirm a fuller "
-        "biography from that quick grounding probe alone."
-    )
-
-
-def test_discipline_does_not_clamp_acknowledged_limitation_reply() -> None:
-    thin_result = _thin_fast_web_result()
-    honest_reply = "Je ne peux pas confirmer une bio complete depuis ce resultat rapide."
-    result = _apply_post_tool_reply_discipline(
-        reply=honest_reply,
-        user_input="fais une bio complete",
-        tool_results=[thin_result],
-    )
-    assert "confirmer" in result or "ne peux pas" in result
 
 
 def test_capability_context_describes_search_web_as_deep_path() -> None:

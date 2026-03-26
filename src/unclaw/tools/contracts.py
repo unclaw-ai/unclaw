@@ -255,6 +255,8 @@ class FastSearchWebPayload(TypedDict, total=False):
     query: str
     provider: str
     result_count: int
+    match_quality: str
+    supported_point_count: int
     grounding_note: str
 
 

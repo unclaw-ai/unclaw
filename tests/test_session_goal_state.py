@@ -63,6 +63,18 @@ def _tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResp
     )
 
 
+def _non_finalizer_calls(captured_messages: list[list[object]]) -> list[list[object]]:
+    def _is_finalizer_call(messages: list[object]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            "Grounded reply finalizer for one runtime turn."
+        )
+
+    return [messages for messages in captured_messages if not _is_finalizer_call(messages)]
+
+
 def test_one_shot_system_info_turn_does_not_create_session_goal_state(
     monkeypatch,
     make_temp_project,
@@ -1154,9 +1166,10 @@ def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_u
         assert goal_state.last_blocker is None
         assert first_output_path.read_text(encoding="utf-8") == "first note"
 
+        responder_calls = _non_finalizer_calls(captured_messages)
         third_turn_system_messages = [
             message.content
-            for message in captured_messages[4]
+            for message in responder_calls[4]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [
@@ -1544,9 +1557,10 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
             for message in first_turn_system_messages
         )
 
+        responder_calls = _non_finalizer_calls(captured_messages)
         second_turn_system_messages = [
             message.content
-            for message in captured_messages[2]
+            for message in responder_calls[2]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [

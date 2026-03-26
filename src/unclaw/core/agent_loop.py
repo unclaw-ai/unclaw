@@ -470,6 +470,7 @@ def _build_timed_out_tool_result(
             f"Tool '{tool_call.tool_name}' timed out after "
             f"{timeout_seconds:g} seconds."
         ),
+        payload={"execution_state": "timed_out"},
     )
 
 
@@ -484,6 +485,7 @@ def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
     return ToolResult.failure(
         tool_name=tool_call.tool_name,
         error=f"Tool '{tool_call.tool_name}' was cancelled.",
+        payload={"execution_state": "cancelled"},
     )
 
 

@@ -184,7 +184,7 @@ def test_runtime_no_longer_applies_literal_entity_guard_to_tool_calls(
         )
 
         assert reply == "Marine Leleu is a French endurance athlete."
-        assert call_count == 2
+        assert call_count == 3
         assert observed_tool_calls == [
             ToolCall(
                 tool_name="fast_web_search",

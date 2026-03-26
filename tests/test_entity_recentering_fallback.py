@@ -179,9 +179,20 @@ def test_native_first_pass_leaves_miscentered_query_untouched_without_entity_heu
         )
 
         assert reply == "McFly et Carlito are a French YouTube comedy duo."
-        assert call_count == 2
+        assert call_count == 3
         assert executed_queries == ["Marty McFly and Carlito"]
-        assert len(system_messages_by_call) == 2
+        assert len(
+            [
+                messages
+                for messages in system_messages_by_call
+                if not (
+                    messages
+                    and messages[0].startswith(
+                        "Grounded reply finalizer for one runtime turn."
+                    )
+                )
+            ]
+        ) == 2
     finally:
         session_manager.close()
 

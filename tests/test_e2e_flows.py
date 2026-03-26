@@ -18,6 +18,15 @@ from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 pytestmark = [pytest.mark.e2e, pytest.mark.integration]
 
 
+def _is_grounded_finalizer_call(messages: list[object]) -> bool:
+    if not messages:
+        return False
+    first_content = getattr(messages[0], "content", "")
+    return isinstance(first_content, str) and first_content.startswith(
+        "Grounded reply finalizer for one runtime turn."
+    )
+
+
 def test_start_entrypoint_bootstraps_runtime_and_leaves_a_usable_session(
     monkeypatch,
     make_temp_project,
@@ -263,7 +272,13 @@ def test_cli_web_backed_turn_and_follow_up_stay_grounded_end_to_end(
     assert "Sources:\n- Marine Leleu: https://example.com/marine-leleu" in output
     assert "- Athlete Profile: https://example.com/athletes/marine-leleu" in output
     assert "Unclaw> Shorter recap." in output
-    assert len(captured_messages) == 3
+    assert len(
+        [
+            messages
+            for messages in captured_messages
+            if not _is_grounded_finalizer_call(messages)
+        ]
+    ) == 3
 
     session_manager = SessionManager.from_settings(settings)
     try:

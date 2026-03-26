@@ -21,6 +21,15 @@ from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, SEARCH_WEB_DEFINIT
 pytestmark = pytest.mark.integration
 
 
+def _is_grounded_finalizer_call(messages: list[object]) -> bool:
+    if not messages:
+        return False
+    first_content = getattr(messages[0], "content", "")
+    return isinstance(first_content, str) and first_content.startswith(
+        "Grounded reply finalizer for one runtime turn."
+    )
+
+
 def _build_native_runtime(
     project_root,
     set_profile_tool_mode,
@@ -188,7 +197,15 @@ def test_search_web_timeout_retries_once_with_lighter_args_and_no_extra_model_ca
         assert search_calls[0].arguments == {"query": "retry topic", "max_results": 8}
         assert search_calls[1].arguments == {"query": "retry topic", "max_results": 3}
         assert fake_provider.call_count() == 2
-        assert len(captured_calls) == 2
+        assert len(
+            [
+                captured_call
+                for captured_call in captured_calls
+                if not _is_grounded_finalizer_call(
+                    list(captured_call.get("messages", []))
+                )
+            ]
+        ) == 2
         assert len(stored_tool_messages) == 1
         assert stored_tool_messages[0].startswith("Tool: search_web\nOutcome: success\n")
         assert "timed out" not in stored_tool_messages[0]
@@ -269,7 +286,10 @@ def test_search_web_timeout_retry_stops_after_second_timeout(
             tool_registry=tool_registry,
         )
 
-        assert "timed out again" in reply
+        assert reply == (
+            "The tool step timed out, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert len(search_calls) == 2
         assert search_calls[1].arguments == {"query": "retry topic", "max_results": 3}
         assert fake_provider.call_count() == 2
@@ -348,7 +368,10 @@ def test_search_web_non_timeout_failure_does_not_retry(
             tool_registry=tool_registry,
         )
 
-        assert "search failed" in reply
+        assert reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert len(search_calls) == 1
         assert fake_provider.call_count() == 2
     finally:
@@ -427,7 +450,10 @@ def test_non_search_web_timeout_does_not_retry(
             tool_registry=tool_registry,
         )
 
-        assert "fetch timed out" in reply
+        assert reply == (
+            "The tool step timed out, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert len(fetch_calls) == 1
         assert fake_provider.call_count() == 2
     finally:

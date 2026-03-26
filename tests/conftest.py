@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -80,6 +81,62 @@ class ScriptedFakeOllamaProvider:
     def call_count(cls) -> int:
         return cls._call_count
 
+    @staticmethod
+    def _is_grounded_finalizer_call(messages: Sequence[Any]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            "Grounded reply finalizer for one runtime turn."
+        )
+
+    @staticmethod
+    def _build_auto_finalizer_response(profile, messages) -> LLMResponse:  # type: ignore[no-untyped-def]
+        draft_reply = ""
+        tool_results: list[dict[str, Any]] = []
+        if messages:
+            finalizer_input = getattr(messages[-1], "content", "")
+            if isinstance(finalizer_input, str):
+                try:
+                    payload = json.loads(finalizer_input)
+                except json.JSONDecodeError:
+                    payload = {}
+                if isinstance(payload, dict):
+                    raw_draft_reply = payload.get("assistant_draft_reply")
+                    if isinstance(raw_draft_reply, str):
+                        draft_reply = raw_draft_reply
+                    raw_tool_results = payload.get("current_turn_tool_results")
+                    if isinstance(raw_tool_results, list):
+                        tool_results = [
+                            item for item in raw_tool_results if isinstance(item, dict)
+                        ]
+
+        final_reply = draft_reply
+        if tool_results and all(item.get("success") is False for item in tool_results):
+            timed_out = any(
+                item.get("execution_state") == "timed_out"
+                or "timed out" in str(item.get("error", "")).casefold()
+                for item in tool_results
+            )
+            if timed_out:
+                final_reply = (
+                    "The tool step timed out, so I couldn't confirm the requested "
+                    "details from retrieved tool evidence."
+                )
+            else:
+                final_reply = (
+                    "The tool step failed, so I couldn't confirm the requested "
+                    "details from retrieved tool evidence."
+                )
+
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content=json.dumps({"final_reply": final_reply}),
+            created_at="2026-03-26T00:00:00Z",
+            finish_reason="stop",
+        )
+
     def chat(  # type: ignore[no-untyped-def]
         self,
         profile,
@@ -103,6 +160,33 @@ class ScriptedFakeOllamaProvider:
                     "tools": tools,
                 }
             )
+
+        if provider_cls._is_grounded_finalizer_call(messages):
+            step_index = provider_cls._call_count
+            if step_index < len(provider_cls._scripted_steps):
+                step = provider_cls._scripted_steps[step_index]
+                if callable(step):
+                    provider_cls._call_count += 1
+                    return step(
+                        profile=profile,
+                        messages=messages,
+                        timeout_seconds=timeout_seconds,
+                        thinking_enabled=thinking_enabled,
+                        content_callback=content_callback,
+                        tools=tools,
+                    )
+                if isinstance(step, LLMResponse):
+                    try:
+                        payload = json.loads(step.content)
+                    except json.JSONDecodeError:
+                        payload = None
+                    if isinstance(payload, dict) and isinstance(
+                        payload.get("final_reply"), str
+                    ):
+                        provider_cls._call_count += 1
+                        return step
+
+            return provider_cls._build_auto_finalizer_response(profile, messages)
 
         step_index = provider_cls._call_count
         if step_index >= len(provider_cls._scripted_steps):

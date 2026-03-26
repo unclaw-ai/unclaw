@@ -16,7 +16,6 @@ from unclaw.core.orchestrator import (
     OrchestratorError,
     OrchestratorTurnResult,
 )
-import unclaw.core.reply_discipline as _reply_discipline
 import unclaw.core.routing as _routing
 import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.session_manager import SessionManager, SessionManagerError
@@ -116,22 +115,16 @@ def run_user_turn(
     turn_start_message_count = len(session_manager.list_messages(session.id))
     pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
     pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
+    orchestrator: Orchestrator | None = None
+    grounded_finalization_used = False
 
-    # Track whether the streaming callback was ever invoked by the provider.
-    # If a final reply exists but nothing was streamed, we emit it once as a
-    # fallback so callers always receive output when a reply was produced.
-    _streamed_something = False
+    buffered_stream_chunks: list[str] | None
     _effective_stream_func: LLMContentCallback | None
     if stream_output_func is not None:
-        _orig_stream_func = stream_output_func
-
-        def _tracking_stream_func(text: str) -> None:
-            nonlocal _streamed_something
-            _streamed_something = True
-            _orig_stream_func(text)
-
-        _effective_stream_func = _tracking_stream_func
+        buffered_stream_chunks = []
+        _effective_stream_func = buffered_stream_chunks.append
     else:
+        buffered_stream_chunks = None
         _effective_stream_func = None
 
     if runtime_explicit_tool_call is None and legacy_tool_definitions is not None:
@@ -220,11 +213,12 @@ def run_user_turn(
             assistant_reply = _agent_loop._TURN_CANCELLED_REPLY
 
         if assistant_reply is None:
-            orchestrator = Orchestrator(
-                settings=session_manager.settings,
-                session_manager=session_manager,
-                tracer=active_tracer,
-            )
+            if orchestrator is None:
+                orchestrator = Orchestrator(
+                    settings=session_manager.settings,
+                    session_manager=session_manager,
+                    tracer=active_tracer,
+                )
 
             def _run_responder_turn(
                 *,
@@ -403,21 +397,37 @@ def run_user_turn(
 
     if active_assistant_reply_transform is not None:
         assistant_reply = active_assistant_reply_transform(assistant_reply)
-    assistant_reply = _reply_discipline._apply_post_tool_reply_discipline(
-        reply=assistant_reply,
-        user_input=user_input,
-        tool_results=turn_tool_results,
-        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-        session_goal_state=pre_turn_goal_state,
-        session_progress_ledger=pre_turn_progress_ledger,
+    if orchestrator is None:
+        orchestrator = Orchestrator(
+            settings=session_manager.settings,
+            session_manager=session_manager,
+            tracer=active_tracer,
+        )
+    assistant_reply, grounded_finalization_used = (
+        _runtime_support._finalize_grounded_reply(
+            orchestrator=orchestrator,
+            session_id=session.id,
+            model_profile_name=selected_model_profile_name,
+            thinking_enabled=thinking_enabled,
+            tracer=active_tracer,
+            user_input=user_input,
+            assistant_draft_reply=assistant_reply,
+            tool_results=turn_tool_results,
+            session_goal_state=pre_turn_goal_state,
+            session_progress_ledger=pre_turn_progress_ledger,
+            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
+            tool_registry=tool_registry,
+        )
     )
 
-    # Fallback: if a callback was registered but the provider never invoked it
-    # (e.g. the model returned all content in a final aggregated chunk with no
-    # streaming deltas), emit the final reply once so callers always receive
-    # output through the callback when a reply was produced.
-    if stream_output_func is not None and not _streamed_something and assistant_reply:
-        stream_output_func(assistant_reply)
+    if stream_output_func is not None:
+        if grounded_finalization_used:
+            stream_output_func(assistant_reply)
+        elif buffered_stream_chunks:
+            for chunk in buffered_stream_chunks:
+                stream_output_func(chunk)
+        elif assistant_reply:
+            stream_output_func(assistant_reply)
 
     session_manager.add_message(
         MessageRole.ASSISTANT,

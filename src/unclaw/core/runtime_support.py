@@ -7,15 +7,20 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.orchestrator import ModelCallFailedError
+from unclaw.core.orchestrator import (
+    ModelCallFailedError,
+    Orchestrator,
+    OrchestratorError,
+)
 from unclaw.core.reply_discipline import (
-    _fast_web_search_result_is_mismatch,
-    _fast_web_search_result_is_thin,
-    _search_web_result_is_thin,
+    _build_grounded_reply_facts,
+    _build_structural_finalization_fallback,
     _tool_result_timed_out,
 )
 from unclaw.core.session_manager import SessionManager
-from unclaw.constants import RUNTIME_ERROR_REPLY
+from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
+from unclaw.errors import ConfigurationError
+from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolDefinition, ToolResult
@@ -33,6 +38,258 @@ _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
 _BLOCKED_GOAL_CONTINUATION_MAX_TOKENS = 2
 _BLOCKED_GOAL_CONTINUATION_MAX_TOKEN_ALNUM_CHARS = 3
 _BLOCKED_GOAL_CONTINUATION_ALLOWED_PUNCTUATION = ".,!?;:'\"-()[]{}"
+_GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
+    (
+        "Grounded reply finalizer for one runtime turn.",
+        "Rewrite the draft into the final user reply using only the provided runtime facts and evidence.",
+        "Hard rules:",
+        "- Treat the structured tool facts and raw tool outputs as the only evidence for current-turn execution claims.",
+        "- Do not claim that a file was created, saved, updated, or modified unless the current turn includes a successful `write_text_file` tool result.",
+        "- Do not claim research, search completion, biography completion, or overall task completion unless the evidence and persisted task state support it.",
+        "- If the user is asking about task status or progress, answer from the persisted task state before the turn plus the current-turn execution facts.",
+        "- If requested deliverables are still unsupported or blocked, say that plainly instead of pretending they are complete.",
+        "- Keep the reply in the user's language when it is inferable from the request.",
+        "- Do not end with promises about actions that did not happen in this turn.",
+        "- Preserve supported details from the draft when they remain grounded.",
+        "Return JSON only with this shape: {\"final_reply\": \"...\"}",
+    )
+)
+
+
+def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
+    return tool_result.payload if isinstance(tool_result.payload, dict) else {}
+
+
+def _fast_web_search_match_quality(tool_result: ToolResult) -> str | None:
+    payload = _tool_result_payload_dict(tool_result)
+    match_quality = payload.get("match_quality")
+    if isinstance(match_quality, str):
+        return match_quality
+    result_count = payload.get("result_count")
+    if isinstance(result_count, int) and result_count <= 0:
+        return "no_results"
+    grounding_note = payload.get("grounding_note")
+    if isinstance(grounding_note, str) and not grounding_note.strip():
+        return "mismatch"
+    return None
+
+
+def _fast_web_search_result_is_mismatch(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return False
+    return _fast_web_search_match_quality(tool_result) in {"mismatch", "no_results"}
+
+
+def _fast_web_search_result_is_thin(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return True
+
+    payload = _tool_result_payload_dict(tool_result)
+    result_count = payload.get("result_count")
+    supported_point_count = payload.get("supported_point_count")
+
+    if _fast_web_search_result_is_mismatch(tool_result):
+        return True
+    if isinstance(result_count, int) and result_count <= 1:
+        return True
+    if isinstance(supported_point_count, int):
+        return supported_point_count <= 1
+    return False
+
+
+def _search_web_result_is_thin(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return True
+
+    payload = _tool_result_payload_dict(tool_result)
+    evidence_count = payload.get("evidence_count")
+    finding_count = payload.get("finding_count")
+    display_sources = payload.get("display_sources")
+
+    if isinstance(finding_count, int) and finding_count <= 1:
+        return True
+    if isinstance(evidence_count, int) and evidence_count <= 1:
+        return True
+    if isinstance(display_sources, list) and len(display_sources) <= 1:
+        return True
+    return False
+
+
+def _serialize_grounded_reply_facts(facts: dict[str, Any]) -> str:
+    normalized_facts = json.loads(
+        json.dumps(facts, ensure_ascii=False, default=str)
+    )
+    return json.dumps(normalized_facts, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _build_grounded_reply_finalization_messages(
+    *,
+    user_input: str,
+    assistant_draft_reply: str,
+    tool_results: Sequence[ToolResult],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
+    turn_cancelled_reply: str,
+) -> tuple[LLMMessage, ...]:
+    facts = _build_grounded_reply_facts(
+        user_input=user_input,
+        assistant_draft_reply=assistant_draft_reply,
+        tool_results=tool_results,
+        turn_cancelled_reply=turn_cancelled_reply,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+    )
+    return (
+        LLMMessage(
+            role=LLMRole.SYSTEM,
+            content=_GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT,
+        ),
+        LLMMessage(
+            role=LLMRole.USER,
+            content=_serialize_grounded_reply_facts(facts),
+        ),
+    )
+
+
+def _parse_grounded_reply_finalization_response(response_text: str) -> str | None:
+    stripped_response = response_text.strip()
+    if not stripped_response:
+        return None
+
+    try:
+        payload = json.loads(stripped_response)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    final_reply = payload.get("final_reply")
+    if not isinstance(final_reply, str):
+        return None
+
+    normalized_reply = final_reply.strip()
+    return normalized_reply or None
+
+
+def _turn_requires_grounded_reply_finalization(
+    *,
+    tool_results: Sequence[ToolResult],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
+    tool_registry: ToolRegistry | None,
+) -> bool:
+    if tool_results:
+        return any(
+            tool_result.tool_name in {"write_text_file", "fast_web_search", "search_web"}
+            for tool_result in tool_results
+        )
+    if session_goal_state is not None or bool(session_progress_ledger):
+        return True
+    del tool_registry
+    return False
+
+
+def _finalize_grounded_reply(
+    *,
+    orchestrator: Orchestrator,
+    session_id: str,
+    model_profile_name: str,
+    thinking_enabled: bool,
+    tracer: Any,
+    user_input: str,
+    assistant_draft_reply: str,
+    tool_results: Sequence[ToolResult],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
+    turn_cancelled_reply: str,
+    tool_registry: ToolRegistry | None,
+) -> tuple[str, bool]:
+    stripped_draft_reply = assistant_draft_reply.strip() or EMPTY_RESPONSE_REPLY
+    finalization_required = _turn_requires_grounded_reply_finalization(
+        tool_results=tool_results,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+        tool_registry=tool_registry,
+    )
+    if not finalization_required:
+        if tool_results and all(tool_result.success is False for tool_result in tool_results):
+            return (
+                _build_structural_finalization_fallback(
+                    reply=stripped_draft_reply,
+                    tool_results=tool_results,
+                    turn_cancelled_reply=turn_cancelled_reply,
+                    session_goal_state=session_goal_state,
+                    session_progress_ledger=session_progress_ledger,
+                ),
+                False,
+            )
+        return stripped_draft_reply, False
+
+    messages = _build_grounded_reply_finalization_messages(
+        user_input=user_input,
+        assistant_draft_reply=stripped_draft_reply,
+        tool_results=tool_results,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+        turn_cancelled_reply=turn_cancelled_reply,
+    )
+
+    try:
+        turn_result = orchestrator.call_model(
+            session_id=session_id,
+            messages=messages,
+            model_profile_name=model_profile_name,
+            thinking_enabled=thinking_enabled,
+        )
+        tracer.trace_model_succeeded(
+            session_id=session_id,
+            provider=turn_result.response.provider,
+            model_name=turn_result.response.model_name,
+            finish_reason=turn_result.response.finish_reason,
+            output_length=len(turn_result.response.content),
+            model_duration_ms=turn_result.model_duration_ms,
+            reasoning=turn_result.response.reasoning,
+        )
+    except (AssertionError, ConfigurationError, ModelCallFailedError, OrchestratorError) as exc:
+        if isinstance(exc, ModelCallFailedError):
+            tracer.trace_model_failed(
+                session_id=session_id,
+                provider=exc.provider,
+                model_profile_name=exc.model_profile_name,
+                model_name=exc.model_name,
+                model_duration_ms=exc.duration_ms,
+                error=str(exc),
+            )
+        return (
+            _build_structural_finalization_fallback(
+                reply=stripped_draft_reply,
+                tool_results=tool_results,
+                turn_cancelled_reply=turn_cancelled_reply,
+                session_goal_state=session_goal_state,
+                session_progress_ledger=session_progress_ledger,
+                finalization_required=True,
+            ),
+            True,
+        )
+
+    finalized_reply = _parse_grounded_reply_finalization_response(
+        turn_result.response.content
+    )
+    if finalized_reply is None:
+        return (
+            _build_structural_finalization_fallback(
+                reply=stripped_draft_reply,
+                tool_results=tool_results,
+                turn_cancelled_reply=turn_cancelled_reply,
+                session_goal_state=session_goal_state,
+                session_progress_ledger=session_progress_ledger,
+                finalization_required=True,
+            ),
+            True,
+        )
+
+    return finalized_reply, True
 
 
 def _build_session_memory_context_note(

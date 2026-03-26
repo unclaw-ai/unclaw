@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from unclaw.core.command_handler import CommandHandler
@@ -81,14 +82,31 @@ def test_post_fast_web_search_clamps_substantive_reply(
                     },
                 )
 
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=(
+                        "Marine Leleu is a French endurance athlete, author, and podcast host. "
+                        "She is also known for major speaking tours."
+                    ),
+                    created_at="2026-03-24T10:00:01Z",
+                    finish_reason="stop",
+                )
+
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content=(
-                    "Marine Leleu is a French endurance athlete, author, and podcast host. "
-                    "She is also known for major speaking tours."
+                content=json.dumps(
+                    {
+                        "final_reply": (
+                            "Marine Leleu is a French endurance athlete. "
+                            "I couldn't confirm a fuller biography from that quick "
+                            "grounding probe alone."
+                        )
+                    }
                 ),
-                created_at="2026-03-24T10:00:01Z",
+                created_at="2026-03-24T10:00:02Z",
                 finish_reason="stop",
             )
 
@@ -100,12 +118,14 @@ def test_post_fast_web_search_clamps_substantive_reply(
         lambda call: ToolResult.ok(
             tool_name=call.tool_name,
             output_text="Marine Leleu\n- Marine Leleu is a French endurance athlete.",
-            payload={
-                "query": call.arguments["query"],
-                "result_count": 1,
-                "grounding_note": (
-                    "Marine Leleu\n- Marine Leleu is a French endurance athlete."
-                ),
+                payload={
+                    "query": call.arguments["query"],
+                    "result_count": 1,
+                    "match_quality": "exact",
+                    "supported_point_count": 1,
+                    "grounding_note": (
+                        "Marine Leleu\n- Marine Leleu is a French endurance athlete."
+                    ),
             },
         ),
     )
@@ -130,7 +150,7 @@ def test_post_fast_web_search_clamps_substantive_reply(
             "Marine Leleu is a French endurance athlete. "
             "I couldn't confirm a fuller biography from that quick grounding probe alone."
         )
-        assert call_count == 2
+        assert call_count == 3
     finally:
         session_manager.close()
 
@@ -262,7 +282,7 @@ def test_corrected_ambiguity_is_no_longer_recentered_by_runtime_heuristics(
         )
 
         assert reply == "McFly et Carlito are a French YouTube comedy duo."
-        assert call_count == 2
+        assert call_count == 3
         assert len(observed_tool_calls) == 1
         assert observed_tool_calls[0].arguments["query"] == "Marty McFly and Carlito"
     finally:
@@ -319,13 +339,30 @@ def test_multi_entity_mismatch_clamps_substantive_model_reply(
                     },
                 )
 
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=(
+                        "Marty McFly is a fictional character, and Carlito is a wrestler."
+                    ),
+                    created_at="2026-03-24T12:00:01Z",
+                    finish_reason="stop",
+                )
+
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content=(
-                    "Marty McFly is a fictional character, and Carlito is a wrestler."
+                content=json.dumps(
+                    {
+                        "final_reply": (
+                            "The quick web grounding appeared to match a different "
+                            "entity, so I couldn't confirm the requested details "
+                            "from that result alone."
+                        )
+                    }
                 ),
-                created_at="2026-03-24T12:00:01Z",
+                created_at="2026-03-24T12:00:02Z",
                 finish_reason="stop",
             )
 
@@ -340,12 +377,14 @@ def test_multi_entity_mismatch_clamps_substantive_model_reply(
                 "McFly et Carlito\n"
                 "!= results appear to be for a different entity"
             ),
-            payload={
-                "query": call.arguments["query"],
-                "result_count": 1,
-                "grounding_note": (
-                    "McFly et Carlito\n"
-                    "!= results appear to be for a different entity"
+                payload={
+                    "query": call.arguments["query"],
+                    "result_count": 1,
+                    "match_quality": "mismatch",
+                    "supported_point_count": 0,
+                    "grounding_note": (
+                        "McFly et Carlito\n"
+                        "!= results appear to be for a different entity"
                 ),
             },
         ),
@@ -371,7 +410,7 @@ def test_multi_entity_mismatch_clamps_substantive_model_reply(
             "The quick web grounding appeared to match a different entity, so I "
             "couldn't confirm the requested details from that result alone."
         )
-        assert call_count == 2
+        assert call_count == 3
     finally:
         session_manager.close()
 

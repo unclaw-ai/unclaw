@@ -71,6 +71,7 @@ from unclaw.tools.web_search import (
     _search_results_look_weak,
     _search_public_web,
 )
+from unclaw.tools.web_text import _fold_for_match
 from unclaw.tools.web_synthesis import (
     _format_search_results,
     _select_output_sources,
@@ -130,6 +131,49 @@ FAST_WEB_SEARCH_DEFINITION = ToolDefinition(
 
 _FAST_SEARCH_MAX_RESULTS = 3
 _FAST_SEARCH_TIMEOUT_SECONDS = 6.0
+
+
+def _summarize_fast_grounding_snippets(
+    *,
+    query: str,
+    snippets: list[tuple[str, str, str]],
+) -> tuple[str, int]:
+    if not snippets:
+        return "no_results", 0
+
+    search_query = _build_search_query(query)
+    if not search_query.entity_tokens:
+        return "exact", len(snippets)
+
+    full_match_found = False
+    partial_match_found = False
+    supported_point_count = 0
+
+    for title, url, snippet_text in snippets:
+        folded_metadata = _fold_for_match(f"{title} {snippet_text} {url}")
+        metadata_tokens = folded_metadata.split()
+        token_hits = sum(
+            1 for token in search_query.entity_tokens if token in metadata_tokens
+        )
+        normalized_entity_hit = bool(
+            search_query.normalized_entity
+            and search_query.normalized_entity in folded_metadata
+        )
+        aligned = normalized_entity_hit or token_hits >= len(search_query.entity_tokens)
+
+        if aligned:
+            supported_point_count += 1
+            full_match_found = True
+            continue
+
+        if token_hits > 0:
+            partial_match_found = True
+
+    if full_match_found:
+        return "exact", supported_point_count
+    if partial_match_found:
+        return "partial", 0
+    return "mismatch", 0
 
 
 def register_web_tools(
@@ -681,11 +725,17 @@ def fast_web_search(
         snippets=snippets[:max_results],
         max_chars=max_chars,
     )
+    match_quality, supported_point_count = _summarize_fast_grounding_snippets(
+        query=query,
+        snippets=snippets[:max_results],
+    )
 
     payload: FastSearchWebPayload = {
         "query": query,
         "provider": _SEARCH_PROVIDER_NAME,
         "result_count": len(snippets[:max_results]),
+        "match_quality": match_quality,
+        "supported_point_count": supported_point_count,
         "grounding_note": grounding_note,
     }
 

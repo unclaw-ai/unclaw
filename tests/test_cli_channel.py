@@ -1078,7 +1078,7 @@ def test_cli_native_search_can_continue_into_native_write_tool_loop(
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert responder_call_count == 3
+    assert responder_call_count == 4
     assert search_calls == [
         ToolCall(tool_name="search_web", arguments={"query": reformulated_query})
     ]

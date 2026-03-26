@@ -275,7 +275,7 @@ def test_runtime_identity_requests_prefer_fast_web_search_first(
         )
 
         assert reply == "Marine Leleu is a French endurance athlete and creator."
-        assert call_count == 2
+        assert call_count == 3
         assert observed_tool_calls == [
             ToolCall(
                 tool_name="fast_web_search",
@@ -568,7 +568,7 @@ def test_runtime_explicit_web_lookup_uses_search_and_post_tool_grounding(
         )
 
         assert reply == "Example Product released on 2026-02-10."
-        assert call_count == 2
+        assert call_count == 3
         assert observed_tool_calls == [
             ToolCall(
                 tool_name="search_web",

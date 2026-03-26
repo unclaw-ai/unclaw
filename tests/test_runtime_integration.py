@@ -55,6 +55,47 @@ from unclaw.tools.web_tools import (
 pytestmark = pytest.mark.integration
 
 
+def _is_grounded_finalizer_call(messages: list[LLMMessage]) -> bool:
+    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
+        0
+    ].content.startswith("Grounded reply finalizer for one runtime turn.")
+
+
+def _build_grounded_finalizer_response(
+    *,
+    profile,
+    messages: list[LLMMessage],
+    final_reply: str | None = None,
+) -> LLMResponse:
+    reply_text = final_reply
+    if reply_text is None and messages:
+        try:
+            payload = json.loads(messages[-1].content)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            raw_reply = payload.get("assistant_draft_reply")
+            if isinstance(raw_reply, str):
+                reply_text = raw_reply
+
+    return LLMResponse(
+        provider="ollama",
+        model_name=profile.model_name,
+        content=json.dumps({"final_reply": reply_text or ""}, ensure_ascii=False),
+        created_at="2026-03-26T00:00:00Z",
+        finish_reason="stop",
+    )
+
+
+def _non_finalizer_calls(
+    captured_messages: list[list[LLMMessage]],
+) -> list[list[LLMMessage]]:
+    return [
+        messages
+        for messages in captured_messages
+        if not _is_grounded_finalizer_call(messages)
+    ]
+
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
     monkeypatch,
@@ -205,7 +246,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         session_manager.close()
 
 
-def test_run_user_turn_fast_grounding_clamps_substantive_reply_without_extra_model_call(
+def test_run_user_turn_fast_grounding_clamps_substantive_reply_via_grounded_finalizer(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -275,14 +316,31 @@ def test_run_user_turn_fast_grounding_clamps_substantive_reply_without_extra_mod
                     },
                 )
 
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=(
+                        "Marine Leleu is a French endurance athlete. "
+                        "She also has a much broader public biography."
+                    ),
+                    created_at="2026-03-24T10:00:01Z",
+                    finish_reason="stop",
+                )
+
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content=(
-                    "Marine Leleu is a French endurance athlete. "
-                    "She also has a much broader public biography."
+                content=json.dumps(
+                    {
+                        "final_reply": (
+                            "Marine Leleu is a French endurance athlete. "
+                            "I couldn't confirm a fuller biography from that quick "
+                            "grounding probe alone."
+                        )
+                    }
                 ),
-                created_at="2026-03-24T10:00:01Z",
+                created_at="2026-03-24T10:00:02Z",
                 finish_reason="stop",
             )
 
@@ -297,13 +355,15 @@ def test_run_user_turn_fast_grounding_clamps_substantive_reply_without_extra_mod
         FAST_WEB_SEARCH_DEFINITION,
         lambda call: ToolResult.ok(
             tool_name=call.tool_name,
-            output_text="Marine Leleu\n- Marine Leleu is a French endurance athlete.",
-            payload={
-                "query": call.arguments["query"],
-                "result_count": 1,
-                "grounding_note": (
-                    "Marine Leleu\n- Marine Leleu is a French endurance athlete."
-                ),
+                output_text="Marine Leleu\n- Marine Leleu is a French endurance athlete.",
+                payload={
+                    "query": call.arguments["query"],
+                    "result_count": 1,
+                    "match_quality": "exact",
+                    "supported_point_count": 1,
+                    "grounding_note": (
+                        "Marine Leleu\n- Marine Leleu is a French endurance athlete."
+                    ),
             },
         ),
     )
@@ -328,7 +388,7 @@ def test_run_user_turn_fast_grounding_clamps_substantive_reply_without_extra_mod
             "Marine Leleu is a French endurance athlete. "
             "I couldn't confirm a fuller biography from that quick grounding probe alone."
         )
-        assert call_count == 2
+        assert call_count == 3
     finally:
         session_manager.close()
 
@@ -356,6 +416,19 @@ def test_run_user_turn_new_request_without_write_result_cannot_claim_file_create
             model_name="fake-model",
             content="I created the biography file.",
             created_at="2026-03-26T09:00:00Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content=json.dumps(
+                {
+                    "final_reply": (
+                        "I haven't created or saved the requested file yet."
+                    )
+                }
+            ),
+            created_at="2026-03-26T09:00:01Z",
             finish_reason="stop",
         ),
     )
@@ -394,7 +467,7 @@ def test_run_user_turn_new_request_without_write_result_cannot_claim_file_create
 
         goal_state = session_manager.get_session_goal_state(session.id)
         assert reply == "I haven't created or saved the requested file yet."
-        assert fake_provider.call_count() == 1
+        assert fake_provider.call_count() == 2
         assert goal_state is not None
         assert goal_state.goal == prior_goal
         assert goal_state.status == "completed"
@@ -403,7 +476,7 @@ def test_run_user_turn_new_request_without_write_result_cannot_claim_file_create
         session_manager.close()
 
 
-def test_run_user_turn_narrative_only_progress_does_not_create_phantom_task_status(
+def test_run_user_turn_grounded_finalizer_rewrites_fake_progress_claims_from_persisted_state(
     monkeypatch,
     make_temp_project,
     build_scripted_ollama_provider,
@@ -431,18 +504,58 @@ def test_run_user_turn_narrative_only_progress_does_not_create_phantom_task_stat
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
-            content="The task is still in progress.",
+            content=json.dumps(
+                {
+                    "final_reply": (
+                        "I haven't created or saved that file yet."
+                    )
+                }
+            ),
             created_at="2026-03-26T09:10:01Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="La tache est encore en cours.",
+            created_at="2026-03-26T09:10:02Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content=json.dumps(
+                {
+                    "final_reply": (
+                        "La tache persistée est terminee : "
+                        "Write a short local note file."
+                    )
+                }
+            ),
+            created_at="2026-03-26T09:10:03Z",
             finish_reason="stop",
         ),
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     first_prompt = "Create the biography file."
-    second_prompt = "Where does this task stand?"
+    second_prompt = "Ou en est cette tache ?"
+    prior_goal = "Write a short local note file."
 
     try:
         session = session_manager.ensure_current_session()
+        session_manager.persist_session_goal_state(
+            session_id=session.id,
+            goal=prior_goal,
+            status="completed",
+            current_step="write_text_file",
+        )
+        session_manager.persist_session_progress_entry(
+            session_id=session.id,
+            status="active",
+            step="write_text_file",
+            detail="file write succeeded",
+        )
         session_manager.add_message(
             MessageRole.USER,
             first_prompt,
@@ -470,10 +583,15 @@ def test_run_user_turn_narrative_only_progress_does_not_create_phantom_task_stat
         )
 
         assert first_reply == "I haven't created or saved that file yet."
-        assert second_reply == "There is no persisted task progress for this session."
-        assert fake_provider.call_count() == 2
-        assert session_manager.get_session_goal_state(session.id) is None
-        assert session_manager.get_session_progress_ledger(session.id) == ()
+        assert (
+            second_reply
+            == "La tache persistée est terminee : Write a short local note file."
+        )
+        assert fake_provider.call_count() == 4
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert goal_state is not None
+        assert goal_state.goal == prior_goal
+        assert goal_state.status == "completed"
     finally:
         session_manager.close()
 
@@ -1508,6 +1626,11 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
             turn_call_count += 1
             captured_turn_tools.append(tools)
             captured_turn_messages.append(list(messages))
+            if _is_grounded_finalizer_call(list(messages)):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=list(messages),
+                )
             assert tools is not None
             assert any(tool.name == "search_web" for tool in tools)
             if turn_call_count == 1:
@@ -1580,11 +1703,17 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
         assert "Sources:" in reply
         assert "https://example.com/marine-leleu" in reply
         assert "https://example.com/athletes/marine-leleu" in reply
-        assert turn_call_count == 2
+        assert turn_call_count == 3
         assert len(captured_search_calls) == 1
         assert captured_search_calls[0].arguments["query"] == native_search_query
-        assert len(captured_turn_tools) == 2
-        assert all(tools is not None for tools in captured_turn_tools)
+        non_finalizer_turn_tools = [
+            tools
+            for tools, messages in zip(captured_turn_tools, captured_turn_messages)
+            if not _is_grounded_finalizer_call(messages)
+        ]
+        assert len(non_finalizer_turn_tools) == 2
+        assert all(tools is not None for tools in non_finalizer_turn_tools)
+        assert captured_turn_tools[-1] is None
 
         stored_messages = session_manager.list_messages(session.id)
         assert [message.role for message in stored_messages] == [
@@ -1601,6 +1730,8 @@ def test_run_user_turn_native_profile_can_call_search_web_directly_in_agent_loop
             "model.succeeded",
             "tool.started",
             "tool.finished",
+            "model.called",
+            "model.succeeded",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
@@ -1715,6 +1846,11 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             responder_call_count += 1
             captured_turn_tools.append(tools)
             captured_turn_messages.append(list(messages))
+            if _is_grounded_finalizer_call(list(messages)):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=list(messages),
+                )
 
             assert tools is not None
             assert any(tool.name == "search_web" for tool in tools)
@@ -1824,7 +1960,7 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             tool_registry=tool_registry,
         )
 
-        assert responder_call_count == 3
+        assert responder_call_count == 4
         assert len(captured_search_calls) == 1
         assert captured_search_calls[0].arguments["query"] == native_search_query
         assert captured_write_calls == [
@@ -1837,8 +1973,14 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             )
         ]
         assert output_path.read_text(encoding="utf-8") == file_contents
-        assert len(captured_turn_tools) == 3
-        assert all(tools is not None for tools in captured_turn_tools)
+        non_finalizer_turn_tools = [
+            tools
+            for tools, messages in zip(captured_turn_tools, captured_turn_messages)
+            if not _is_grounded_finalizer_call(messages)
+        ]
+        assert len(non_finalizer_turn_tools) == 3
+        assert all(tools is not None for tools in non_finalizer_turn_tools)
+        assert captured_turn_tools[-1] is None
         assert "I saved a short briefing to marine-leleu.txt." in reply
         assert "Sources:" in reply
         assert "https://example.com/marine-leleu" in reply
@@ -1867,6 +2009,8 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             "model.succeeded",
             "tool.started",
             "tool.finished",
+            "model.called",
+            "model.succeeded",
             "model.called",
             "model.succeeded",
             "assistant.reply.persisted",
@@ -1938,6 +2082,11 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
             nonlocal call_count
             call_count += 1
             captured_messages.append(list(messages))
+            if _is_grounded_finalizer_call(list(messages)):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=list(messages),
+                )
             if (
                 messages
                 and messages[0].role is LLMRole.SYSTEM
@@ -2033,9 +2182,8 @@ def test_run_search_command_grounds_a_natural_reply_and_preserves_follow_up_cont
         assert any("Supported facts:" in m.content for m in tool_messages)
         assert any("Sources:" in m.content for m in tool_messages)
 
-        # Search turn: tool call + final answer. Safe generic search replies do
-        # not pay for an extra semantic review pass.
-        assert call_count == 2
+        # Search turn: tool call + grounded reply + grounded finalizer.
+        assert call_count == 3
 
         # Follow-up context still works.
         session_manager.add_message(
@@ -2185,10 +2333,11 @@ def test_run_search_command_preserves_unicode_grounding_and_sources(
         assert "東京レビュー — インタビュー: https://example.com/tokyo-review-zoe-faer" in stored_messages[1].content
         assert stored_messages[2].content == reply
 
-        assert len(captured_messages) == 2
+        non_finalizer_messages = _non_finalizer_calls(captured_messages)
+        assert len(non_finalizer_messages) == 2
         tool_messages = [
             message.content
-            for message in captured_messages[1]
+            for message in non_finalizer_messages[1]
             if message.role is LLMRole.TOOL
         ]
         assert len(tool_messages) == 1
@@ -2280,9 +2429,14 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
             content_callback=None,
             tools=None,
         ):
-            del profile, timeout_seconds, thinking_enabled, content_callback
+            del timeout_seconds, thinking_enabled, content_callback
             captured_tools.append(tools)
             captured_messages.append(list(messages))
+            if _is_grounded_finalizer_call(list(messages)):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=list(messages),
+                )
             return LLMResponse(
                 provider="ollama",
                 model_name="qwen3.5:4b",
@@ -2311,16 +2465,21 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
         assert "Sources:" in search_reply
         assert "https://ollama.com/blog/search-update" in search_reply
         assert "https://example.com/releases/ollama-search" in search_reply
-        assert captured_tools == [None]
+        non_finalizer_tools = [
+            tools
+            for tools, messages in zip(captured_tools, captured_messages)
+            if not _is_grounded_finalizer_call(messages)
+        ]
+        assert non_finalizer_tools == [None]
         assert any(
             message.role is LLMRole.SYSTEM
             and "Search-backed answer contract:" in message.content
-            for message in captured_messages[0]
+            for message in _non_finalizer_calls(captured_messages)[0]
         )
         assert any(
             message.role is LLMRole.TOOL
             and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
-            for message in captured_messages[0]
+            for message in _non_finalizer_calls(captured_messages)[0]
         )
 
         stored_messages = session_manager.list_messages(session.id)
@@ -2341,6 +2500,8 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
             "tool.finished",
             "model.called",
             "model.succeeded",
+            "model.called",
+            "model.succeeded",
             "assistant.reply.persisted",
         ]
 
@@ -2358,16 +2519,21 @@ def test_run_search_command_non_native_profile_executes_search_inside_runtime_an
         )
 
         assert follow_up_reply == "Shorter recap."
-        assert captured_tools == [None, None]
+        non_finalizer_tools = [
+            tools
+            for tools, messages in zip(captured_tools, captured_messages)
+            if not _is_grounded_finalizer_call(messages)
+        ]
+        assert non_finalizer_tools == [None, None]
         assert any(
             message.role is LLMRole.TOOL
             and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
-            for message in captured_messages[-1]
+            for message in _non_finalizer_calls(captured_messages)[-1]
         )
         assert any(
             message.role is LLMRole.SYSTEM
             and "Search-backed answer contract:" in message.content
-            for message in captured_messages[-1]
+            for message in _non_finalizer_calls(captured_messages)[-1]
         )
     finally:
         session_manager.close()
@@ -4576,17 +4742,16 @@ def test_runtime_native_turn_terminal_failure_flows_back_through_model(
 ) -> None:
     """Terminal command failures must flow back through the model, not short-circuit.
 
-    Anti-determinism cleanup: the runtime no longer returns a canned reply for
-    failed run_terminal_command calls.  The tool failure is persisted as a TOOL
-    message in the session and the model is called a second time so it can
-    synthesise an honest reply from the failure context.
+    The tool failure must flow back through the model loop, but the persisted
+    assistant reply stays on the structural all-failed fallback when the turn
+    ends with no successful tool evidence.
 
     Verifies:
     1. The model is called exactly twice (once for the turn, once after the failure).
     2. The tool failure is present in session history as a TOOL message.
     3. tool.finished is emitted with success=False.
     4. Two model.succeeded events are emitted (one per model call).
-    5. The assistant reply comes from the model's second call, not a canned string.
+    5. The assistant reply stays on the structural all-failed fallback.
     """
     project_root = make_temp_project()
     settings = load_settings(project_root=project_root)
@@ -4704,8 +4869,11 @@ def test_runtime_native_turn_terminal_failure_flows_back_through_model(
         # Model must have been called twice: once for the turn, once after seeing failure.
         assert call_count == 2
 
-        # The reply comes from the model's second call (not a canned runtime string).
-        assert reply == "The terminal command failed due to a configuration error."
+        # The runtime falls back to a structural all-failed reply.
+        assert reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
 
         # Tool failure must be persisted in session history.
         messages = session_manager.list_messages(session.id)
@@ -6266,7 +6434,10 @@ def test_agent_loop_marks_timed_out_tool_as_failure_and_continues(
             tool_registry=tool_registry,
         )
 
-        assert reply == "The fetch tool timed out, so I could not inspect the page."
+        assert reply == (
+            "The tool step timed out, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert FakeOllamaProvider.call_count() == 2
 
         tool_finished_events = [
@@ -6690,7 +6861,10 @@ def test_agent_loop_tool_failure_path(
             tool_registry=tool_registry,
         )
 
-        assert reply == "The URL could not be fetched."
+        assert reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert call_count == 2
 
         # The second model call should contain the tool error as context.
@@ -6806,7 +6980,10 @@ def test_agent_loop_invalid_tool_arguments_are_reported_back_to_model(
             tool_registry=tool_registry,
         )
 
-        assert reply == "The request failed because the URL argument was missing."
+        assert reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
         assert call_count == 2
         tool_finished_events = [
             event for event in published_events if event.event_type == "tool.finished"
@@ -7139,7 +7316,7 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
         assert "Streamed search answer." in result.assistant_reply
         assert "Sources:" in result.assistant_reply
         assert "https://example.com/docs" in result.assistant_reply
-        assert streamed_chunks == ["Streamed search answer."]
+        assert streamed_chunks == [result.assistant_reply]
 
         stored_messages = session_manager.list_messages(
             session_manager.ensure_current_session().id,
@@ -7174,6 +7351,11 @@ def _build_search_agent_provider(
             call_count_holder[0] += 1
             if captured_messages is not None:
                 captured_messages.append(list(messages))
+            if _is_grounded_finalizer_call(list(messages)):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=list(messages),
+                )
             if call_count_holder[0] == 1:
                 return LLMResponse(
                     provider="ollama",
