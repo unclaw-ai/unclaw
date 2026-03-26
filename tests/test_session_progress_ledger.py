@@ -1148,7 +1148,7 @@ def test_existing_goal_state_session_updates_on_blocked_multi_tool_turn(
         session_manager.close()
 
 
-def test_resumed_blocked_task_completion_preserves_prior_blocked_progress_entry(
+def test_compact_continuation_completion_preserves_prior_blocked_progress_entry(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1216,7 +1216,7 @@ def test_resumed_blocked_task_completion_preserves_prior_blocked_progress_entry(
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     first_prompt = "Read the local source note, then write a short local note file."
-    second_prompt = "Please continue working on it."
+    second_prompt = "ok"
 
     try:
         session = session_manager.ensure_current_session()
@@ -1232,6 +1232,10 @@ def test_resumed_blocked_task_completion_preserves_prior_blocked_progress_entry(
             tracer=tracer,
             tool_registry=tool_registry,
         )
+        blocked_goal_state = session_manager.get_session_goal_state(session.id)
+        assert blocked_goal_state is not None
+        assert blocked_goal_state.goal == first_prompt
+        assert blocked_goal_state.status == "blocked"
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text("Recovered local source note.", encoding="utf-8")
         session_manager.add_message(

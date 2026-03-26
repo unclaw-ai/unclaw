@@ -1129,7 +1129,7 @@ def test_later_turn_injects_compact_completed_task_continuity_note_without_extra
         session_manager.close()
 
 
-def test_blocked_task_resume_turn_keeps_original_goal_text_and_can_complete(
+def test_blocked_task_compact_continuation_turn_keeps_original_goal_text_and_can_complete(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1199,7 +1199,7 @@ def test_blocked_task_resume_turn_keeps_original_goal_text_and_can_complete(
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     first_prompt = "Read the local source note, then write a short local note file."
-    second_prompt = "Please continue working on it."
+    second_prompt = "ok"
 
     try:
         session = session_manager.ensure_current_session()
@@ -1215,6 +1215,10 @@ def test_blocked_task_resume_turn_keeps_original_goal_text_and_can_complete(
             tracer=tracer,
             tool_registry=tool_registry,
         )
+        blocked_goal_state = session_manager.get_session_goal_state(session.id)
+        assert blocked_goal_state is not None
+        assert blocked_goal_state.goal == first_prompt
+        assert blocked_goal_state.status == "blocked"
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text("Recovered local source note.", encoding="utf-8")
         session_manager.add_message(
@@ -1468,6 +1472,10 @@ def test_blocked_task_retry_turn_keeps_original_goal_text_and_blocked_state(
             tracer=tracer,
             tool_registry=tool_registry,
         )
+        blocked_goal_state = session_manager.get_session_goal_state(session.id)
+        assert blocked_goal_state is not None
+        assert blocked_goal_state.goal == first_prompt
+        assert blocked_goal_state.status == "blocked"
         session_manager.add_message(
             MessageRole.USER,
             second_prompt,
@@ -1497,7 +1505,7 @@ def test_blocked_task_retry_turn_keeps_original_goal_text_and_blocked_state(
         session_manager.close()
 
 
-def test_blocked_task_can_be_replaced_by_clearly_new_successful_task(
+def test_blocked_task_can_be_replaced_by_substantive_new_successful_task_with_same_generic_tools(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -1509,15 +1517,41 @@ def test_blocked_task_can_be_replaced_by_clearly_new_successful_task(
         set_profile_tool_mode,
     )
     output_path = project_root / "data" / "files" / "new-session-goal-note.txt"
-    missing_path = project_root / "data" / "files" / "replacement-source.txt"
     tool_registry = ToolRegistry()
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: ToolResult.failure(
+
+    def _search_tool(call: ToolCall) -> ToolResult:
+        if call.arguments["query"] == "topic one note":
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error="Tool 'search_web' timed out after 15 seconds.",
+            )
+
+        return ToolResult.ok(
             tool_name=call.tool_name,
-            error=f"File not found: {call.arguments['path']}",
-        ),
-    )
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Topic two has enough grounded evidence for a short note."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Topic two profile",
+                        "url": "https://example.com/topic-two-profile",
+                    },
+                    {
+                        "title": "Topic two recap",
+                        "url": "https://example.com/topic-two-recap",
+                    },
+                ],
+                "evidence_count": 4,
+                "finding_count": 2,
+            },
+        )
 
     def _write_tool(call: ToolCall) -> ToolResult:
         path = Path(str(call.arguments["path"]))
@@ -1530,32 +1564,38 @@ def test_blocked_task_can_be_replaced_by_clearly_new_successful_task(
             payload={"path": str(path), "size": len(content)},
         )
 
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
     tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
     fake_provider = build_scripted_ollama_provider(
-        _tool_call_response("read_text_file", {"path": str(missing_path)}),
+        _tool_call_response("search_web", {"query": "topic one note"}),
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "first note"},
+        ),
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
-            content="Please try again.",
-            created_at="2026-03-25T09:00:01Z",
+            content="I saved the first note locally.",
+            created_at="2026-03-25T09:00:02Z",
             finish_reason="stop",
         ),
+        _tool_call_response("search_web", {"query": "topic two note"}),
         _tool_call_response(
             "write_text_file",
-            {"path": str(output_path), "content": "fresh note"},
+            {"path": str(output_path), "content": "second note"},
         ),
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
             content="I saved the note locally.",
-            created_at="2026-03-25T09:00:02Z",
+            created_at="2026-03-25T09:00:03Z",
             finish_reason="stop",
         ),
     )
     monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
-    first_prompt = "Read the local source note, then write a short local note file."
-    second_prompt = "Write a short standalone local note file."
+    first_prompt = "Research topic one, then write a short local note file."
+    second_prompt = "Research topic two and save a fresh local note file."
 
     try:
         session = session_manager.ensure_current_session()
@@ -1585,18 +1625,15 @@ def test_blocked_task_can_be_replaced_by_clearly_new_successful_task(
         )
 
         goal_state = session_manager.get_session_goal_state(session.id)
-        assert first_reply == (
-            "The tool step failed, so I couldn't confirm the requested details "
-            "from retrieved tool evidence."
-        )
+        assert first_reply == "I saved the first note locally."
         assert second_reply == "I saved the note locally."
-        assert fake_provider.call_count() == 4
+        assert fake_provider.call_count() == 6
         assert goal_state is not None
         assert goal_state.goal == second_prompt
         assert goal_state.status == "completed"
         assert goal_state.current_step == "write_text_file"
         assert goal_state.last_blocker is None
-        assert output_path.read_text(encoding="utf-8") == "fresh note"
+        assert output_path.read_text(encoding="utf-8") == "second note"
     finally:
         session_manager.close()
 

@@ -14,7 +14,7 @@ from unclaw.core.reply_discipline import (
     _search_web_result_is_thin,
     _tool_result_timed_out,
 )
-from unclaw.core.session_manager import SessionGoalState, SessionManager
+from unclaw.core.session_manager import SessionManager
 from unclaw.constants import RUNTIME_ERROR_REPLY
 from unclaw.memory.protocols import SessionMemoryContextProvider
 from unclaw.tools.contracts import ToolDefinition, ToolResult
@@ -29,6 +29,9 @@ _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 _SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
 _SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session task continuity:"
 _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
+_BLOCKED_GOAL_CONTINUATION_MAX_TOKENS = 2
+_BLOCKED_GOAL_CONTINUATION_MAX_TOKEN_ALNUM_CHARS = 3
+_BLOCKED_GOAL_CONTINUATION_ALLOWED_PUNCTUATION = ".,!?;:'\"-()[]{}"
 
 
 def _build_session_memory_context_note(
@@ -304,9 +307,7 @@ def _resolve_session_goal_text_for_runtime_persistence(
         return user_input
 
     if _turn_clearly_replaces_blocked_session_goal_state(
-        session_manager=session_manager,
-        session_id=session_id,
-        goal_state=existing_goal_state,
+        user_input=user_input,
         tool_results=tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=turn_cancelled_reply,
@@ -318,9 +319,7 @@ def _resolve_session_goal_text_for_runtime_persistence(
 
 def _turn_clearly_replaces_blocked_session_goal_state(
     *,
-    session_manager: SessionManager,
-    session_id: str,
-    goal_state: SessionGoalState,
+    user_input: str,
     tool_results: Sequence[ToolResult],
     assistant_reply: str,
     turn_cancelled_reply: str,
@@ -332,34 +331,41 @@ def _turn_clearly_replaces_blocked_session_goal_state(
     ):
         return False
 
-    prior_runtime_steps = _collect_session_goal_runtime_steps(
-        session_manager=session_manager,
-        session_id=session_id,
-        goal_state=goal_state,
-    )
-    if not prior_runtime_steps:
+    if _user_input_has_compact_blocked_goal_continuation_shape(user_input):
         return False
 
-    current_turn_tool_names = {tool_result.tool_name for tool_result in tool_results}
-    return prior_runtime_steps.isdisjoint(current_turn_tool_names)
+    return True
 
 
-def _collect_session_goal_runtime_steps(
-    *,
-    session_manager: SessionManager,
-    session_id: str,
-    goal_state: SessionGoalState,
-) -> frozenset[str]:
-    runtime_steps = set()
-    if isinstance(goal_state.current_step, str) and goal_state.current_step:
-        runtime_steps.add(goal_state.current_step)
+def _user_input_has_compact_blocked_goal_continuation_shape(user_input: str) -> bool:
+    normalized_input = " ".join(user_input.split()).strip()
+    if not normalized_input:
+        return False
 
-    runtime_steps.update(
-        entry.step
-        for entry in session_manager.get_session_progress_ledger(session_id)
-        if isinstance(entry.step, str) and entry.step
+    tokens = normalized_input.split(" ")
+    if len(tokens) > _BLOCKED_GOAL_CONTINUATION_MAX_TOKENS:
+        return False
+
+    saw_alnum = False
+    for token in tokens:
+        stripped_token = token.strip(_BLOCKED_GOAL_CONTINUATION_ALLOWED_PUNCTUATION)
+        if not stripped_token:
+            return False
+        if not stripped_token.isalnum():
+            return False
+        if len(stripped_token) > _BLOCKED_GOAL_CONTINUATION_MAX_TOKEN_ALNUM_CHARS:
+            return False
+        saw_alnum = True
+
+    if not saw_alnum:
+        return False
+
+    return all(
+        character.isalnum()
+        or character.isspace()
+        or character in _BLOCKED_GOAL_CONTINUATION_ALLOWED_PUNCTUATION
+        for character in normalized_input
     )
-    return frozenset(runtime_steps)
 
 
 def _persist_session_goal_state_from_runtime_facts(
