@@ -39,6 +39,7 @@ from unclaw.tools.file_tools import (
     LIST_DIRECTORY_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
+    register_file_tools,
 )
 from unclaw.tools.long_term_memory_tools import (
     LIST_LONG_TERM_MEMORY_DEFINITION,
@@ -95,6 +96,30 @@ def _non_finalizer_calls(
         for messages in captured_messages
         if not _is_grounded_finalizer_call(messages)
     ]
+
+
+def _build_tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResponse:
+    return LLMResponse(
+        provider="ollama",
+        model_name="fake-model",
+        content="",
+        created_at="2026-03-26T00:00:00Z",
+        finish_reason="stop",
+        tool_calls=(ToolCall(tool_name=tool_name, arguments=arguments),),
+        raw_payload={
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": tool_name,
+                            "arguments": arguments,
+                        }
+                    }
+                ],
+            }
+        },
+    )
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
@@ -8042,28 +8067,16 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
 
             if call_count == 1:
                 # First call: model requests a tool call.
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="",
-                    created_at="2026-03-26T00:00:00Z",
-                    finish_reason="stop",
-                    tool_calls=(ToolCall(tool_name="system_info", arguments={}),),
-                    raw_payload={
-                        "message": {
-                            "content": "",
-                            "tool_calls": [
-                                {"function": {"name": "system_info", "arguments": {}}}
-                            ],
-                        }
-                    },
+                return _build_tool_call_response(
+                    "search_web",
+                    {"query": "Marine Leleu biography"},
                 )
             if call_count == 2:
-                # Second call: model returns a partial text reply.
+                # Second call: model returns a partial text reply after weak evidence.
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
-                    content="The date is 2026-03-26.",
+                    content="I found one source.",
                     created_at="2026-03-26T00:00:01Z",
                     finish_reason="stop",
                 )
@@ -8071,7 +8084,7 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
-                content="The current date is 2026-03-26 and it is a Thursday.",
+                content="I found one source, so the evidence is limited.",
                 created_at="2026-03-26T00:00:02Z",
                 finish_reason="stop",
             )
@@ -8080,23 +8093,35 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
 
     tool_registry = ToolRegistry()
     tool_registry.register(
-        SYSTEM_INFO_DEFINITION,
+        SEARCH_WEB_DEFINITION,
         lambda call: ToolResult.ok(
             tool_name=call.tool_name,
-            output_text="Date: 2026-03-26\nDay: Thursday",
+            output_text="One thin result",
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": ["Marine Leleu is a French endurance athlete."],
+                "display_sources": [
+                    {
+                        "title": "Profile",
+                        "url": "https://example.com/profile",
+                    }
+                ],
+                "evidence_count": 1,
+                "finding_count": 1,
+            },
         ),
     )
 
     try:
         session = session_manager.ensure_current_session()
         session_manager.add_message(
-            MessageRole.USER, "What day is today?", session_id=session.id
+            MessageRole.USER, "Research Marine Leleu.", session_id=session.id
         )
 
         reply = run_user_turn(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input="What day is today?",
+            user_input="Research Marine Leleu.",
             tracer=tracer,
             tool_registry=tool_registry,
         )
@@ -8115,6 +8140,97 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
             for msgs in non_finalizer
         )
         assert continuation_found, "Continuation check note was not injected"
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_skips_continuation_check_for_simple_successful_system_info_turn(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", True)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    captured_messages: list[list[LLMMessage]] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, tools
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(messages))
+            if call_count == 1:
+                return _build_tool_call_response("system_info", {})
+            if call_count == 2:
+                reply = "Your OS is Linux."
+                if content_callback is not None:
+                    content_callback(reply)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=reply,
+                    created_at="2026-03-26T00:00:01Z",
+                    finish_reason="stop",
+                )
+            raise AssertionError("Unexpected continuation/refinement call for simple system_info turn.")
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SYSTEM_INFO_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="OS: Linux\nCPU: 8 cores",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Quel est mon OS ?",
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Quel est mon OS ?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "Your OS is Linux."
+        assert call_count == 2
+        assert not any(
+            any(
+                message.role is LLMRole.SYSTEM
+                and message.content.startswith("Task completion check:")
+                for message in messages
+            )
+            for messages in captured_messages
+        )
     finally:
         session_manager.close()
 
@@ -8740,3 +8856,445 @@ def test_grounded_facts_evidence_quality_not_thin_when_evidence_rich() -> None:
     evidence = facts["evidence_quality"]
     assert evidence["has_thin_search_evidence"] is False
     assert evidence["write_after_thin_search"] is False
+
+
+def test_agent_loop_retries_write_collision_with_version_policy(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    target = settings.paths.files_dir / "note.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("original", encoding="utf-8")
+
+    tool_registry = ToolRegistry()
+    register_file_tools(
+        tool_registry,
+        project_root=project_root,
+        configured_roots=(str(project_root),),
+        default_write_dir=settings.paths.files_dir,
+    )
+
+    def _recovery_step(profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+        del profile, kwargs
+        recovery_note = next(
+            message.content
+            for message in messages
+            if message.role is LLMRole.SYSTEM
+            and message.content.startswith("State conflict recovery:")
+        )
+        assert "suggested version path" in recovery_note.lower()
+        assert str(target) in recovery_note
+        return _build_tool_call_response(
+            "write_text_file",
+            {
+                "path": str(target),
+                "content": "updated",
+                "collision_policy": "version",
+            },
+        )
+
+    fake_provider = build_scripted_ollama_provider(
+        _build_tool_call_response(
+            "write_text_file",
+            {"path": str(target), "content": "updated"},
+        ),
+        _recovery_step,
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the note safely.",
+            created_at="2026-03-26T00:00:02Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Write a short local note file."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        versioned_files = sorted(target.parent.glob("note_*.txt"))
+        assert reply == "I saved the note safely."
+        assert target.read_text(encoding="utf-8") == "original"
+        assert len(versioned_files) == 1
+        assert versioned_files[0].read_text(encoding="utf-8") == "updated"
+    finally:
+        session_manager.close()
+
+
+def test_delete_confirmation_required_failure_is_reported_honestly(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    target = settings.paths.files_dir / "keep.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("keep me", encoding="utf-8")
+
+    tool_registry = ToolRegistry()
+    register_file_tools(
+        tool_registry,
+        project_root=project_root,
+        configured_roots=(str(project_root),),
+        default_write_dir=settings.paths.files_dir,
+    )
+
+    def _bad_recovery_reply(profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+        del profile, kwargs
+        recovery_note = next(
+            message.content
+            for message in messages
+            if message.role is LLMRole.SYSTEM
+            and message.content.startswith("State conflict recovery:")
+        )
+        assert "action was not performed" in recovery_note.lower()
+        return LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The file was deleted.",
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
+        )
+
+    def _finalizer_step(profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+        del profile, kwargs
+        payload = json.loads(messages[-1].content)
+        tool_results = payload["current_turn_tool_results"]
+        assert tool_results[0]["failure_kind"] == "confirmation_required"
+        assert tool_results[0]["action_performed"] is False
+        return LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content=json.dumps(
+                {
+                    "final_reply": (
+                        "The file was not deleted because confirmation was required."
+                    )
+                }
+            ),
+            created_at="2026-03-26T00:00:02Z",
+            finish_reason="stop",
+        )
+
+    fake_provider = build_scripted_ollama_provider(
+        _build_tool_call_response("delete_file", {"path": str(target)}),
+        _bad_recovery_reply,
+        _finalizer_step,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Delete the local file keep.txt."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "The file was not deleted because confirmation was required."
+        assert target.exists()
+    finally:
+        session_manager.close()
+
+
+def test_pre_write_grounding_revises_thin_research_write_content(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", False)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    target = settings.paths.files_dir / "marine.txt"
+    conservative_content = (
+        "Confirmed from limited evidence: Marine Leleu is a French endurance athlete. "
+        "Other requested details could not be confirmed from this search."
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, tools
+            nonlocal call_count
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=messages,
+                    final_reply="I saved a conservative note.",
+                )
+            if any(
+                message.role is LLMRole.SYSTEM
+                and message.content.startswith("Pre-write grounding check:")
+                for message in messages
+            ):
+                grounding_note = next(
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.SYSTEM
+                    and message.content.startswith("Pre-write grounding check:")
+                )
+                assert "pending_write_calls" in grounding_note
+                return _build_tool_call_response(
+                    "write_text_file",
+                    {"path": str(target), "content": conservative_content},
+                )
+
+            call_count += 1
+            if call_count == 1:
+                return _build_tool_call_response(
+                    "search_web",
+                    {"query": "Marine Leleu biography"},
+                )
+            if call_count == 2:
+                return _build_tool_call_response(
+                    "write_text_file",
+                    {
+                        "path": str(target),
+                        "content": (
+                            "Marine Leleu was born in 1990, won multiple world titles, "
+                            "and built a large media company."
+                        ),
+                    },
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="I saved a conservative note.",
+                created_at="2026-03-26T00:00:03Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    register_file_tools(
+        tool_registry,
+        project_root=project_root,
+        configured_roots=(str(project_root),),
+        default_write_dir=settings.paths.files_dir,
+    )
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Limited search evidence",
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Profile",
+                        "url": "https://example.com/profile",
+                    }
+                ],
+                "evidence_count": 1,
+                "finding_count": 1,
+            },
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Research Marine Leleu, write a local note, and keep it factual."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        written = target.read_text(encoding="utf-8")
+        assert reply == "I saved a conservative note."
+        assert written == conservative_content
+        assert "born in 1990" not in written
+        assert "world titles" not in written
+        assert "media company" not in written
+    finally:
+        session_manager.close()
+
+
+def test_multi_deliverable_search_write_turn_adds_missing_short_text_deliverable(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    target = settings.paths.files_dir / "marine-note.txt"
+
+    tool_registry = ToolRegistry()
+    register_file_tools(
+        tool_registry,
+        project_root=project_root,
+        configured_roots=(str(project_root),),
+        default_write_dir=settings.paths.files_dir,
+    )
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Strong search evidence",
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Marine Leleu is a French endurance athlete and creator."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Profile",
+                        "url": "https://example.com/profile",
+                    },
+                    {
+                        "title": "Interview",
+                        "url": "https://example.com/interview",
+                    },
+                ],
+                "evidence_count": 4,
+                "finding_count": 2,
+            },
+        ),
+    )
+
+    def _finalizer_step(profile, messages, **kwargs):  # type: ignore[no-untyped-def]
+        del profile, kwargs
+        payload = json.loads(messages[-1].content)
+        assert payload["completion_risks"]["multi_step_tool_turn"] is True
+        assert payload["completion_risks"]["deliverable_check_required"] is True
+        return LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content=json.dumps(
+                {
+                    "final_reply": (
+                        "The note has been saved.\n"
+                        "Joke: Why did the byte laugh? Because the bit cracked a tiny joke."
+                    )
+                }
+            ),
+            created_at="2026-03-26T00:00:03Z",
+            finish_reason="stop",
+        )
+
+    fake_provider = build_scripted_ollama_provider(
+        _build_tool_call_response(
+            "search_web",
+            {"query": "Marine Leleu biography"},
+        ),
+        _build_tool_call_response(
+            "write_text_file",
+            {
+                "path": str(target),
+                "content": "Marine Leleu is a French endurance athlete and creator.",
+            },
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The note has been saved.",
+            created_at="2026-03-26T00:00:02Z",
+            finish_reason="stop",
+        ),
+        _finalizer_step,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = (
+            "Research Marine Leleu, write a short local note file, and end with a one-line joke."
+        )
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert "The note has been saved." in reply
+        assert "Joke:" in reply
+        assert target.read_text(encoding="utf-8") == (
+            "Marine Leleu is a French endurance athlete and creator."
+        )
+    finally:
+        session_manager.close()

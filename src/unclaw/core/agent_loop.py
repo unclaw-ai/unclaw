@@ -11,6 +11,7 @@ from typing import Any
 
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.orchestrator import Orchestrator, OrchestratorTurnResult
+from unclaw.core.reply_discipline import _tool_result_has_thin_search_evidence
 from unclaw.core.session_manager import SessionManager
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS
 from unclaw.llm.base import LLMContentCallback, LLMMessage, LLMResponse, LLMRole
@@ -35,6 +36,17 @@ _SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS = 3
 # Test hook: set to False to suppress the continuation check in tests
 # that do not script for the extra model call.
 _continuation_check_enabled = True
+_PRE_WRITE_GROUNDING_NOTE_PREFIX = "Pre-write grounding check:"
+_SEARCH_TOOL_NAMES = frozenset({"fast_web_search", "search_web"})
+_STATE_CONFLICT_FAILURE_KINDS = frozenset(
+    {
+        "access_denied",
+        "collision_conflict",
+        "confirmation_required",
+        "permission_denied",
+        "unsupported_input",
+    }
+)
 _FINALIZATION_TRIGGERING_TOOL_NAMES = frozenset({
     "write_text_file",
     "fast_web_search",
@@ -105,12 +117,16 @@ def _run_agent_loop(
     build_post_tool_grounding_note: Callable[..., str],
     collected_tool_results: list[ToolResult] | None = None,
     user_input: str = "",
+    session_goal_state: Any = None,
+    session_progress_ledger: Sequence[Any] = (),
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
     tools_ran_in_turn = False
     continuation_used = False
+    state_conflict_recovery_used = False
+    pre_write_grounding_used = False
 
     def _effective_callback() -> LLMContentCallback | None:
         """Suppress live streaming when grounded finalization will run.
@@ -132,6 +148,7 @@ def _run_agent_loop(
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
             draft_reply = current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
+            turn_tool_results = tuple(collected_tool_results or ())
 
             # Model-native continuation: when tools ran in this turn and the
             # model returned text, ask it once whether the original user
@@ -144,11 +161,15 @@ def _run_agent_loop(
                 and not tool_guard_state.is_cancelled()
                 and _step + 1 < max_steps
                 and user_input
+                and _should_run_continuation_check(tool_results=turn_tool_results)
             ):
                 continuation_used = True
                 continuation_note = _build_continuation_check_note(
                     user_input=user_input,
                     draft_reply=draft_reply,
+                    tool_results=turn_tool_results,
+                    session_goal_state=session_goal_state,
+                    session_progress_ledger=session_progress_ledger,
                 )
                 context_messages.append(
                     LLMMessage(role=LLMRole.ASSISTANT, content=draft_reply)
@@ -193,6 +214,46 @@ def _run_agent_loop(
                 tool_calls_payload=_extract_raw_tool_calls(current_response.response),
             )
         )
+
+        turn_tool_results = tuple(collected_tool_results or ())
+        if (
+            not pre_write_grounding_used
+            and not tool_guard_state.is_cancelled()
+            and _step + 1 < max_steps
+            and _should_run_pre_write_grounding_check(
+                prior_tool_results=turn_tool_results,
+                pending_tool_calls=tool_calls,
+            )
+        ):
+            pre_write_grounding_used = True
+            context_messages.append(
+                LLMMessage(
+                    role=LLMRole.SYSTEM,
+                    content=_build_pre_write_grounding_note(
+                        user_input=user_input,
+                        prior_tool_results=turn_tool_results,
+                        pending_tool_calls=tool_calls,
+                    ),
+                )
+            )
+            current_response = orchestrator.call_model(
+                session_id=session_id,
+                messages=context_messages,
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
+                content_callback=None,
+                tools=tool_definitions,
+            )
+            tracer.trace_model_succeeded(
+                session_id=session_id,
+                provider=current_response.response.provider,
+                model_name=current_response.response.model_name,
+                finish_reason=current_response.response.finish_reason,
+                output_length=len(current_response.response.content),
+                model_duration_ms=current_response.model_duration_ms,
+                reasoning=current_response.response.reasoning,
+            )
+            continue
 
         tool_results = _execute_runtime_tool_calls(
             session_manager=session_manager,
@@ -255,15 +316,52 @@ def _run_agent_loop(
             # The repair response re-enters the loop: if the model now
             # emits valid tool calls, they'll execute next iteration.
             continue
-        for tool_result in tool_results:
+
+        if (
+            tool_results
+            and not state_conflict_recovery_used
+            and not tool_guard_state.is_cancelled()
+            and _step + 1 < max_steps
+            and _tool_results_include_state_conflict(tool_results)
+        ):
+            state_conflict_recovery_used = True
+            _append_tool_result_messages(
+                context_messages=context_messages,
+                tool_results=tool_results,
+            )
             context_messages.append(
                 LLMMessage(
-                    role=LLMRole.TOOL,
-                    content=build_untrusted_tool_message_content(
-                        tool_result.output_text
+                    role=LLMRole.SYSTEM,
+                    content=_build_state_conflict_recovery_note(
+                        user_input=user_input,
+                        failed_tool_calls=tool_calls,
+                        tool_results=tool_results,
                     ),
                 )
             )
+            current_response = orchestrator.call_model(
+                session_id=session_id,
+                messages=context_messages,
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
+                content_callback=None,
+                tools=tool_definitions,
+            )
+            tracer.trace_model_succeeded(
+                session_id=session_id,
+                provider=current_response.response.provider,
+                model_name=current_response.response.model_name,
+                finish_reason=current_response.response.finish_reason,
+                output_length=len(current_response.response.content),
+                model_duration_ms=current_response.model_duration_ms,
+                reasoning=current_response.response.reasoning,
+            )
+            continue
+
+        _append_tool_result_messages(
+            context_messages=context_messages,
+            tool_results=tool_results,
+        )
 
         if tool_guard_state.is_cancelled():
             return _TURN_CANCELLED_REPLY
@@ -310,20 +408,326 @@ def _build_continuation_check_note(
     *,
     user_input: str,
     draft_reply: str,
+    tool_results: Sequence[ToolResult] = (),
+    session_goal_state: Any = None,
+    session_progress_ledger: Sequence[Any] = (),
 ) -> str:
-    return "\n".join(
+    lines = [
         (
             f"{_CONTINUATION_CHECK_NOTE_PREFIX} "
-            "the model produced a text reply after running tools this turn.",
-            f"Original user request: {user_input}",
-            f"Current draft answer: {draft_reply[:500]}",
+            "the model produced a text reply after running tools this turn."
+        ),
+        f"Original user request: {user_input}",
+        f"Current draft answer: {draft_reply[:500]}",
+    ]
+    if tool_results:
+        lines.extend(
+            [
+                "Structured runtime facts (JSON):",
+                _serialize_note_payload(
+                    _build_continuation_check_facts(
+                        tool_results=tool_results,
+                        session_goal_state=session_goal_state,
+                        session_progress_ledger=session_progress_ledger,
+                    )
+                ),
+            ]
+        )
+    lines.extend(
+        (
             "Decide: is the user's full request satisfied by the work done so far?",
-            "If YES: produce the final answer text now.",
+            "If YES: produce the full final answer text now, including any short non-tool deliverable still requested by the user.",
             "If NO and an available tool call would make meaningful progress: "
             "emit that tool call instead of answering.",
-            "Do not repeat tool calls that already ran this turn.",
+            "If a blocking failure remains or any action_performed flag is false, do not claim success.",
+            "Do not repeat tool calls that already ran this turn unless the structured facts above clearly support a safe retry.",
         )
     )
+    return "\n".join(lines)
+
+
+def _serialize_note_payload(payload: dict[str, Any]) -> str:
+    normalized_payload = json.loads(
+        json.dumps(payload, ensure_ascii=False, default=str)
+    )
+    return json.dumps(normalized_payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _build_continuation_check_facts(
+    *,
+    tool_results: Sequence[ToolResult],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
+) -> dict[str, Any]:
+    latest_tool_result = tool_results[-1] if tool_results else None
+    return {
+        "tool_summary": {
+            "tool_count": len(tool_results),
+            "successful_tool_names": [
+                tool_result.tool_name
+                for tool_result in tool_results
+                if tool_result.success is True
+            ],
+            "failed_tool_names": [
+                tool_result.tool_name
+                for tool_result in tool_results
+                if tool_result.success is False
+            ],
+            "latest_tool_name": (
+                latest_tool_result.tool_name if latest_tool_result is not None else None
+            ),
+            "latest_tool_success": (
+                latest_tool_result.success if latest_tool_result is not None else None
+            ),
+            "latest_tool_failure_kind": (
+                latest_tool_result.failure_kind
+                if latest_tool_result is not None
+                else None
+            ),
+        },
+        "evidence_quality": {
+            "thin_search_tool_names": [
+                tool_result.tool_name
+                for tool_result in tool_results
+                if _tool_result_has_thin_or_ambiguous_search_evidence(tool_result)
+            ],
+            "write_after_weak_search": _turn_has_write_after_weak_search(tool_results),
+        },
+        "blocked_actions": [
+            _build_state_conflict_fact(tool_result)
+            for tool_result in tool_results
+            if _tool_result_payload_flag(tool_result, "action_performed") is False
+        ],
+        "persisted_goal_state_before_turn": (
+            {
+                "goal": getattr(session_goal_state, "goal", None),
+                "status": getattr(session_goal_state, "status", None),
+                "current_step": getattr(session_goal_state, "current_step", None),
+                "last_blocker": getattr(session_goal_state, "last_blocker", None),
+            }
+            if session_goal_state is not None
+            else None
+        ),
+        "persisted_progress_ledger_before_turn": [
+            {
+                "status": getattr(entry, "status", None),
+                "step": getattr(entry, "step", None),
+                "detail": getattr(entry, "detail", None),
+            }
+            for entry in session_progress_ledger
+        ],
+    }
+
+
+def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
+    return tool_result.payload if isinstance(tool_result.payload, dict) else {}
+
+
+def _tool_result_payload_flag(tool_result: ToolResult, key: str) -> bool | None:
+    value = _tool_result_payload_dict(tool_result).get(key)
+    return value if isinstance(value, bool) else None
+
+
+def _tool_result_has_thin_or_ambiguous_search_evidence(tool_result: ToolResult) -> bool:
+    if tool_result.tool_name not in _SEARCH_TOOL_NAMES:
+        return False
+    if tool_result.success is not True:
+        return True
+    payload = _tool_result_payload_dict(tool_result)
+    if tool_result.tool_name == "fast_web_search":
+        match_quality = payload.get("match_quality")
+        if isinstance(match_quality, str) and match_quality in {
+            "mismatch",
+            "no_results",
+            "partial",
+        }:
+            return True
+    return _tool_result_has_thin_search_evidence(tool_result)
+
+
+def _turn_has_write_after_weak_search(tool_results: Sequence[ToolResult]) -> bool:
+    if not tool_results:
+        return False
+    latest_tool_result = tool_results[-1]
+    if latest_tool_result.success is not True or latest_tool_result.tool_name != "write_text_file":
+        return False
+    return any(
+        _tool_result_has_thin_or_ambiguous_search_evidence(tool_result)
+        for tool_result in tool_results[:-1]
+    )
+
+
+def _should_run_continuation_check(
+    *,
+    tool_results: Sequence[ToolResult],
+) -> bool:
+    if not tool_results:
+        return False
+    if any(tool_result.success is False for tool_result in tool_results):
+        return True
+    if _turn_has_write_after_weak_search(tool_results):
+        return True
+    latest_tool_result = tool_results[-1]
+    return _tool_result_has_thin_or_ambiguous_search_evidence(latest_tool_result)
+
+
+def _should_run_pre_write_grounding_check(
+    *,
+    prior_tool_results: Sequence[ToolResult],
+    pending_tool_calls: Sequence[ToolCall],
+) -> bool:
+    if not any(tool_call.tool_name == "write_text_file" for tool_call in pending_tool_calls):
+        return False
+    return any(
+        _tool_result_has_thin_or_ambiguous_search_evidence(tool_result)
+        for tool_result in prior_tool_results
+    )
+
+
+def _build_pre_write_grounding_note(
+    *,
+    user_input: str,
+    prior_tool_results: Sequence[ToolResult],
+    pending_tool_calls: Sequence[ToolCall],
+) -> str:
+    search_facts = [
+        _build_search_fact(tool_result)
+        for tool_result in prior_tool_results
+        if tool_result.tool_name in _SEARCH_TOOL_NAMES
+    ]
+    pending_write_calls = [
+        _build_pending_write_call_fact(tool_call)
+        for tool_call in pending_tool_calls
+        if tool_call.tool_name == "write_text_file"
+    ]
+    return "\n".join(
+        (
+            (
+                f"{_PRE_WRITE_GROUNDING_NOTE_PREFIX} "
+                "a write_text_file call is pending after weak or incomplete search evidence in this turn."
+            ),
+            "Use only the structured search facts and pending write facts below for this review.",
+            "If evidence is thin, ambiguous, mismatch-heavy, or failed, revise the file content into a conservative version limited to directly supported facts and explicit uncertainty.",
+            "If more evidence is needed and an available search tool would help, emit that tool call instead of writing.",
+            "If the write content is already conservative and supported, you may repeat the write tool call with corrected arguments if needed.",
+            "Original user request:",
+            user_input,
+            "Structured review facts (JSON):",
+            _serialize_note_payload(
+                {
+                    "search_facts": search_facts,
+                    "pending_write_calls": pending_write_calls,
+                }
+            ),
+        )
+    )
+
+
+def _build_search_fact(tool_result: ToolResult) -> dict[str, Any]:
+    payload = _tool_result_payload_dict(tool_result)
+    search_fact: dict[str, Any] = {
+        "tool_name": tool_result.tool_name,
+        "success": tool_result.success,
+        "failure_kind": tool_result.failure_kind,
+        "query": payload.get("query"),
+        "match_quality": payload.get("match_quality"),
+        "result_count": payload.get("result_count"),
+        "supported_point_count": payload.get("supported_point_count"),
+        "evidence_count": payload.get("evidence_count"),
+        "finding_count": payload.get("finding_count"),
+        "summary_points": payload.get("summary_points"),
+        "display_sources": payload.get("display_sources"),
+        "action_performed": _tool_result_payload_flag(tool_result, "action_performed"),
+        "thin_or_ambiguous": _tool_result_has_thin_or_ambiguous_search_evidence(tool_result),
+    }
+    return search_fact
+
+
+def _build_pending_write_call_fact(tool_call: ToolCall) -> dict[str, Any]:
+    content = tool_call.arguments.get("content")
+    content_text = content if isinstance(content, str) else ""
+    max_chars = 4000
+    content_truncated = len(content_text) > max_chars
+    return {
+        "path": tool_call.arguments.get("path"),
+        "collision_policy": tool_call.arguments.get("collision_policy", "fail"),
+        "content": content_text[:max_chars] if content_truncated else content_text,
+        "content_size_chars": len(content_text),
+        "content_truncated": content_truncated,
+    }
+
+
+def _tool_results_include_state_conflict(tool_results: Sequence[ToolResult]) -> bool:
+    return any(
+        tool_result.success is False
+        and tool_result.failure_kind in _STATE_CONFLICT_FAILURE_KINDS
+        for tool_result in tool_results
+    )
+
+
+def _build_state_conflict_recovery_note(
+    *,
+    user_input: str,
+    failed_tool_calls: Sequence[ToolCall],
+    tool_results: Sequence[ToolResult],
+) -> str:
+    del failed_tool_calls
+    state_conflict_facts = [
+        _build_state_conflict_fact(tool_result)
+        for tool_result in tool_results
+        if tool_result.success is False
+        and tool_result.failure_kind in _STATE_CONFLICT_FAILURE_KINDS
+    ]
+    lines = [
+        "State conflict recovery: the latest tool step was blocked by structured runtime state constraints.",
+        f"Original user request: {user_input}",
+        "Structured blocker facts (JSON):",
+        _serialize_note_payload({"blocked_tools": state_conflict_facts}),
+        "Use the structured blocker metadata above instead of guessing from prose.",
+        "If a safe retry is available, emit the corrected tool call now. Otherwise answer honestly about what was not performed.",
+        "Do not claim success for any blocker with action_performed=false.",
+    ]
+    for fact in state_conflict_facts:
+        if fact["failure_kind"] == "collision_conflict" and fact.get("suggested_version_path"):
+            lines.append(
+                "For the write collision above, the safe retry is write_text_file "
+                "with collision_policy='version'. Suggested version path: "
+                f"{fact['suggested_version_path']}."
+            )
+        if fact["failure_kind"] == "confirmation_required":
+            lines.append(
+                "For the confirmation-required blocker above, the action was not performed."
+            )
+    return "\n".join(lines)
+
+
+def _build_state_conflict_fact(tool_result: ToolResult) -> dict[str, Any]:
+    payload = _tool_result_payload_dict(tool_result)
+    return {
+        "tool_name": tool_result.tool_name,
+        "failure_kind": tool_result.failure_kind,
+        "action_performed": _tool_result_payload_flag(tool_result, "action_performed"),
+        "requested_path": payload.get("requested_path"),
+        "resolved_path": payload.get("resolved_path"),
+        "path": payload.get("path"),
+        "confirm_required": payload.get("confirm_required"),
+        "suggested_collision_policy": payload.get("suggested_collision_policy"),
+        "suggested_version_path": payload.get("suggested_version_path"),
+    }
+
+
+def _append_tool_result_messages(
+    *,
+    context_messages: list[LLMMessage],
+    tool_results: Sequence[ToolResult],
+) -> None:
+    for tool_result in tool_results:
+        context_messages.append(
+            LLMMessage(
+                role=LLMRole.TOOL,
+                content=build_untrusted_tool_message_content(tool_result.output_text),
+            )
+        )
 
 
 _STRUCTURAL_FAILURE_KINDS = frozenset({

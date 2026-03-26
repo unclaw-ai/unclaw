@@ -21,6 +21,11 @@ from unclaw.tools.registry import ToolRegistry
 _DEFAULT_MAX_FILE_CHARS = 8_000
 _DEFAULT_DIRECTORY_LIMIT = 200
 _MAX_WRITE_FILE_CHARS = 1_000_000  # 1 MB upper bound on text content
+_ACCESS_DENIED_FAILURE_KIND = "access_denied"
+_COLLISION_CONFLICT_FAILURE_KIND = "collision_conflict"
+_CONFIRMATION_REQUIRED_FAILURE_KIND = "confirmation_required"
+_PERMISSION_DENIED_FAILURE_KIND = "permission_denied"
+_UNSUPPORTED_INPUT_FAILURE_KIND = "unsupported_input"
 
 # V1 document read scope — only plain text-based formats are supported.
 # Binary formats (pdf, docx, xlsx, etc.) are not supported in V1.
@@ -322,6 +327,12 @@ def read_text_file(
                 f"for reading in V1. "
                 f"Supported formats: {_READABLE_EXTENSIONS_DISPLAY}."
             ),
+            payload={
+                "path": str(path),
+                "supported_extensions": sorted(READABLE_EXTENSIONS),
+                "action_performed": False,
+            },
+            failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
         )
 
     if not path.exists():
@@ -344,9 +355,11 @@ def read_text_file(
             error=f"File is not valid UTF-8 text: {path}",
         )
     except OSError as exc:
-        return ToolResult.failure(
+        return _build_path_oserror_result(
             tool_name=tool_name,
-            error=f"Could not read file '{path}': {exc}",
+            path=path,
+            action_description="read",
+            exc=exc,
         )
 
     truncated = len(content) > max_chars
@@ -483,6 +496,12 @@ def write_text_file(
                 f"Argument 'collision_policy' must be 'fail', 'version', or 'overwrite'. "
                 f"Got: '{collision_policy_raw}'."
             ),
+            payload={
+                "requested_path": path_value.strip(),
+                "collision_policy": collision_policy_raw,
+                "action_performed": False,
+            },
+            failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
         )
 
     if len(content) > _MAX_WRITE_FILE_CHARS:
@@ -534,7 +553,9 @@ def write_text_file(
                     "collision_policy_applied": collision_policy,
                     "suggested_collision_policy": "version",
                     "suggested_version_path": str(_generate_versioned_path(requested_path)),
+                    "action_performed": False,
                 },
+                failure_kind=_COLLISION_CONFLICT_FAILURE_KIND,
             )
         elif collision_policy == "version":
             resolved_path = _generate_versioned_path(requested_path)
@@ -558,7 +579,9 @@ def write_text_file(
                         "collision_policy_applied": collision_policy,
                         "suggested_collision_policy": "version",
                         "suggested_version_path": str(_generate_versioned_path(requested_path)),
+                        "action_performed": False,
                     },
+                    failure_kind=_COLLISION_CONFLICT_FAILURE_KIND,
                 )
             resolved_path = requested_path
             created_versioned_file = False
@@ -572,6 +595,12 @@ def write_text_file(
         return ToolResult.failure(
             tool_name=tool_name,
             error=f"Path exists but is not a file: {resolved_path}",
+            payload={
+                "requested_path": str(requested_path),
+                "resolved_path": str(resolved_path),
+                "action_performed": False,
+            },
+            failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
         )
 
     try:
@@ -579,9 +608,16 @@ def write_text_file(
         resolved_path.write_text(content, encoding="utf-8")
         os.chmod(resolved_path, 0o600)
     except OSError as exc:
-        return ToolResult.failure(
+        return _build_path_oserror_result(
             tool_name=tool_name,
-            error=f"Could not write file '{resolved_path}': {exc}",
+            path=resolved_path,
+            action_description="write",
+            exc=exc,
+            payload={
+                "requested_path": str(requested_path),
+                "resolved_path": str(resolved_path),
+                "action_performed": False,
+            },
         )
 
     created_new_file = not file_already_exists or created_versioned_file
@@ -797,9 +833,26 @@ def delete_file(
         )
 
     if not confirm:
+        normalized_allowed_roots = _resolve_effective_allowed_roots(
+            primary_roots=write_allowed_roots,
+            fallback_roots=allowed_roots,
+        )
+        path = _resolve_file_tool_path(
+            path_value,
+            default_dir=default_write_dir,
+            allowed_roots=normalized_allowed_roots,
+        )
         return ToolResult.failure(
             tool_name=tool_name,
             error="Deletion was not performed. Pass confirm=true to delete the file.",
+            payload={
+                "requested_path": path_value,
+                "resolved_path": str(path),
+                "confirmed": False,
+                "confirm_required": True,
+                "action_performed": False,
+            },
+            failure_kind=_CONFIRMATION_REQUIRED_FAILURE_KIND,
         )
 
     normalized_allowed_roots = _resolve_effective_allowed_roots(
@@ -829,14 +882,27 @@ def delete_file(
         return ToolResult.failure(
             tool_name=tool_name,
             error=f"Path is not a file: {path}",
+            payload={
+                "path": str(path),
+                "confirmed": confirm,
+                "action_performed": False,
+            },
+            failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
         )
 
     try:
         path.unlink()
     except OSError as exc:
-        return ToolResult.failure(
+        return _build_path_oserror_result(
             tool_name=tool_name,
-            error=f"Could not delete file '{path}': {exc}",
+            path=path,
+            action_description="delete",
+            exc=exc,
+            payload={
+                "path": str(path),
+                "confirmed": confirm,
+                "action_performed": False,
+            },
         )
 
     return ToolResult.ok(
@@ -845,6 +911,7 @@ def delete_file(
         payload={
             "path": str(path),
             "confirmed": confirm,
+            "action_performed": True,
         },
     )
 
@@ -1145,7 +1212,39 @@ def _restrict_to_allowed_roots(
             f"Access to '{path}' is outside the allowed local roots. "
             f"Allowed roots: {allowed_roots_text}."
         ),
+        payload={
+            "requested_path": str(path),
+            "resolved_path": str(path),
+            "allowed_roots": [str(root) for root in allowed_roots],
+            "action_performed": False,
+        },
+        failure_kind=_ACCESS_DENIED_FAILURE_KIND,
     )
+
+
+def _build_path_oserror_result(
+    *,
+    tool_name: str,
+    path: Path,
+    action_description: str,
+    exc: OSError,
+    payload: dict[str, Any] | None = None,
+) -> ToolResult:
+    result_payload = dict(payload) if payload is not None else {}
+    result_payload.setdefault("path", str(path))
+    result_payload.setdefault("action_performed", False)
+    return ToolResult.failure(
+        tool_name=tool_name,
+        error=f"Could not {action_description} file '{path}': {exc}",
+        payload=result_payload,
+        failure_kind=_resolve_oserror_failure_kind(exc),
+    )
+
+
+def _resolve_oserror_failure_kind(exc: OSError) -> str | None:
+    if exc.errno in {errno.EACCES, errno.EPERM}:
+        return _PERMISSION_DENIED_FAILURE_KIND
+    return None
 
 
 def _is_path_allowed(path: Path, allowed_roots: tuple[Path, ...]) -> bool:

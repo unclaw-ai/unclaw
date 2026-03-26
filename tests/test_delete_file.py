@@ -47,6 +47,7 @@ def test_delete_file_deletes_file_with_explicit_confirmation(tmp_path: Path) -> 
     assert result.payload == {
         "path": str(target),
         "confirmed": True,
+        "action_performed": True,
     }
 
 
@@ -57,7 +58,15 @@ def test_delete_file_missing_confirmation_blocks_deletion(tmp_path: Path) -> Non
     result = delete_file(_make_call(str(target)), allowed_roots=(tmp_path,))
 
     assert result.success is False
+    assert result.failure_kind == "confirmation_required"
     assert result.error == "Deletion was not performed. Pass confirm=true to delete the file."
+    assert result.payload == {
+        "requested_path": str(target),
+        "resolved_path": str(target),
+        "confirmed": False,
+        "confirm_required": True,
+        "action_performed": False,
+    }
     assert target.exists()
 
 
@@ -130,4 +139,5 @@ def test_delete_file_dispatched_via_tool_executor_uses_default_files_dir(
     assert result.payload == {
         "path": str(target),
         "confirmed": True,
+        "action_performed": True,
     }

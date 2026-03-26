@@ -274,6 +274,10 @@ def test_cli_shows_model_requested_tool_call_before_final_reply(
             output_text="Example Domain content",
         ),
     )
+    monkeypatch.setattr(
+        "unclaw.core.runtime.create_default_tool_registry",
+        lambda _settings=None, session_manager=None: tool_registry,
+    )
 
     class FakeOllamaProvider:
         provider_name = "ollama"
@@ -372,6 +376,7 @@ def test_cli_shows_model_requested_tool_call_before_final_reply(
     reply_line = "Unclaw> The page contains example content."
     assert tool_line in output
     assert reply_line in output
+    assert "[answer refined]" not in output
     assert output.index(tool_line) < output.index(reply_line)
 
 
@@ -409,6 +414,10 @@ def test_cli_streamed_native_tool_call_shows_tool_before_final_reply(
             tool_name=call.tool_name,
             output_text="Example Domain content",
         ),
+    )
+    monkeypatch.setattr(
+        "unclaw.core.runtime.create_default_tool_registry",
+        lambda _settings=None, session_manager=None: tool_registry,
     )
 
     call_count = 0
@@ -457,9 +466,8 @@ def test_cli_streamed_native_tool_call_shows_tool_before_final_reply(
                 )
             )
 
-        # Calls 2 and 3: the agent loop may fire a model-native continuation
-        # check after tool execution + text reply, producing a 3rd call.
-        # Both return the same final text answer.
+        # Single successful informational tool turns should not trigger an
+        # extra continuation/refinement pass.
         return _CliFakeStreamResponse(
             (
                 {
@@ -511,6 +519,7 @@ def test_cli_streamed_native_tool_call_shows_tool_before_final_reply(
     reply_line = "Unclaw> The page contains example content."
     assert tool_line in output
     assert reply_line in output
+    assert "[answer refined]" not in output
     assert output.index(tool_line) < output.index(reply_line)
 
 

@@ -348,6 +348,8 @@ def run_user_turn(
                         ),
                         collected_tool_results=turn_tool_results,
                         user_input=user_input,
+                        session_goal_state=pre_turn_goal_state,
+                        session_progress_ledger=pre_turn_progress_ledger,
                     )
                 elif assistant_reply is None:
                     assistant_reply = (

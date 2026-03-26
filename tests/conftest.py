@@ -13,6 +13,7 @@ import yaml
 
 from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
+from unclaw.tools.contracts import ToolCall
 
 
 def _repo_root() -> Path:
@@ -100,6 +101,15 @@ class ScriptedFakeOllamaProvider:
             "Task completion check:"
         )
 
+    @staticmethod
+    def _is_pre_write_grounding_check_call(messages: Sequence[Any]) -> bool:
+        if not messages:
+            return False
+        last_content = getattr(messages[-1], "content", "")
+        return isinstance(last_content, str) and last_content.startswith(
+            "Pre-write grounding check:"
+        )
+
     @classmethod
     def _build_auto_continuation_response(
         cls, profile: Any, messages: Sequence[Any]
@@ -114,6 +124,42 @@ class ScriptedFakeOllamaProvider:
             provider="ollama",
             model_name=profile.model_name,
             content=draft_reply,
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
+        )
+
+    @classmethod
+    def _build_auto_pre_write_grounding_response(
+        cls, profile: Any, messages: Sequence[Any]
+    ) -> LLMResponse:
+        for msg in reversed(messages):
+            tool_calls_payload = getattr(msg, "tool_calls_payload", None)
+            if not isinstance(tool_calls_payload, tuple) or not tool_calls_payload:
+                continue
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="",
+                created_at="2026-03-26T00:00:01Z",
+                finish_reason="stop",
+                tool_calls=tuple(
+                    ToolCall(
+                        tool_name=item["function"]["name"],
+                        arguments=dict(item["function"]["arguments"]),
+                    )
+                    for item in tool_calls_payload
+                    if isinstance(item, dict)
+                    and isinstance(item.get("function"), dict)
+                    and isinstance(item["function"].get("name"), str)
+                    and isinstance(item["function"].get("arguments"), dict)
+                ),
+                raw_payload={"message": {"content": "", "tool_calls": list(tool_calls_payload)}},
+            )
+
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content="I couldn't safely revise the pending write from the available facts.",
             created_at="2026-03-26T00:00:01Z",
             finish_reason="stop",
         )
@@ -220,6 +266,11 @@ class ScriptedFakeOllamaProvider:
         # scripted step — just confirm the draft reply.
         if provider_cls._is_continuation_check_call(messages):
             return provider_cls._build_auto_continuation_response(profile, messages)
+
+        if provider_cls._is_pre_write_grounding_check_call(messages):
+            return provider_cls._build_auto_pre_write_grounding_response(
+                profile, messages
+            )
 
         step_index = provider_cls._call_count
         if step_index >= len(provider_cls._scripted_steps):

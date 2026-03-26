@@ -132,12 +132,14 @@ def test_write_text_file_fail_policy_returns_structured_outcome(tmp_path: Path) 
     )
     result = write_text_file(call, allowed_roots=(tmp_path,))
     assert result.success is False
+    assert result.failure_kind == "collision_conflict"
     assert result.payload is not None
     assert result.payload["file_already_exists"] is True
     assert result.payload["created_new_file"] is False
     assert result.payload["created_versioned_file"] is False
     assert result.payload["overwrite_applied"] is False
     assert result.payload["collision_policy_applied"] == "fail"
+    assert result.payload["action_performed"] is False
 
 
 def test_write_text_file_fail_refusal_includes_suggested_version_policy(tmp_path: Path) -> None:

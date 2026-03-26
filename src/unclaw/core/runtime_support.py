@@ -37,6 +37,15 @@ _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 _SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
 _SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session task continuity:"
 _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
+_STATE_CONFLICT_FAILURE_KINDS = frozenset(
+    {
+        "access_denied",
+        "collision_conflict",
+        "confirmation_required",
+        "permission_denied",
+        "unsupported_input",
+    }
+)
 _BLOCKED_GOAL_CONTINUATION_MAX_TOKENS = 2
 _BLOCKED_GOAL_CONTINUATION_MAX_TOKEN_ALNUM_CHARS = 3
 _BLOCKED_GOAL_CONTINUATION_ALLOWED_PUNCTUATION = ".,!?;:'\"-()[]{}"
@@ -47,9 +56,13 @@ _GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
         "Hard rules:",
         "- Treat the structured tool facts and raw tool outputs as the only evidence for current-turn execution claims.",
         "- Do not claim that a file was created, saved, updated, or modified unless the current turn includes a successful `write_text_file` tool result.",
+        "- Do not claim that a file was deleted unless the current turn includes a successful `delete_file` tool result.",
+        "- If any tool payload says `action_performed` is false, explicitly say that the action did not happen.",
         "- Do not claim research, search completion, biography completion, or overall task completion unless the evidence and persisted task state support it.",
         "- If the user is asking about task status or progress, answer from the persisted task state before the turn plus the current-turn execution facts.",
         "- If requested deliverables are still unsupported or blocked, say that plainly instead of pretending they are complete.",
+        "- Use the original user request plus `completion_risks` to make sure every requested deliverable is addressed once. If tool-backed work succeeded but the draft only covers part of the request, add the remaining short textual deliverable in the final reply.",
+        "- If blocking failures remain, say exactly what completed and what remains blocked. Do not flatten blocked turns into full success.",
         "- Keep the reply in the user's language when it is inferable from the request.",
         "- Do not end with promises about actions that did not happen in this turn.",
         "- Preserve supported details from the draft when they remain grounded.",
@@ -217,10 +230,12 @@ def _turn_requires_grounded_reply_finalization(
 ) -> bool:
     del session_progress_ledger, tool_registry
     if tool_results:
-        return any(
+        if any(
             tool_result.tool_name in {"write_text_file", "fast_web_search", "search_web"}
             for tool_result in tool_results
-        )
+        ):
+            return True
+        return any(_tool_result_requires_honesty_finalization(tool_result) for tool_result in tool_results)
     # No tools ran.  Skip finalization for most no-tool turns — the model
     # already has the task continuity context note.  Only finalize when a
     # terminal goal state (completed/blocked) exists, because local models
@@ -233,6 +248,15 @@ def _turn_requires_grounded_reply_finalization(
         if status in ("completed", "blocked"):
             return True
     return False
+
+
+def _tool_result_requires_honesty_finalization(tool_result: ToolResult) -> bool:
+    if tool_result.success is True:
+        return False
+    payload = _tool_result_payload_dict(tool_result)
+    if payload.get("action_performed") is False:
+        return True
+    return tool_result.failure_kind in _STATE_CONFLICT_FAILURE_KINDS
 
 
 def _finalize_grounded_reply(

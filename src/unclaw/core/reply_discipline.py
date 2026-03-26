@@ -15,14 +15,36 @@ _DEFAULT_TURN_CANCELLED_REPLY = (
     "This request was cancelled before tool work completed."
 )
 _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
+_DELETE_SUCCESS_TOOL_NAME = "delete_file"
 _SEARCH_TOOL_NAMES = frozenset({"fast_web_search", "search_web"})
+_STATE_CONFLICT_FAILURE_KINDS = frozenset(
+    {
+        "access_denied",
+        "collision_conflict",
+        "confirmation_required",
+        "permission_denied",
+        "unsupported_input",
+    }
+)
 
 
 def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
     return tool_result.payload if isinstance(tool_result.payload, dict) else {}
 
 
+def _tool_result_action_performed(tool_result: ToolResult) -> bool | None:
+    payload = _tool_result_payload_dict(tool_result)
+    action_performed = payload.get("action_performed")
+    if isinstance(action_performed, bool):
+        return action_performed
+    if tool_result.success is True:
+        return True
+    return None
+
+
 def _tool_result_timed_out(tool_result: ToolResult) -> bool:
+    if tool_result.failure_kind == "timeout":
+        return True
     payload = _tool_result_payload_dict(tool_result)
     execution_state = payload.get("execution_state")
     if isinstance(execution_state, str) and execution_state == "timed_out":
@@ -41,8 +63,10 @@ def _normalize_tool_result(tool_result: ToolResult) -> dict[str, Any]:
         "success": tool_result.success,
         "output_text": tool_result.output_text,
         "error": tool_result.error,
+        "failure_kind": tool_result.failure_kind,
         "payload": payload,
         "execution_state": payload.get("execution_state"),
+        "action_performed": _tool_result_action_performed(tool_result),
     }
 
 
@@ -135,6 +159,18 @@ def _build_grounded_reply_facts(
     )
     has_thin_search = bool(thin_evidence_tool_names)
     write_succeeded = _WRITE_SUCCESS_TOOL_NAME in successful_tool_names
+    delete_succeeded = _DELETE_SUCCESS_TOOL_NAME in successful_tool_names
+    state_conflict_tool_names = tuple(
+        tool_result.tool_name
+        for tool_result in tool_results
+        if tool_result.success is False
+        and tool_result.failure_kind in _STATE_CONFLICT_FAILURE_KINDS
+    )
+    action_not_performed_tool_names = tuple(
+        tool_result.tool_name
+        for tool_result in tool_results
+        if _tool_result_action_performed(tool_result) is False
+    )
 
     return {
         "user_input": user_input,
@@ -149,6 +185,7 @@ def _build_grounded_reply_facts(
             "failed_tool_names": failed_tool_names,
             "all_tools_failed": bool(tool_results) and len(failed_tool_names) == len(tool_results),
             "write_text_file_succeeded": write_succeeded,
+            "delete_file_succeeded": delete_succeeded,
             "grounded_search_succeeded": any(
                 tool_name in _SEARCH_TOOL_NAMES for tool_name in successful_tool_names
             ),
@@ -158,11 +195,28 @@ def _build_grounded_reply_facts(
             "latest_tool_success": (
                 latest_tool_result.success if latest_tool_result is not None else None
             ),
+            "latest_tool_failure_kind": (
+                latest_tool_result.failure_kind
+                if latest_tool_result is not None
+                else None
+            ),
         },
         "evidence_quality": {
             "has_thin_search_evidence": has_thin_search,
             "thin_evidence_tool_names": thin_evidence_tool_names,
             "write_after_thin_search": write_succeeded and has_thin_search,
+        },
+        "completion_risks": {
+            "has_blocking_failures": bool(failed_tool_names),
+            "state_conflict_tool_names": state_conflict_tool_names,
+            "action_not_performed_tool_names": action_not_performed_tool_names,
+            "multi_step_tool_turn": len(tool_results) > 1,
+            "deliverable_check_required": (
+                bool(failed_tool_names)
+                or len(tool_results) > 1
+                or write_succeeded
+                or delete_succeeded
+            ),
         },
         "persisted_goal_state_before_turn": _normalize_session_goal_state(
             session_goal_state
@@ -177,6 +231,11 @@ def _build_all_failed_tool_reply(
     *,
     tool_results: Sequence[ToolResult],
 ) -> str:
+    if any(_tool_result_action_performed(tool_result) is False for tool_result in tool_results):
+        latest_tool_result = tool_results[-1]
+        if latest_tool_result.failure_kind == "confirmation_required":
+            return "The requested action was not performed because confirmation was required."
+        return "The requested action was blocked and was not performed."
     if any(_tool_result_timed_out(tool_result) for tool_result in tool_results):
         return (
             "The tool step timed out, so I couldn't confirm the requested details "
