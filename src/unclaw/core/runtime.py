@@ -119,9 +119,20 @@ def run_user_turn(
 
     buffered_stream_chunks: list[str] | None
     _effective_stream_func: LLMContentCallback | None
+    # Stream directly to the caller during the agent loop so that output
+    # appears progressively instead of being held until the whole turn ends.
+    # Only the initial model call is separately buffered (below) so we can
+    # discard its text if the model decides to call tools instead.
+    live_streamed = False
     if stream_output_func is not None:
         buffered_stream_chunks = []
-        _effective_stream_func = buffered_stream_chunks.append
+
+        def _live_stream_func(text: str) -> None:
+            nonlocal live_streamed
+            live_streamed = True
+            stream_output_func(text)
+
+        _effective_stream_func = _live_stream_func
     else:
         buffered_stream_chunks = None
         _effective_stream_func = None
@@ -336,6 +347,7 @@ def run_user_turn(
                             _runtime_support._build_post_tool_grounding_note
                         ),
                         collected_tool_results=turn_tool_results,
+                        user_input=user_input,
                     )
                 elif assistant_reply is None:
                     assistant_reply = (
@@ -397,14 +409,12 @@ def run_user_turn(
         )
     )
 
-    if stream_output_func is not None:
-        if grounded_finalization_used:
-            stream_output_func(assistant_reply)
-        elif buffered_stream_chunks:
-            for chunk in buffered_stream_chunks:
-                stream_output_func(chunk)
-        elif assistant_reply:
-            stream_output_func(assistant_reply)
+    # Streaming emission: avoid duplicating already-shown live content.
+    # The caller's finish() method handles showing the final text and
+    # detecting refinements vs streamed drafts.
+    if stream_output_func is not None and not live_streamed:
+        # No live streaming happened — emit the final reply.
+        stream_output_func(assistant_reply)
 
     session_manager.add_message(
         MessageRole.ASSISTANT,

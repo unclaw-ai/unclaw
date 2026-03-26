@@ -31,6 +31,8 @@ from unclaw.startup import (
     build_banner,
     build_startup_report,
     format_startup_report,
+    _should_use_color,
+    _style_text,
 )
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 
@@ -97,7 +99,10 @@ class _TerminalAssistantStream:
 
         streamed_text = "".join(self.chunks)
         if streamed_text.strip() == final_text.strip():
-            print()
+            # Streamed text matches final — ensure terminal newline.
+            if not streamed_text.endswith("\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
             return
 
         if final_text.startswith(streamed_text):
@@ -109,7 +114,10 @@ class _TerminalAssistantStream:
             sys.stdout.flush()
             return
 
-        print()
+        # Final answer differs from streamed draft — show refined version.
+        if not streamed_text.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
         print("[answer refined]")
         print(final_text)
 
@@ -368,10 +376,13 @@ def _build_preflight_banner(settings: Settings) -> str:
 
 def _build_prompt(command_handler: CommandHandler) -> str:
     session = command_handler.session_manager.ensure_current_session()
-    return (
+    raw_prompt = (
         f"unclaw[{session.id} | model={command_handler.current_model_profile_name} | "
         f"think={command_handler.thinking_label}]> "
     )
+    if _should_use_color():
+        return _style_text(raw_prompt, "shrimp", True, bold=True)
+    return raw_prompt
 
 
 def _render_command_result(result: CommandResult) -> None:
@@ -441,7 +452,10 @@ def _build_tool_call_visibility_line(
 ) -> str:
     rendered_arguments = _format_tool_call_arguments(tool_call.arguments)
     prefix = f"skill:{skill_id}" if skill_id else "tool"
-    return f"[{prefix}] {tool_call.tool_name} {rendered_arguments}"
+    raw_line = f"[{prefix}] {tool_call.tool_name} {rendered_arguments}"
+    if _should_use_color():
+        return _style_text(raw_line, "dim", True)
+    return raw_line
 
 
 def _format_tool_call_arguments(arguments: object) -> str:

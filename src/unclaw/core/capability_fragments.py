@@ -423,9 +423,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
     {
         "available.local_file_read": _static_prompt(
             "available.local_file_read",
-            "/read <path>: read local .txt, .md, .json, or .csv files inside "
-            "allowed roots. Other formats (pdf, docx, xlsx, etc.) are not "
-            "supported in V1.",
+            "read_text_file <path>: YOU CAN read local .txt, .md, .json, or .csv files inside "
+            "allowed roots. This tool is available right now. "
+            "Other formats (pdf, docx, xlsx, etc.) are not supported in V1.",
         ),
         "available.local_directory_listing": _static_prompt(
             "available.local_directory_listing",
@@ -437,14 +437,15 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "available.web_search": _static_prompt(
             "available.web_search",
-            "/search <query>: search the public web, read a few relevant pages, "
-            "and answer naturally from grounded web context with compact sources.",
+            "search_web <query>: YOU CAN search the public web. This tool fetches pages, "
+            "reads them, and returns grounded evidence with compact sources. "
+            "Use it instead of pretending you cannot look things up.",
         ),
         "available.system_info": _static_prompt(
             "available.system_info",
-            "system_info: return current local machine and runtime facts, "
+            "system_info: YOU CAN get current local machine and runtime facts, "
             "including local date/time, day, OS, CPU core count, total RAM, "
-            "hostname, and locale.",
+            "hostname, and locale. Call this tool instead of saying you don't know.",
         ),
         "available.shell_command_execution": _static_prompt(
             "available.shell_command_execution",
@@ -455,7 +456,8 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "available.local_file_write": _static_prompt(
             "available.local_file_write",
-            "write_text_file <path>: write a local file. "
+            "write_text_file <path> <content>: YOU CAN create and write local files. "
+            "This tool is available and functional right now. "
             "Relative paths are created inside data/files/ by default. "
             "Use collision_policy to control collision behaviour: "
             "'fail' (default) — refuse if the file already exists; "
@@ -521,11 +523,10 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
         ),
         "available.fast_web_search": _static_prompt(
             "available.fast_web_search",
-            "fast_web_search <query>: quick lightweight web grounding probe. "
+            "fast_web_search <query>: YOU CAN do a quick lightweight web grounding probe. "
             "Use before full search_web when unsure about a person, place, "
             "organization, or product name. Use the user's literal wording first. "
-            "Returns a tiny grounding note, "
-            "not a full answer.",
+            "Returns a tiny grounding note, not a full answer.",
         ),
         "unavailable.local_file_read": _static_prompt(
             "unavailable.local_file_read",
@@ -580,6 +581,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "guidance.shared_core_rules",
             "Do not claim you have no tool access when one or more built-in tools are available.",
             "You may say you can use Unclaw built-in tools that are listed as available.",
+            "Never say 'I cannot create files', 'I cannot do that', or 'I have no "
+            "access to that capability' when the relevant tool IS listed as available. "
+            "Instead, use the tool or report the exact structural blocker from its result.",
         ),
         "guidance.model_callable.core_rules": _static_prompt(
             "guidance.model_callable.core_rules",
@@ -603,6 +607,9 @@ _BUILTIN_CAPABILITY_PROMPTS = MappingProxyType(
             "task involves research or content generation, the task is not complete "
             "until write_text_file has been called and its output confirms success. "
             "Do not stop after research alone when a file output was requested.",
+            "When a tool is listed as available, USE it rather than claiming you "
+            "cannot perform the action. If the tool execution fails, report the "
+            "exact error from the tool result.",
             "If a person, organization, or entity name in the user's request is "
             "ambiguous or could match multiple real entities, do not silently "
             "substitute a different entity. Ask for clarification or explicitly "

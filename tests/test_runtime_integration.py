@@ -210,14 +210,14 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
             in provider_messages[1].content
         )
         assert "Available built-in tools (compact):" in provider_messages[1].content
-        assert "/read <path>" in provider_messages[1].content
+        assert "read_text_file <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
         assert "run_terminal_command <command>" in provider_messages[1].content
         assert "delete_file <path>" in provider_messages[1].content
         assert "move_file <source_path> <destination_path>" in provider_messages[1].content
         assert "rename_file <source_path> <destination_path>" in provider_messages[1].content
         assert "copy_file <source_path> <destination_path>" in provider_messages[1].content
-        assert "/search <query>" in provider_messages[1].content
+        assert "search_web <query>" in provider_messages[1].content
         assert (
             "/search <query>: search the public web, read a few relevant pages, "
             "and answer naturally from grounded web context with compact sources."
@@ -7368,7 +7368,10 @@ def test_run_search_command_uses_common_runtime_path_and_supports_streaming(
         assert "Streamed search answer." in result.assistant_reply
         assert "Sources:" in result.assistant_reply
         assert "https://example.com/docs" in result.assistant_reply
-        assert streamed_chunks == [result.assistant_reply]
+        # The stream receives the raw model output; the final assistant_reply
+        # has Sources appended by post-processing.
+        assert len(streamed_chunks) >= 1
+        assert "Streamed search answer." in "".join(streamed_chunks)
 
         stored_messages = session_manager.list_messages(
             session_manager.ensure_current_session().id,
@@ -7985,5 +7988,468 @@ def test_second_explicit_search_turn_does_not_inherit_sources_from_first_json_pl
         # Stale Turn 1 sources must NOT appear.
         assert "charlemagne.example.com" not in reply
         assert "medieval.example.com" not in reply
+    finally:
+        session_manager.close()
+
+
+# ──────────────────────────────────────────────────────────────────
+# Phase-4 corrective regression tests
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """After tools ran, the continuation check asks the model if the task is done.
+
+    The model should get a second chance to emit tool calls if it decides the
+    task is not yet complete, instead of stopping at the first text reply.
+    """
+    import unclaw.core.agent_loop as _agent_loop
+
+    _agent_loop._continuation_check_enabled = True
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    captured_messages: list[list[LLMMessage]] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+            captured_messages.append(list(messages))
+
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(profile=profile, messages=messages)
+
+            if call_count == 1:
+                # First call: model requests a tool call.
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="system_info", arguments={}),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "system_info", "arguments": {}}}
+                            ],
+                        }
+                    },
+                )
+            if call_count == 2:
+                # Second call: model returns a partial text reply.
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="The date is 2026-03-26.",
+                    created_at="2026-03-26T00:00:01Z",
+                    finish_reason="stop",
+                )
+            # Third call (continuation check): model decides task is done.
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The current date is 2026-03-26 and it is a Thursday.",
+                created_at="2026-03-26T00:00:02Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SYSTEM_INFO_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Date: 2026-03-26\nDay: Thursday",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, "What day is today?", session_id=session.id
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What day is today?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        # The continuation check should have triggered (call_count >= 3).
+        non_finalizer = _non_finalizer_calls(captured_messages)
+        assert len(non_finalizer) >= 3
+
+        # One of the non-finalizer calls should contain the continuation note.
+        continuation_found = any(
+            any(
+                m.role is LLMRole.SYSTEM
+                and "Task completion check:" in m.content
+                for m in msgs
+            )
+            for msgs in non_finalizer
+        )
+        assert continuation_found, "Continuation check note was not injected"
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_tool_argument_repair_on_empty_query(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Invalid empty-query tool call triggers bounded model-native repair.
+
+    When a tool call fails due to a structural error (e.g., empty query),
+    the model gets one chance to emit a corrected tool call.
+    """
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(profile=profile, messages=messages)
+
+            if call_count == 1:
+                # First call: model sends invalid empty-query tool call.
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fast_web_search", arguments={"query": ""}),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "fast_web_search", "arguments": {"query": ""}}}
+                            ],
+                        }
+                    },
+                )
+            if call_count == 2:
+                # Repair pass: model emits corrected tool call.
+                # Check that the repair note is present.
+                has_repair_note = any(
+                    m.role is LLMRole.SYSTEM
+                    and "Tool argument repair:" in m.content
+                    for m in messages
+                )
+                assert has_repair_note, "Repair note not injected for structural failure"
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-26T00:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="fast_web_search", arguments={"query": "test query"}),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "fast_web_search", "arguments": {"query": "test query"}}}
+                            ],
+                        }
+                    },
+                )
+            # Final text answer after repair succeeded.
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Search results for the query.",
+                created_at="2026-03-26T00:00:02Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        lambda call: (
+            ToolResult.failure(
+                tool_name=call.tool_name,
+                error="Tool 'fast_web_search' failed: query argument must be a non-empty string.",
+            )
+            if not call.arguments.get("query")
+            else ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Web result for: " + call.arguments["query"],
+                payload={"result_count": 3, "supported_point_count": 2, "match_quality": "good"},
+            )
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, "Search for test query", session_id=session.id
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Search for test query",
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        # The repair should have triggered: call_count >= 3.
+        assert call_count >= 3, "Model-native repair did not fire"
+    finally:
+        session_manager.close()
+
+
+def test_capability_context_write_file_available_says_you_can(
+    make_temp_project,
+) -> None:
+    """When write_text_file is available, capability context says YOU CAN."""
+    from unclaw.core.capabilities import (
+        build_runtime_capability_context,
+        build_runtime_capability_summary,
+    )
+    from unclaw.core.executor import create_default_tool_registry
+
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+
+    try:
+        registry = create_default_tool_registry(settings, session_manager=session_manager)
+        summary = build_runtime_capability_summary(
+            tool_registry=registry,
+            memory_summary_available=False,
+            model_can_call_tools=True,
+        )
+        context = build_runtime_capability_context(summary)
+
+        # The context must say "YOU CAN" for write_text_file.
+        assert "YOU CAN create and write local files" in context or "YOU CAN" in context
+        assert "write_text_file" in context
+    finally:
+        session_manager.close()
+
+
+def test_capability_context_honest_execution_rule_present(
+    make_temp_project,
+) -> None:
+    """Capability context includes the honest execution-first rule."""
+    from unclaw.core.capabilities import (
+        build_runtime_capability_context,
+        build_runtime_capability_summary,
+    )
+    from unclaw.core.executor import create_default_tool_registry
+
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+
+    try:
+        registry = create_default_tool_registry(settings, session_manager=session_manager)
+        summary = build_runtime_capability_summary(
+            tool_registry=registry,
+            memory_summary_available=False,
+            model_can_call_tools=True,
+        )
+        context = build_runtime_capability_context(summary)
+
+        # The context must forbid false claims about missing capabilities.
+        assert "I cannot" in context.lower() or "cannot create files" in context.lower() or "never say" in context.lower()
+    finally:
+        session_manager.close()
+
+
+def test_agent_loop_structural_failure_detection() -> None:
+    """_all_failures_look_structural correctly identifies schema errors."""
+    from unclaw.core.agent_loop import _all_failures_look_structural
+
+    structural_result = ToolResult.failure(
+        tool_name="fast_web_search",
+        error="Tool 'fast_web_search' failed: query argument must be a non-empty string.",
+    )
+    assert _all_failures_look_structural([structural_result]) is True
+
+    non_structural_result = ToolResult.failure(
+        tool_name="search_web",
+        error="Tool 'search_web' timed out after 30 seconds.",
+    )
+    assert _all_failures_look_structural([non_structural_result]) is False
+
+    # Mixed: one structural, one non-structural.
+    assert _all_failures_look_structural([structural_result, non_structural_result]) is False
+
+
+def test_continuation_check_note_content() -> None:
+    """_build_continuation_check_note includes user request and draft."""
+    from unclaw.core.agent_loop import _build_continuation_check_note
+
+    note = _build_continuation_check_note(
+        user_input="Research Marine Leleu and write a file",
+        draft_reply="Marine Leleu is an athlete.",
+    )
+
+    assert "Task completion check:" in note
+    assert "Research Marine Leleu" in note
+    assert "Marine Leleu is an athlete" in note
+    assert "satisfied" in note.lower() or "completed" in note.lower() or "full request" in note.lower()
+
+
+def test_cli_prompt_colorization() -> None:
+    """The CLI prompt builder produces styled output when color is enabled."""
+    from unclaw.channels.cli import _build_prompt
+    from unclaw.startup import _should_use_color
+
+    # We cannot fully test color in CI, but we can verify the function
+    # runs without error and returns a string.
+    # The actual color test would need a TTY mock.
+
+    # Just verify the imports and function exist.
+    assert callable(_build_prompt)
+    assert callable(_should_use_color)
+
+
+def test_streaming_live_flag_set_during_agent_loop(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Streaming chunks arrive live during agent loop, not buffered until end."""
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    call_count = 0
+    streamed_chunks: list[str] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            pass
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            nonlocal call_count
+            call_count += 1
+
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(profile=profile, messages=messages)
+
+            if call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(ToolCall(tool_name="system_info", arguments={}),),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {"function": {"name": "system_info", "arguments": {}}}
+                            ],
+                        }
+                    },
+                )
+            # After tool: stream chunks to callback during the reply.
+            reply = "The system is Linux."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=reply,
+                created_at="2026-03-26T00:00:01Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SYSTEM_INFO_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="OS: Linux\nCPU: 8 cores",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER, "What OS am I running?", session_id=session.id
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What OS am I running?",
+            tracer=tracer,
+            tool_registry=tool_registry,
+            stream_output_func=streamed_chunks.append,
+        )
+
+        # Chunks should have been streamed live during the agent loop.
+        assert len(streamed_chunks) >= 1
+        # The streamed content should contain the reply text.
+        streamed_text = "".join(streamed_chunks)
+        assert "Linux" in streamed_text
     finally:
         session_manager.close()

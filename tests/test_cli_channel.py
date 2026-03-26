@@ -423,6 +423,9 @@ def test_cli_streamed_native_tool_call_shows_tool_before_final_reply(
                 )
             )
 
+        # Calls 2 and 3: the agent loop may fire a model-native continuation
+        # check after tool execution + text reply, producing a 3rd call.
+        # Both return the same final text answer.
         return _CliFakeStreamResponse(
             (
                 {

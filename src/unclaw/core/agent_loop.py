@@ -15,7 +15,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS
 from unclaw.llm.base import LLMContentCallback, LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.tracer import Tracer
-from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
+from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult, resolve_tool_argument_spec
 from unclaw.tools.dispatcher import ToolDispatcher, normalize_tool_call_for_execution
 from unclaw.tools.registry import ToolRegistry
 
@@ -32,6 +32,9 @@ _INLINE_TOOL_PAYLOAD_FALLBACK_REPLY = (
     "invalid tool payload. Please try again or rephrase the request."
 )
 _SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS = 3
+# Test hook: set to False to suppress the continuation check in tests
+# that do not script for the extra model call.
+_continuation_check_enabled = True
 
 
 @dataclass(slots=True)
@@ -96,15 +99,64 @@ def _run_agent_loop(
     tool_call_callback: Callable[[ToolCall], None] | None,
     build_post_tool_grounding_note: Callable[..., str],
     collected_tool_results: list[ToolResult] | None = None,
+    user_input: str = "",
 ) -> str:
     """Execute the observation-action loop until text reply or step limit."""
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
+    tools_ran_in_turn = False
+    continuation_used = False
 
     for _step in range(max_steps):
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
-            return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
+            draft_reply = current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
+
+            # Model-native continuation: when tools ran in this turn and the
+            # model returned text, ask it once whether the original user
+            # request is fully satisfied or if it should emit another tool
+            # call.  This is bounded to one continuation pass to avoid loops.
+            if (
+                _continuation_check_enabled
+                and tools_ran_in_turn
+                and not continuation_used
+                and not tool_guard_state.is_cancelled()
+                and _step + 1 < max_steps
+                and user_input
+            ):
+                continuation_used = True
+                continuation_note = _build_continuation_check_note(
+                    user_input=user_input,
+                    draft_reply=draft_reply,
+                )
+                context_messages.append(
+                    LLMMessage(role=LLMRole.ASSISTANT, content=draft_reply)
+                )
+                context_messages.append(
+                    LLMMessage(role=LLMRole.SYSTEM, content=continuation_note)
+                )
+                current_response = orchestrator.call_model(
+                    session_id=session_id,
+                    messages=context_messages,
+                    model_profile_name=model_profile_name,
+                    thinking_enabled=thinking_enabled,
+                    content_callback=content_callback,
+                    tools=tool_definitions,
+                )
+                tracer.trace_model_succeeded(
+                    session_id=session_id,
+                    provider=current_response.response.provider,
+                    model_name=current_response.response.model_name,
+                    finish_reason=current_response.response.finish_reason,
+                    output_length=len(current_response.response.content),
+                    model_duration_ms=current_response.model_duration_ms,
+                    reasoning=current_response.response.reasoning,
+                )
+                # Re-enter loop: if the model now emits tool calls, they'll
+                # be handled by the next iteration; if text, we return it.
+                continue
+
+            return draft_reply
 
         stop_reply = _preflight_runtime_tool_batch(
             tool_calls=tool_calls,
@@ -130,8 +182,58 @@ def _run_agent_loop(
             tool_guard_state=tool_guard_state,
             tool_call_callback=tool_call_callback,
         )
+        tools_ran_in_turn = True
         if collected_tool_results is not None:
             collected_tool_results.extend(tool_results)
+
+        # Model-native tool-argument repair: if every tool in the batch
+        # failed with a structural/contract error, give the model one
+        # bounded chance to emit corrected tool calls.
+        if (
+            tool_results
+            and all(tr.success is False for tr in tool_results)
+            and not tool_guard_state.is_cancelled()
+            and _step + 1 < max_steps
+            and _all_failures_look_structural(tool_results)
+        ):
+            repair_note = _build_tool_argument_repair_note(
+                failed_tool_calls=tool_calls,
+                failed_tool_results=tool_results,
+                tool_definitions=tool_definitions,
+                user_input=user_input,
+            )
+            for tool_result in tool_results:
+                context_messages.append(
+                    LLMMessage(
+                        role=LLMRole.TOOL,
+                        content=build_untrusted_tool_message_content(
+                            tool_result.output_text
+                        ),
+                    )
+                )
+            context_messages.append(
+                LLMMessage(role=LLMRole.SYSTEM, content=repair_note)
+            )
+            current_response = orchestrator.call_model(
+                session_id=session_id,
+                messages=context_messages,
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
+                content_callback=content_callback,
+                tools=tool_definitions,
+            )
+            tracer.trace_model_succeeded(
+                session_id=session_id,
+                provider=current_response.response.provider,
+                model_name=current_response.response.model_name,
+                finish_reason=current_response.response.finish_reason,
+                output_length=len(current_response.response.content),
+                model_duration_ms=current_response.model_duration_ms,
+                reasoning=current_response.response.reasoning,
+            )
+            # The repair response re-enters the loop: if the model now
+            # emits valid tool calls, they'll execute next iteration.
+            continue
         for tool_result in tool_results:
             context_messages.append(
                 LLMMessage(
@@ -178,6 +280,96 @@ def _run_agent_loop(
         return current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
 
     return _MAX_STEPS_FALLBACK_REPLY
+
+
+_CONTINUATION_CHECK_NOTE_PREFIX = "Task completion check:"
+
+
+def _build_continuation_check_note(
+    *,
+    user_input: str,
+    draft_reply: str,
+) -> str:
+    return "\n".join(
+        (
+            f"{_CONTINUATION_CHECK_NOTE_PREFIX} "
+            "the model produced a text reply after running tools this turn.",
+            f"Original user request: {user_input}",
+            f"Current draft answer: {draft_reply[:500]}",
+            "Decide: is the user's full request satisfied by the work done so far?",
+            "If YES: produce the final answer text now.",
+            "If NO and an available tool call would make meaningful progress: "
+            "emit that tool call instead of answering.",
+            "Do not repeat tool calls that already ran this turn.",
+        )
+    )
+
+
+_STRUCTURAL_FAILURE_KEYWORDS = (
+    "missing",
+    "required",
+    "empty",
+    "argument",
+    "parameter",
+    "schema",
+    "invalid",
+    "expected",
+    "must be",
+    "cannot be",
+    "not provided",
+    "Unknown tool",
+)
+
+
+def _all_failures_look_structural(tool_results: Sequence[ToolResult]) -> bool:
+    """Return True when every failed result looks like a schema/contract error."""
+    for tool_result in tool_results:
+        if tool_result.success is not False:
+            continue
+        error_text = (tool_result.error or "") + " " + (tool_result.output_text or "")
+        if not any(kw in error_text for kw in _STRUCTURAL_FAILURE_KEYWORDS):
+            return False
+    return True
+
+
+_TOOL_ARGUMENT_REPAIR_NOTE_PREFIX = "Tool argument repair:"
+
+
+def _build_tool_argument_repair_note(
+    *,
+    failed_tool_calls: Sequence[ToolCall],
+    failed_tool_results: Sequence[ToolResult],
+    tool_definitions: Sequence[ToolDefinition],
+    user_input: str,
+) -> str:
+    tool_schema_lines: list[str] = []
+    failed_tool_names = {call.tool_name for call in failed_tool_calls}
+    for tool_def in tool_definitions:
+        if tool_def.name in failed_tool_names:
+            arg_parts: list[str] = []
+            for arg_name, arg_raw in tool_def.arguments.items():
+                spec = resolve_tool_argument_spec(arg_raw)
+                arg_parts.append(f"{arg_name}: {spec.value_type}")
+            tool_schema_lines.append(f"  {tool_def.name}({', '.join(arg_parts)})")
+
+    error_lines: list[str] = []
+    for i, (call, result) in enumerate(zip(failed_tool_calls, failed_tool_results)):
+        error_lines.append(
+            f"  [{i}] {call.tool_name}({call.arguments}) -> error: {result.error}"
+        )
+
+    parts = [
+        f"{_TOOL_ARGUMENT_REPAIR_NOTE_PREFIX} "
+        "the previous tool call(s) failed due to argument or schema errors.",
+        f"Original user request: {user_input}",
+        "Failed calls with errors:",
+        *error_lines,
+        "Available tool schemas (* = required):",
+        *tool_schema_lines,
+        "Either emit a corrected tool call with valid arguments, "
+        "or answer honestly that you cannot proceed.",
+    ]
+    return "\n".join(parts)
 
 
 def _preflight_runtime_tool_batch(

@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 import yaml
 
-from unclaw.llm.base import LLMResponse
+from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.model_packs import DEV_MODEL_PACK_NAME, get_model_pack_profiles
 
 
@@ -88,6 +88,34 @@ class ScriptedFakeOllamaProvider:
         first_content = getattr(messages[0], "content", "")
         return isinstance(first_content, str) and first_content.startswith(
             "Grounded reply finalizer for one runtime turn."
+        )
+
+    @staticmethod
+    def _is_continuation_check_call(messages: Sequence[Any]) -> bool:
+        """Detect agent-loop continuation check (Task completion check:)."""
+        if not messages:
+            return False
+        last_content = getattr(messages[-1], "content", "")
+        return isinstance(last_content, str) and last_content.startswith(
+            "Task completion check:"
+        )
+
+    @classmethod
+    def _build_auto_continuation_response(
+        cls, profile: Any, messages: Sequence[Any]
+    ) -> LLMResponse:
+        """Repeat the draft reply from the preceding assistant message."""
+        draft_reply = ""
+        for msg in reversed(messages):
+            if getattr(msg, "role", None) is LLMRole.ASSISTANT:
+                draft_reply = getattr(msg, "content", "") or ""
+                break
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content=draft_reply,
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
         )
 
     @staticmethod
@@ -188,6 +216,11 @@ class ScriptedFakeOllamaProvider:
 
             return provider_cls._build_auto_finalizer_response(profile, messages)
 
+        # Auto-handle agent-loop continuation checks without consuming a
+        # scripted step — just confirm the draft reply.
+        if provider_cls._is_continuation_check_call(messages):
+            return provider_cls._build_auto_continuation_response(profile, messages)
+
         step_index = provider_cls._call_count
         if step_index >= len(provider_cls._scripted_steps):
             raise AssertionError(
@@ -240,6 +273,21 @@ def pytest_collection_modifyitems(config, items) -> None:  # type: ignore[no-unt
     for item in items:
         if "real_ollama" in item.keywords:
             item.add_marker(skip_real_ollama)
+
+
+@pytest.fixture(autouse=True)
+def _suppress_continuation_check():
+    """Disable the agent-loop continuation check by default in tests.
+
+    Tests that explicitly verify continuation behaviour should re-enable it
+    via ``unclaw.core.agent_loop._continuation_check_enabled = True``.
+    """
+    import unclaw.core.agent_loop as _agent_loop
+
+    original = _agent_loop._continuation_check_enabled
+    _agent_loop._continuation_check_enabled = False
+    yield
+    _agent_loop._continuation_check_enabled = original
 
 
 @pytest.fixture
