@@ -1002,6 +1002,447 @@ def test_existing_goal_state_is_preserved_after_later_one_shot_fast_web_search_t
         session_manager.close()
 
 
+def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_updates_continuity(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    first_output_path = project_root / "data" / "files" / "completed-handoff-note.txt"
+    tool_registry = ToolRegistry()
+    captured_messages: list[list[object]] = []
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Topic two has enough grounded evidence for a fresh note."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Topic two profile",
+                        "url": "https://example.com/topic-two-profile",
+                    },
+                    {
+                        "title": "Topic two recap",
+                        "url": "https://example.com/topic-two-recap",
+                    },
+                ],
+                "evidence_count": 4,
+                "finding_count": 2,
+            },
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(first_output_path), "content": "first note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I saved the first note locally.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response("search_web", {"query": "topic two note"}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I gathered grounded research for the new note.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="You are researching topic two for the fresh note.",
+            created_at="2026-03-25T09:00:03Z",
+            finish_reason="stop",
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Write a short local note file."
+    second_prompt = "Research topic two and prepare a fresh local note."
+    third_prompt = "Where does this task stand?"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        handoff_goal_state = session_manager.get_session_goal_state(session.id)
+        assert handoff_goal_state is not None
+        assert handoff_goal_state.goal == second_prompt
+        assert handoff_goal_state.status == "active"
+        assert handoff_goal_state.current_step == "search_web"
+        assert handoff_goal_state.last_blocker is None
+
+        session_manager.add_message(
+            MessageRole.USER,
+            third_prompt,
+            session_id=session.id,
+        )
+        third_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=third_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == "I saved the first note locally."
+        assert second_reply.startswith("I gathered grounded research for the new note.")
+        assert "Sources:" in second_reply
+        assert "https://example.com/topic-two-profile" in second_reply
+        assert third_reply == "You are researching topic two for the fresh note."
+        assert fake_provider.call_count() == 5
+        assert goal_state is not None
+        assert goal_state.goal == second_prompt
+        assert goal_state.status == "active"
+        assert goal_state.current_step == "search_web"
+        assert goal_state.last_blocker is None
+        assert first_output_path.read_text(encoding="utf-8") == "first note"
+
+        third_turn_system_messages = [
+            message.content
+            for message in captured_messages[4]
+            if getattr(message, "role", None) is LLMRole.SYSTEM
+        ]
+        continuity_notes = [
+            message
+            for message in third_turn_system_messages
+            if message.startswith("Session task continuity:")
+        ]
+        assert len(continuity_notes) == 1
+        assert (
+            'goal="Research topic two and prepare a fresh local note."'
+            in continuity_notes[0]
+        )
+        assert 'status="active"' in continuity_notes[0]
+        assert 'current_step="search_web"' in continuity_notes[0]
+        assert (
+            'latest_progress=[status="active"; step="search_web"; '
+            'detail="tool succeeded"]'
+            in continuity_notes[0]
+        )
+    finally:
+        session_manager.close()
+
+
+def test_blocked_task_substantive_search_turn_handoffs_goal_before_write(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    blocked_output_path = project_root / "data" / "files" / "blocked-handoff-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error=f"Permission denied: {call.arguments['path']}",
+        ),
+    )
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 3\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Topic two now has enough grounded material for a new note."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Topic two profile",
+                        "url": "https://example.com/topic-two-profile",
+                    }
+                ],
+                "evidence_count": 3,
+                "finding_count": 1,
+            },
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(blocked_output_path), "content": "blocked note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="Please try again.",
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response("search_web", {"query": "topic two note"}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I gathered grounded research for the new note.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Write a short local note file."
+    second_prompt = "Research topic two and prepare a fresh local note."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        blocked_goal_state = session_manager.get_session_goal_state(session.id)
+        assert blocked_goal_state is not None
+        assert blocked_goal_state.goal == first_prompt
+        assert blocked_goal_state.status == "blocked"
+        assert blocked_goal_state.current_step == "write_text_file"
+
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert first_reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+        assert second_reply.startswith("I gathered grounded research for the new note.")
+        assert "Sources:" in second_reply
+        assert "https://example.com/topic-two-profile" in second_reply
+        assert fake_provider.call_count() == 4
+        assert goal_state is not None
+        assert goal_state.goal == second_prompt
+        assert goal_state.status == "active"
+        assert goal_state.current_step == "search_web"
+        assert goal_state.last_blocker is None
+        assert not blocked_output_path.exists()
+    finally:
+        session_manager.close()
+
+
+@pytest.mark.parametrize("initial_status", ["completed", "blocked"])
+def test_terminal_task_compact_search_follow_up_keeps_original_goal_text(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+    initial_status: str,
+) -> None:
+    project_root = make_temp_project()
+    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = project_root / "data" / "files" / "compact-continuation-note.txt"
+    tool_registry = ToolRegistry()
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        if initial_status == "blocked":
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error=f"Permission denied: {call.arguments['path']}",
+            )
+
+        path = Path(str(call.arguments["path"]))
+        content = str(call.arguments["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {path}",
+            payload={"path": str(path), "size": len(content)},
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=(
+                f"Search query: {call.arguments['query']}\n"
+                "Sources fetched: 2 of 2 attempted\n"
+                "Evidence kept: 4\n"
+            ),
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [
+                    "Topic two has enough grounded evidence for a fresh note."
+                ],
+                "display_sources": [
+                    {
+                        "title": "Topic two profile",
+                        "url": "https://example.com/topic-two-profile",
+                    }
+                ],
+                "evidence_count": 4,
+                "finding_count": 2,
+            },
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _tool_call_response(
+            "write_text_file",
+            {"path": str(output_path), "content": "initial note"},
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content=(
+                "I saved the initial note locally."
+                if initial_status == "completed"
+                else "Please try again."
+            ),
+            created_at="2026-03-25T09:00:01Z",
+            finish_reason="stop",
+        ),
+        _tool_call_response("search_web", {"query": "topic two note"}),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I gathered grounded research for the follow-up.",
+            created_at="2026-03-25T09:00:02Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Write a short local note file."
+    second_prompt = "ok"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert second_reply.startswith("I gathered grounded research for the follow-up.")
+        assert "Sources:" in second_reply
+        assert "https://example.com/topic-two-profile" in second_reply
+        assert fake_provider.call_count() == 4
+        assert goal_state is not None
+        assert goal_state.goal == first_prompt
+        assert goal_state.status == initial_status
+        assert goal_state.current_step == "write_text_file"
+        if initial_status == "completed":
+            assert first_reply == "I saved the initial note locally."
+            assert goal_state.last_blocker is None
+            assert output_path.read_text(encoding="utf-8") == "initial note"
+        else:
+            assert first_reply == (
+                "The tool step failed, so I couldn't confirm the requested details "
+                "from retrieved tool evidence."
+            )
+            assert goal_state.last_blocker == f"Permission denied: {output_path}"
+            assert not output_path.exists()
+    finally:
+        session_manager.close()
+
+
 def test_later_turn_injects_compact_completed_task_continuity_note_without_extra_model_call(
     monkeypatch,
     make_temp_project,

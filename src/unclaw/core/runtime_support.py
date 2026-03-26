@@ -17,6 +17,7 @@ from unclaw.core.reply_discipline import (
 from unclaw.core.session_manager import SessionManager
 from unclaw.constants import RUNTIME_ERROR_REPLY
 from unclaw.memory.protocols import SessionMemoryContextProvider
+from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolDefinition, ToolResult
 from unclaw.tools.registry import ToolRegistry
 
@@ -154,6 +155,7 @@ def _turn_qualifies_for_session_goal_state_persistence(
     *,
     session_manager: SessionManager,
     session_id: str,
+    user_input: str,
     tool_results: Sequence[ToolResult],
     assistant_reply: str,
     turn_cancelled_reply: str,
@@ -167,6 +169,7 @@ def _turn_qualifies_for_session_goal_state_persistence(
     ) or _turn_may_update_existing_session_goal_state(
         session_manager=session_manager,
         session_id=session_id,
+        user_input=user_input,
         tool_results=tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=turn_cancelled_reply,
@@ -194,16 +197,26 @@ def _turn_may_update_existing_session_goal_state(
     *,
     session_manager: SessionManager,
     session_id: str,
+    user_input: str,
     tool_results: Sequence[ToolResult],
     assistant_reply: str,
     turn_cancelled_reply: str,
 ) -> bool:
-    if session_manager.get_session_goal_state(session_id) is None:
+    existing_goal_state = session_manager.get_session_goal_state(session_id)
+    if existing_goal_state is None:
         return False
     return _turn_has_task_like_runtime_facts(
         tool_results=tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=turn_cancelled_reply,
+    ) or (
+        existing_goal_state.status in {"blocked", "completed"}
+        and _turn_can_handoff_terminal_session_goal_state(
+            user_input=user_input,
+            tool_results=tool_results,
+            assistant_reply=assistant_reply,
+            turn_cancelled_reply=turn_cancelled_reply,
+        )
     )
 
 
@@ -226,6 +239,86 @@ def _turn_has_task_like_runtime_facts(
     return (
         latest_tool_result.success is True
         and latest_tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+    )
+
+
+def _turn_can_handoff_terminal_session_goal_state(
+    *,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    if assistant_reply.strip() == turn_cancelled_reply.strip():
+        return False
+    if _user_input_has_compact_blocked_goal_continuation_shape(user_input):
+        return False
+    if len(tool_results) != 1:
+        return False
+    return _tool_result_shows_meaningful_forward_progress(tool_results[0])
+
+
+def _tool_result_shows_meaningful_forward_progress(tool_result: ToolResult) -> bool:
+    # Only treat richer, structured research-like payloads as early handoff progress.
+    if (
+        tool_result.success is not True
+        or tool_result.tool_name == _WRITE_SUCCESS_TOOL_NAME
+    ):
+        return False
+
+    payload = tool_result.payload
+    if not isinstance(payload, dict):
+        return False
+
+    summary_points = payload.get("summary_points")
+    display_sources = payload.get("display_sources")
+    evidence_count = payload.get("evidence_count")
+    finding_count = payload.get("finding_count")
+    return (
+        isinstance(summary_points, list)
+        and len(summary_points) >= 1
+        and isinstance(display_sources, list)
+        and len(display_sources) >= 1
+        and (
+            isinstance(evidence_count, int)
+            or isinstance(finding_count, int)
+        )
+    )
+
+
+def _get_latest_session_user_input(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+) -> str:
+    for message in reversed(session_manager.list_messages(session_id)):
+        if message.role is MessageRole.USER:
+            return message.content
+    return ""
+
+
+def _turn_requires_progress_entry_after_terminal_goal_handoff(
+    *,
+    existing_goal_state: Any,
+    user_input: str,
+    tool_results: Sequence[ToolResult],
+    assistant_reply: str,
+    turn_cancelled_reply: str,
+) -> bool:
+    return (
+        existing_goal_state is not None
+        and existing_goal_state.status in {"blocked", "completed"}
+        and not _turn_has_task_like_runtime_facts(
+            tool_results=tool_results,
+            assistant_reply=assistant_reply,
+            turn_cancelled_reply=turn_cancelled_reply,
+        )
+        and _turn_can_handoff_terminal_session_goal_state(
+            user_input=user_input,
+            tool_results=tool_results,
+            assistant_reply=assistant_reply,
+            turn_cancelled_reply=turn_cancelled_reply,
+        )
     )
 
 
@@ -306,6 +399,14 @@ def _resolve_session_goal_text_for_runtime_persistence(
     if existing_goal_state.status != "blocked":
         return user_input
 
+    if _turn_can_handoff_terminal_session_goal_state(
+        user_input=user_input,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
+        return user_input
+
     if _turn_clearly_replaces_blocked_session_goal_state(
         user_input=user_input,
         tool_results=tool_results,
@@ -380,12 +481,14 @@ def _persist_session_goal_state_from_runtime_facts(
     if not _turn_qualifies_for_session_goal_state_persistence(
         session_manager=session_manager,
         session_id=session_id,
+        user_input=user_input,
         tool_results=tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=turn_cancelled_reply,
     ):
         return
 
+    existing_goal_state = session_manager.get_session_goal_state(session_id)
     latest_tool_result = tool_results[-1]
     latest_failed_non_write_tool_result = _find_latest_failed_non_write_tool_result(
         tool_results
@@ -446,6 +549,19 @@ def _persist_session_goal_state_from_runtime_facts(
         current_step=current_step,
         last_blocker=last_blocker,
     )
+    if _turn_requires_progress_entry_after_terminal_goal_handoff(
+        existing_goal_state=existing_goal_state,
+        user_input=user_input,
+        tool_results=tool_results,
+        assistant_reply=assistant_reply,
+        turn_cancelled_reply=turn_cancelled_reply,
+    ):
+        session_manager.persist_session_progress_entry(
+            session_id=session_id,
+            status="active",
+            step=latest_tool_result.tool_name,
+            detail="tool succeeded",
+        )
 
 
 def _persist_session_progress_ledger_from_runtime_facts(
@@ -456,9 +572,14 @@ def _persist_session_progress_ledger_from_runtime_facts(
     assistant_reply: str,
     turn_cancelled_reply: str,
 ) -> None:
+    user_input = _get_latest_session_user_input(
+        session_manager=session_manager,
+        session_id=session_id,
+    )
     if not _turn_qualifies_for_session_goal_state_persistence(
         session_manager=session_manager,
         session_id=session_id,
+        user_input=user_input,
         tool_results=tool_results,
         assistant_reply=assistant_reply,
         turn_cancelled_reply=turn_cancelled_reply,
