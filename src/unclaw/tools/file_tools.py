@@ -92,6 +92,7 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
             ),
         ),
     },
+    required_arguments=frozenset({"path", "content"}),
 )
 
 MOVE_FILE_DEFINITION = ToolDefinition(

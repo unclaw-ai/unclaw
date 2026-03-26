@@ -8307,24 +8307,61 @@ def test_capability_context_honest_execution_rule_present(
         session_manager.close()
 
 
-def test_agent_loop_structural_failure_detection() -> None:
-    """_all_failures_look_structural correctly identifies schema errors."""
+def test_agent_loop_structural_failure_detection_uses_failure_kind() -> None:
+    """_all_failures_look_structural uses structured failure_kind metadata,
+    not error text keywords."""
     from unclaw.core.agent_loop import _all_failures_look_structural
 
-    structural_result = ToolResult.failure(
+    # Schema error with failure_kind metadata → structural.
+    schema_result = ToolResult.failure(
         tool_name="fast_web_search",
-        error="Tool 'fast_web_search' failed: query argument must be a non-empty string.",
+        error="Required argument 'query' must not be empty.",
+        failure_kind="schema_error",
     )
-    assert _all_failures_look_structural([structural_result]) is True
+    assert _all_failures_look_structural([schema_result]) is True
 
-    non_structural_result = ToolResult.failure(
+    # Unknown tool with failure_kind metadata → structural.
+    unknown_result = ToolResult.failure(
+        tool_name="nonexistent_tool",
+        error="Unknown tool 'nonexistent_tool'.",
+        failure_kind="unknown_tool",
+    )
+    assert _all_failures_look_structural([unknown_result]) is True
+
+    # Contract error → structural.
+    contract_result = ToolResult.failure(
+        tool_name="fast_web_search",
+        error="Tool returned invalid result object.",
+        failure_kind="contract_error",
+    )
+    assert _all_failures_look_structural([contract_result]) is True
+
+    # Timeout with failure_kind → NOT structural.
+    timeout_result = ToolResult.failure(
         tool_name="search_web",
         error="Tool 'search_web' timed out after 30 seconds.",
+        failure_kind="timeout",
     )
-    assert _all_failures_look_structural([non_structural_result]) is False
+    assert _all_failures_look_structural([timeout_result]) is False
+
+    # Execution error → NOT structural.
+    exec_result = ToolResult.failure(
+        tool_name="search_web",
+        error="Tool 'search_web' failed: connection refused.",
+        failure_kind="execution_error",
+    )
+    assert _all_failures_look_structural([exec_result]) is False
+
+    # Failure WITHOUT failure_kind (e.g. from tool handler) → NOT structural,
+    # even if error text contains schema-like keywords.
+    handler_result = ToolResult.failure(
+        tool_name="fast_web_search",
+        error="query argument is required and must not be empty",
+    )
+    assert _all_failures_look_structural([handler_result]) is False
 
     # Mixed: one structural, one non-structural.
-    assert _all_failures_look_structural([structural_result, non_structural_result]) is False
+    assert _all_failures_look_structural([schema_result, timeout_result]) is False
 
 
 def test_continuation_check_note_content() -> None:
@@ -8453,3 +8490,253 @@ def test_streaming_live_flag_set_during_agent_loop(
         assert "Linux" in streamed_text
     finally:
         session_manager.close()
+
+
+def test_no_tool_chat_turn_does_not_trigger_grounded_finalization(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """A simple no-tool chat turn with an existing session goal state must NOT
+    trigger grounded finalization.  This prevents unnecessary rewrites that
+    degrade simple answers (e.g. arithmetic) and cause duplicate/refined output.
+    """
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", False)
+
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url: str = "", default_timeout_seconds: float = 60.0) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(
+            self, profile, messages, *, timeout_seconds=None,
+            thinking_enabled=False, content_callback=None, tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, tools
+            captured_messages.append(list(messages))
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(
+                    profile=profile, messages=messages,
+                )
+            reply = "2+2 is 4."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=reply,
+                created_at="2026-03-26T00:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(
+        "unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider,
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        # Persist an *active* goal state.  Active goals do NOT trigger
+        # finalization for no-tool turns — only terminal states
+        # (completed/blocked) do.
+        session_manager.persist_session_goal_state(
+            session_id=session.id,
+            goal="Write a biography",
+            status="active",
+            current_step="fast_web_search",
+        )
+
+        session_manager.add_message(
+            MessageRole.USER, "What is 2+2?", session_id=session.id,
+        )
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What is 2+2?",
+            tracer=tracer,
+        )
+
+        # Grounded finalization should NOT have been called.
+        finalizer_calls = [
+            m for m in captured_messages if _is_grounded_finalizer_call(m)
+        ]
+        assert len(finalizer_calls) == 0, (
+            "Grounded finalization was triggered for a no-tool chat turn"
+        )
+        assert "4" in reply
+    finally:
+        session_manager.close()
+
+
+def test_empty_fast_web_search_query_yields_schema_error_metadata(
+    make_temp_project,
+) -> None:
+    """Dispatching fast_web_search with an empty query must return a
+    ToolResult with failure_kind='schema_error' from the pre-validation layer."""
+    from unclaw.tools.dispatcher import ToolDispatcher
+    from unclaw.tools.web_tools import FAST_WEB_SEARCH_DEFINITION
+
+    registry = ToolRegistry()
+    registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        handler=lambda call: ToolResult.ok(
+            tool_name=call.tool_name, output_text="should not reach handler",
+        ),
+    )
+
+    dispatcher = ToolDispatcher(registry=registry)
+
+    # Empty query string.
+    result = dispatcher.dispatch(ToolCall(
+        tool_name="fast_web_search",
+        arguments={"query": ""},
+    ))
+    assert result.success is False
+    assert result.failure_kind == "schema_error"
+    assert "query" in result.error.lower()
+
+    # Missing query argument entirely.
+    result_missing = dispatcher.dispatch(ToolCall(
+        tool_name="fast_web_search",
+        arguments={},
+    ))
+    assert result_missing.success is False
+    assert result_missing.failure_kind == "schema_error"
+    assert "query" in result_missing.error.lower()
+
+
+def test_dispatcher_sets_failure_kind_on_unknown_tool() -> None:
+    """ToolDispatcher sets failure_kind='unknown_tool' for unregistered tools."""
+    from unclaw.tools.dispatcher import ToolDispatcher
+
+    registry = ToolRegistry()
+    dispatcher = ToolDispatcher(registry=registry)
+
+    result = dispatcher.dispatch(ToolCall(
+        tool_name="nonexistent_tool",
+        arguments={},
+    ))
+    assert result.success is False
+    assert result.failure_kind == "unknown_tool"
+
+
+def test_dispatcher_sets_failure_kind_on_execution_error(
+    make_temp_project,
+) -> None:
+    """ToolDispatcher sets failure_kind='execution_error' when handler raises."""
+    from unclaw.tools.dispatcher import ToolDispatcher
+
+    def failing_handler(call: ToolCall) -> ToolResult:
+        raise ValueError("disk full")
+
+    registry = ToolRegistry()
+    registry.register(
+        ToolDefinition(
+            name="test_tool",
+            description="test",
+            permission_level=ToolPermissionLevel.LOCAL_READ,
+            arguments={},
+        ),
+        handler=failing_handler,
+    )
+
+    dispatcher = ToolDispatcher(registry=registry)
+    result = dispatcher.dispatch(ToolCall(tool_name="test_tool", arguments={}))
+    assert result.success is False
+    assert result.failure_kind == "execution_error"
+
+
+def test_timed_out_tool_result_has_failure_kind() -> None:
+    """_build_timed_out_tool_result sets failure_kind='timeout'."""
+    from unclaw.core.agent_loop import _build_timed_out_tool_result
+
+    result = _build_timed_out_tool_result(
+        ToolCall(tool_name="search_web", arguments={"query": "test"}),
+        timeout_seconds=30.0,
+    )
+    assert result.success is False
+    assert result.failure_kind == "timeout"
+
+
+def test_cancelled_tool_result_has_failure_kind() -> None:
+    """_build_cancelled_tool_result sets failure_kind='cancelled'."""
+    from unclaw.core.agent_loop import _build_cancelled_tool_result
+
+    result = _build_cancelled_tool_result(
+        ToolCall(tool_name="search_web", arguments={"query": "test"}),
+    )
+    assert result.success is False
+    assert result.failure_kind == "cancelled"
+
+
+def test_grounded_facts_include_evidence_quality() -> None:
+    """_build_grounded_reply_facts includes evidence_quality with thin-evidence
+    metadata for the grounded finalizer."""
+    from unclaw.core.reply_discipline import _build_grounded_reply_facts
+
+    thin_search_result = ToolResult.ok(
+        tool_name="fast_web_search",
+        output_text="Some result",
+        payload={
+            "result_count": 1,
+            "supported_point_count": 0,
+            "match_quality": "no_results",
+        },
+    )
+    write_result = ToolResult.ok(
+        tool_name="write_text_file",
+        output_text="File saved.",
+    )
+
+    facts = _build_grounded_reply_facts(
+        user_input="Research X and write a bio",
+        assistant_draft_reply="Here is the bio...",
+        tool_results=[thin_search_result, write_result],
+    )
+
+    evidence = facts["evidence_quality"]
+    assert evidence["has_thin_search_evidence"] is True
+    assert "fast_web_search" in evidence["thin_evidence_tool_names"]
+    assert evidence["write_after_thin_search"] is True
+
+
+def test_grounded_facts_evidence_quality_not_thin_when_evidence_rich() -> None:
+    """evidence_quality reports no thin evidence when search results are rich."""
+    from unclaw.core.reply_discipline import _build_grounded_reply_facts
+
+    rich_search_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Detailed results",
+        payload={
+            "evidence_count": 10,
+            "finding_count": 5,
+            "display_sources": [{"title": "A", "url": "a"}, {"title": "B", "url": "b"}],
+        },
+    )
+
+    facts = _build_grounded_reply_facts(
+        user_input="Research X",
+        assistant_draft_reply="Here are details...",
+        tool_results=[rich_search_result],
+    )
+
+    evidence = facts["evidence_quality"]
+    assert evidence["has_thin_search_evidence"] is False
+    assert evidence["write_after_thin_search"] is False

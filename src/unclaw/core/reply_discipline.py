@@ -75,6 +75,34 @@ def _normalize_session_progress_ledger(
     )
 
 
+def _tool_result_has_thin_search_evidence(tool_result: ToolResult) -> bool:
+    """Return True when a search tool result has thin or partial evidence."""
+    if tool_result.success is not True:
+        return True
+    payload = _tool_result_payload_dict(tool_result)
+    if tool_result.tool_name == "fast_web_search":
+        match_quality = payload.get("match_quality")
+        if isinstance(match_quality, str) and match_quality in {"mismatch", "no_results"}:
+            return True
+        result_count = payload.get("result_count")
+        if isinstance(result_count, int) and result_count <= 1:
+            return True
+        supported_point_count = payload.get("supported_point_count")
+        if isinstance(supported_point_count, int) and supported_point_count <= 1:
+            return True
+    if tool_result.tool_name == "search_web":
+        evidence_count = payload.get("evidence_count")
+        finding_count = payload.get("finding_count")
+        display_sources = payload.get("display_sources")
+        if isinstance(finding_count, int) and finding_count <= 1:
+            return True
+        if isinstance(evidence_count, int) and evidence_count <= 1:
+            return True
+        if isinstance(display_sources, list) and len(display_sources) <= 1:
+            return True
+    return False
+
+
 def _build_grounded_reply_facts(
     *,
     user_input: str,
@@ -99,6 +127,15 @@ def _build_grounded_reply_facts(
     )
     latest_tool_result = tool_results[-1] if tool_results else None
 
+    thin_evidence_tool_names = tuple(
+        tr.tool_name
+        for tr in tool_results
+        if tr.tool_name in _SEARCH_TOOL_NAMES
+        and _tool_result_has_thin_search_evidence(tr)
+    )
+    has_thin_search = bool(thin_evidence_tool_names)
+    write_succeeded = _WRITE_SUCCESS_TOOL_NAME in successful_tool_names
+
     return {
         "user_input": user_input,
         "assistant_draft_reply": assistant_draft_reply,
@@ -111,7 +148,7 @@ def _build_grounded_reply_facts(
             "successful_tool_names": successful_tool_names,
             "failed_tool_names": failed_tool_names,
             "all_tools_failed": bool(tool_results) and len(failed_tool_names) == len(tool_results),
-            "write_text_file_succeeded": _WRITE_SUCCESS_TOOL_NAME in successful_tool_names,
+            "write_text_file_succeeded": write_succeeded,
             "grounded_search_succeeded": any(
                 tool_name in _SEARCH_TOOL_NAMES for tool_name in successful_tool_names
             ),
@@ -121,6 +158,11 @@ def _build_grounded_reply_facts(
             "latest_tool_success": (
                 latest_tool_result.success if latest_tool_result is not None else None
             ),
+        },
+        "evidence_quality": {
+            "has_thin_search_evidence": has_thin_search,
+            "thin_evidence_tool_names": thin_evidence_tool_names,
+            "write_after_thin_search": write_succeeded and has_thin_search,
         },
         "persisted_goal_state_before_turn": _normalize_session_goal_state(
             session_goal_state

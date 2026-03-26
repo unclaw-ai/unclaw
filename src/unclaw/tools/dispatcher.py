@@ -172,10 +172,11 @@ class ToolDispatcher:
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Unknown tool '{call.tool_name}'.",
+                failure_kind="unknown_tool",
             )
 
         # -----------------------------
-        # Type coercion layer
+        # Type coercion + alias repair layer
         # -----------------------------
         try:
             call = normalize_tool_call_for_execution(
@@ -187,7 +188,32 @@ class ToolDispatcher:
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Failed to process tool arguments: {exc}",
+                failure_kind="schema_error",
             )
+
+        # -----------------------------
+        # Required-argument validation (after alias repair)
+        # -----------------------------
+        required_args = registered_tool.definition.required_arguments
+        if required_args:
+            missing = required_args - set(call.arguments)
+            if missing:
+                return ToolResult.failure(
+                    tool_name=call.tool_name,
+                    error=(
+                        f"Missing required argument(s): "
+                        f"{', '.join(sorted(missing))}"
+                    ),
+                    failure_kind="schema_error",
+                )
+            for req_arg in required_args:
+                value = call.arguments.get(req_arg)
+                if isinstance(value, str) and not value.strip():
+                    return ToolResult.failure(
+                        tool_name=call.tool_name,
+                        error=f"Required argument '{req_arg}' must not be empty.",
+                        failure_kind="schema_error",
+                    )
 
         # -----------------------------
         # Tool execution
@@ -199,18 +225,21 @@ class ToolDispatcher:
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Tool '{call.tool_name}' failed: {exc}",
+                failure_kind="execution_error",
             )
 
         except Exception as exc:  # Defensive boundary for unexpected tool crashes.
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Tool '{call.tool_name}' failed unexpectedly: {exc}",
+                failure_kind="execution_error",
             )
 
         if not isinstance(result, ToolResult):
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Tool '{call.tool_name}' returned an invalid result object.",
+                failure_kind="contract_error",
             )
 
         if result.tool_name != call.tool_name:
@@ -220,6 +249,7 @@ class ToolDispatcher:
                     f"Tool '{call.tool_name}' returned a mismatched result "
                     f"for '{result.tool_name}'."
                 ),
+                failure_kind="contract_error",
             )
 
         return result

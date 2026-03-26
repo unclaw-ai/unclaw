@@ -86,11 +86,10 @@ class _TerminalAssistantStream:
 
     def finish(self, final_text: str) -> None:
         # Suppressed path: stream was buffered; render only the final answer.
+        # The user never saw the buffered draft, so no refinement marker is
+        # needed — just show the clean final answer once.
         if self._suppressed:
             print(f"Unclaw> {final_text}")
-            streamed_text = "".join(self.chunks)
-            if streamed_text.strip() != final_text.strip():
-                print("[answer refined]")
             return
 
         if not self.started:
@@ -114,7 +113,10 @@ class _TerminalAssistantStream:
             sys.stdout.flush()
             return
 
-        # Final answer differs from streamed draft — show refined version.
+        # Final answer differs from streamed draft — show the corrected
+        # version.  This path is now rare: post-tool streaming is suppressed
+        # when grounded finalization will run, so divergence only occurs on
+        # genuine late corrections.
         if not streamed_text.endswith("\n"):
             sys.stdout.write("\n")
         sys.stdout.flush()

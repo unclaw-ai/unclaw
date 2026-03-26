@@ -46,6 +46,7 @@ class ToolDefinition:
     description: str
     permission_level: ToolPermissionLevel
     arguments: Mapping[str, ToolArgumentDefinition]
+    required_arguments: frozenset[str] = frozenset()
 
 
 _TOOL_ARGUMENT_TYPE_ALIASES: dict[str, ToolArgumentType] = {
@@ -109,6 +110,7 @@ class ToolResult:
     output_text: str
     payload: dict[str, Any] | None = None
     error: str | None = None
+    failure_kind: str | None = None
 
     @classmethod
     def ok(
@@ -134,6 +136,7 @@ class ToolResult:
         error: str,
         output_text: str | None = None,
         payload: Mapping[str, Any] | None = None,
+        failure_kind: str | None = None,
     ) -> ToolResult:
         resolved_output = output_text if output_text is not None else error
         return cls(
@@ -142,6 +145,7 @@ class ToolResult:
             output_text=resolved_output,
             payload=dict(payload) if payload is not None else None,
             error=error,
+            failure_kind=failure_kind,
         )
 
 

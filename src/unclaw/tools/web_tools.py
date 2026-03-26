@@ -112,6 +112,7 @@ SEARCH_WEB_DEFINITION = ToolDefinition(
             value_type="number",
         ),
     },
+    required_arguments=frozenset({"query"}),
 )
 
 FAST_WEB_SEARCH_DEFINITION = ToolDefinition(
@@ -127,6 +128,7 @@ FAST_WEB_SEARCH_DEFINITION = ToolDefinition(
             description="Entity or topic to quickly ground (e.g. a person name).",
         ),
     },
+    required_arguments=frozenset({"query"}),
 )
 
 _FAST_SEARCH_MAX_RESULTS = 3

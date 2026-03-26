@@ -126,7 +126,7 @@ def test_terminal_assistant_stream_suppressed_shows_only_final_answer_not_draft(
     """P5-3B: suppressed-stream path shows only the final answer, never the draft.
 
     When suppress_live_output() is called before any writes, chunks are buffered
-    silently. finish() renders the final answer once with the refinement signal.
+    silently. finish() renders the final answer once cleanly.
     The draft text must never appear in the output.
     """
     stream = _TerminalAssistantStream()
@@ -139,7 +139,9 @@ def test_terminal_assistant_stream_suppressed_shows_only_final_answer_not_draft(
     assert "Draft" not in out
     assert "probably 42" not in out
     assert "Unclaw> The answer is 37, confirmed by sources." in out
-    assert "[answer refined]" in out
+    # Suppressed path no longer shows [answer refined] — user never saw the
+    # draft, so the marker was just noise.
+    assert "[answer refined]" not in out
     assert out.count("Unclaw>") == 1
 
 
@@ -156,6 +158,38 @@ def test_terminal_assistant_stream_suppressed_no_signal_when_text_unchanged(
     out = capsys.readouterr().out
     assert "[answer refined]" not in out
     assert "Unclaw> Same answer." in out
+    assert out.count("Unclaw>") == 1
+
+
+def test_terminal_finish_no_refined_marker_in_normal_successful_turn(
+    capsys,
+) -> None:
+    """Regression: normal successful turn where streamed text matches final
+    must never show [answer refined]."""
+    stream = _TerminalAssistantStream()
+
+    stream.write("2+2 is 4.")
+    stream.finish("2+2 is 4.")
+
+    out = capsys.readouterr().out
+    assert "[answer refined]" not in out
+    assert "Unclaw> 2+2 is 4." in out
+    assert out.count("Unclaw>") == 1
+
+
+def test_terminal_finish_clean_output_when_stream_not_started(
+    capsys,
+) -> None:
+    """When no streaming occurred (stream_output_func emits only the final),
+    finish() produces exactly one clean answer body."""
+    stream = _TerminalAssistantStream()
+
+    # No write() calls — only finish().
+    stream.finish("The final answer.")
+
+    out = capsys.readouterr().out
+    assert out.strip() == "Unclaw> The final answer."
+    assert "[answer refined]" not in out
     assert out.count("Unclaw>") == 1
 
 

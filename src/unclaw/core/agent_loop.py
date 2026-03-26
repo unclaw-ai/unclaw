@@ -35,6 +35,11 @@ _SEARCH_WEB_TIMEOUT_RETRY_MAX_RESULTS = 3
 # Test hook: set to False to suppress the continuation check in tests
 # that do not script for the extra model call.
 _continuation_check_enabled = True
+_FINALIZATION_TRIGGERING_TOOL_NAMES = frozenset({
+    "write_text_file",
+    "fast_web_search",
+    "search_web",
+})
 
 
 @dataclass(slots=True)
@@ -107,6 +112,22 @@ def _run_agent_loop(
     tools_ran_in_turn = False
     continuation_used = False
 
+    def _effective_callback() -> LLMContentCallback | None:
+        """Suppress live streaming when grounded finalization will run.
+
+        When collected tool results include tools that trigger grounded
+        finalization (search, write), the model draft will be rewritten.
+        Suppressing the stream here prevents the user from seeing a draft
+        that will be replaced, eliminating duplicate/refined output in
+        the terminal.
+        """
+        if collected_tool_results and any(
+            tr.tool_name in _FINALIZATION_TRIGGERING_TOOL_NAMES
+            for tr in collected_tool_results
+        ):
+            return None
+        return content_callback
+
     for _step in range(max_steps):
         tool_calls = current_response.response.tool_calls
         if not tool_calls:
@@ -140,7 +161,7 @@ def _run_agent_loop(
                     messages=context_messages,
                     model_profile_name=model_profile_name,
                     thinking_enabled=thinking_enabled,
-                    content_callback=content_callback,
+                    content_callback=_effective_callback(),
                     tools=tool_definitions,
                 )
                 tracer.trace_model_succeeded(
@@ -219,7 +240,7 @@ def _run_agent_loop(
                 messages=context_messages,
                 model_profile_name=model_profile_name,
                 thinking_enabled=thinking_enabled,
-                content_callback=content_callback,
+                content_callback=_effective_callback(),
                 tools=tool_definitions,
             )
             tracer.trace_model_succeeded(
@@ -263,7 +284,7 @@ def _run_agent_loop(
             messages=context_messages,
             model_profile_name=model_profile_name,
             thinking_enabled=thinking_enabled,
-            content_callback=content_callback,
+            content_callback=_effective_callback(),
             tools=tool_definitions,
         )
         tracer.trace_model_succeeded(
@@ -305,29 +326,26 @@ def _build_continuation_check_note(
     )
 
 
-_STRUCTURAL_FAILURE_KEYWORDS = (
-    "missing",
-    "required",
-    "empty",
-    "argument",
-    "parameter",
-    "schema",
-    "invalid",
-    "expected",
-    "must be",
-    "cannot be",
-    "not provided",
-    "Unknown tool",
-)
+_STRUCTURAL_FAILURE_KINDS = frozenset({
+    "schema_error",
+    "unknown_tool",
+    "contract_error",
+})
 
 
 def _all_failures_look_structural(tool_results: Sequence[ToolResult]) -> bool:
-    """Return True when every failed result looks like a schema/contract error."""
+    """Return True when every failed result has structured failure metadata
+    indicating a schema, contract, or unknown-tool error.
+
+    Only failures with an explicit ``failure_kind`` in the structural set
+    qualify.  Failures without metadata (e.g. tool-handler runtime errors)
+    are treated as non-structural so that the model does not waste a repair
+    attempt on them.
+    """
     for tool_result in tool_results:
         if tool_result.success is not False:
             continue
-        error_text = (tool_result.error or "") + " " + (tool_result.output_text or "")
-        if not any(kw in error_text for kw in _STRUCTURAL_FAILURE_KEYWORDS):
+        if tool_result.failure_kind not in _STRUCTURAL_FAILURE_KINDS:
             return False
     return True
 
@@ -517,6 +535,7 @@ def _run_pending_tool_execution(
             error=(
                 f"Tool '{pending_call.tool_call.tool_name}' failed unexpectedly: {exc}"
             ),
+            failure_kind="execution_error",
         )
     finally:
         pending_call.done_event.set()
@@ -653,14 +672,16 @@ def _build_timed_out_tool_result(
             f"{timeout_seconds:g} seconds."
         ),
         payload={"execution_state": "timed_out"},
+        failure_kind="timeout",
     )
 
 
 def _tool_result_timed_out(tool_result: ToolResult) -> bool:
-    haystack = " ".join(
-        part for part in (tool_result.error, tool_result.output_text) if part
-    )
-    return "timed out" in haystack.casefold()
+    if tool_result.failure_kind == "timeout":
+        return True
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    execution_state = payload.get("execution_state")
+    return isinstance(execution_state, str) and execution_state == "timed_out"
 
 
 def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
@@ -668,6 +689,7 @@ def _build_cancelled_tool_result(tool_call: ToolCall) -> ToolResult:
         tool_name=tool_call.tool_name,
         error=f"Tool '{tool_call.tool_name}' was cancelled.",
         payload={"execution_state": "cancelled"},
+        failure_kind="cancelled",
     )
 
 

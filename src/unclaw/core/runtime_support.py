@@ -53,6 +53,8 @@ _GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
         "- Keep the reply in the user's language when it is inferable from the request.",
         "- Do not end with promises about actions that did not happen in this turn.",
         "- Preserve supported details from the draft when they remain grounded.",
+        "- If the evidence_quality section indicates thin or partial search evidence, do NOT expand limited search results into detailed claims, biographies, or timelines. Only state what the evidence directly supports.",
+        "- When a file was written based on thin search evidence (write_after_thin_search is true), the reply must acknowledge that the file content is based on limited evidence. Do not present thin-evidence content as comprehensive or complete.",
         "Return JSON only with this shape: {\"final_reply\": \"...\"}",
     )
 )
@@ -213,14 +215,23 @@ def _turn_requires_grounded_reply_finalization(
     session_progress_ledger: Sequence[Any],
     tool_registry: ToolRegistry | None,
 ) -> bool:
+    del session_progress_ledger, tool_registry
     if tool_results:
         return any(
             tool_result.tool_name in {"write_text_file", "fast_web_search", "search_web"}
             for tool_result in tool_results
         )
-    if session_goal_state is not None or bool(session_progress_ledger):
-        return True
-    del tool_registry
+    # No tools ran.  Skip finalization for most no-tool turns — the model
+    # already has the task continuity context note.  Only finalize when a
+    # terminal goal state (completed/blocked) exists, because local models
+    # may hallucinate about prior work without tool-backed evidence in the
+    # current turn.  Active goal state (the normal in-progress case) does
+    # not trigger finalization so that simple follow-up questions like
+    # arithmetic or time queries stay cheap and unmodified.
+    if session_goal_state is not None:
+        status = getattr(session_goal_state, "status", None)
+        if status in ("completed", "blocked"):
+            return True
     return False
 
 
@@ -1117,6 +1128,19 @@ def _build_post_tool_grounding_note(
             "If the directory listing surfaced a relevant supported text file and "
             "the user needs its contents, call read_text_file next instead of "
             "stopping at the listing."
+        )
+    has_thin_search = any(
+        _fast_web_search_result_is_thin(tr) or _search_web_result_is_thin(tr)
+        for tr in tool_results
+    )
+    if "write_text_file" in available_tool_names and has_thin_search:
+        lines.append(
+            "IMPORTANT: search evidence for this turn is thin or partial. "
+            "If the next step is writing a file, the file content MUST stay bounded "
+            "to the facts that the search evidence actually supports. Do not expand "
+            "thin evidence into detailed biographies, timelines, or unsupported claims. "
+            "If evidence is partial, the written file must note which details could "
+            "not be confirmed."
         )
 
     return "\n".join(lines)
