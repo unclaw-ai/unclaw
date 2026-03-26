@@ -205,7 +205,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         session_manager.close()
 
 
-def test_run_user_turn_fast_grounding_preserves_substantive_reply_without_extra_model_call(
+def test_run_user_turn_fast_grounding_clamps_substantive_reply_without_extra_model_call(
     monkeypatch,
     make_temp_project,
 ) -> None:
@@ -326,9 +326,230 @@ def test_run_user_turn_fast_grounding_preserves_substantive_reply_without_extra_
 
         assert reply == (
             "Marine Leleu is a French endurance athlete. "
-            "She also has a much broader public biography."
+            "I couldn't confirm a fuller biography from that quick grounding probe alone."
         )
         assert call_count == 2
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_new_request_without_write_result_cannot_claim_file_created(
+    monkeypatch,
+    make_temp_project,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I created the biography file.",
+            created_at="2026-03-26T09:00:00Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prior_goal = "Write a short local note file."
+    new_prompt = "Create a biography file for topic two."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.persist_session_goal_state(
+            session_id=session.id,
+            goal=prior_goal,
+            status="completed",
+            current_step="write_text_file",
+        )
+        session_manager.persist_session_progress_entry(
+            session_id=session.id,
+            status="active",
+            step="write_text_file",
+            detail="file write succeeded",
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            new_prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=new_prompt,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert reply == "I haven't created or saved the requested file yet."
+        assert fake_provider.call_count() == 1
+        assert goal_state is not None
+        assert goal_state.goal == prior_goal
+        assert goal_state.status == "completed"
+        assert goal_state.current_step == "write_text_file"
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_narrative_only_progress_does_not_create_phantom_task_status(
+    monkeypatch,
+    make_temp_project,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="I will now create the file.",
+            created_at="2026-03-26T09:10:00Z",
+            finish_reason="stop",
+        ),
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The task is still in progress.",
+            created_at="2026-03-26T09:10:01Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    first_prompt = "Create the biography file."
+    second_prompt = "Where does this task stand?"
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            first_prompt,
+            session_id=session.id,
+        )
+        first_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=first_prompt,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        session_manager.add_message(
+            MessageRole.USER,
+            second_prompt,
+            session_id=session.id,
+        )
+        second_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=second_prompt,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+        )
+
+        assert first_reply == "I haven't created or saved that file yet."
+        assert second_reply == "There is no persisted task progress for this session."
+        assert fake_provider.call_count() == 2
+        assert session_manager.get_session_goal_state(session.id) is None
+        assert session_manager.get_session_progress_ledger(session.id) == ()
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_failed_write_cannot_reply_as_completed(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="none")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    output_path = project_root / "data" / "files" / "blocked-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error=f"Permission denied: {call.arguments['path']}",
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The task is completed and the file is saved.",
+            created_at="2026-03-26T09:20:00Z",
+            finish_reason="stop",
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    prompt = "Write a short local note file."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            prompt,
+            session_id=session.id,
+        )
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            explicit_tool_call=ToolCall(
+                tool_name="write_text_file",
+                arguments={"path": str(output_path), "content": "blocked"},
+            ),
+        )
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert reply == (
+            "The tool step failed, so I couldn't confirm the requested details "
+            "from retrieved tool evidence."
+        )
+        assert fake_provider.call_count() == 1
+        assert goal_state is not None
+        assert goal_state.status == "blocked"
+        assert goal_state.current_step == "write_text_file"
+        assert goal_state.last_blocker == f"Permission denied: {output_path}"
+        assert not output_path.exists()
     finally:
         session_manager.close()
 

@@ -7,6 +7,7 @@ from unclaw.core.reply_discipline import (
     _build_all_failed_tool_reply,
     _build_fast_grounding_guarded_reply,
 )
+from unclaw.core.session_manager import SessionGoalState
 from unclaw.tools.contracts import ToolResult
 
 pytestmark = pytest.mark.unit
@@ -106,7 +107,7 @@ def test_reply_discipline_uses_language_neutral_timeout_fallback_when_all_tools_
     )
 
 
-def test_reply_discipline_preserves_substantive_reply_for_thin_fast_web_results() -> None:
+def test_reply_discipline_clamps_substantive_reply_for_thin_fast_web_results() -> None:
     reply = (
         "Marine Leleu is a French endurance athlete, author, speaker, and "
         "podcast host with a much broader biography."
@@ -117,7 +118,11 @@ def test_reply_discipline_preserves_substantive_reply_for_thin_fast_web_results(
         tool_results=[_fast_web_result()],
     )
 
-    assert result == reply
+    assert (
+        result
+        == "Marine Leleu is a French endurance athlete. "
+        "I couldn't confirm a fuller biography from that quick grounding probe alone."
+    )
 
 
 @pytest.mark.parametrize(
@@ -147,7 +152,7 @@ def test_fast_grounding_guarded_reply_is_language_neutral_across_user_inputs(
     )
 
 
-def test_reply_discipline_preserves_substantive_reply_for_fast_web_entity_mismatches() -> None:
+def test_reply_discipline_clamps_substantive_reply_for_fast_web_entity_mismatches() -> None:
     reply = "Marine Leleu is a politician with a long public career."
     result = _apply_post_tool_reply_discipline(
         reply=reply,
@@ -160,7 +165,11 @@ def test_reply_discipline_preserves_substantive_reply_for_fast_web_entity_mismat
         ],
     )
 
-    assert result == reply
+    assert (
+        result
+        == "The quick web grounding appeared to match a different entity, so I "
+        "couldn't confirm the requested details from that result alone."
+    )
 
 
 def test_reply_discipline_preserves_normal_grounded_replies() -> None:
@@ -185,3 +194,64 @@ def test_reply_discipline_preserves_existing_limitation_acknowledgement() -> Non
     )
 
     assert result == reply
+
+
+def test_reply_discipline_blocks_file_write_claim_without_successful_write() -> None:
+    result = _apply_post_tool_reply_discipline(
+        reply="I saved the note locally.",
+        user_input="Write the biography file.",
+        tool_results=[],
+    )
+
+    assert result == "I haven't created or saved the requested file yet."
+
+
+def test_reply_discipline_blocks_research_completion_claim_without_grounded_search() -> None:
+    result = _apply_post_tool_reply_discipline(
+        reply="I completed the research and the biography is complete.",
+        user_input="Research this person in detail.",
+        tool_results=[],
+    )
+
+    assert result == "I haven't run grounded search for that yet."
+
+
+def test_reply_discipline_rewrites_unexecuted_verify_promise() -> None:
+    result = _apply_post_tool_reply_discipline(
+        reply="I will now verify the file.",
+        user_input="Check the file.",
+        tool_results=[],
+    )
+
+    assert result == "I haven't verified that file yet."
+
+
+def test_reply_discipline_grounds_status_reply_when_no_persisted_task_exists() -> None:
+    result = _apply_post_tool_reply_discipline(
+        reply="The task is still in progress.",
+        user_input="Where does this task stand?",
+        tool_results=[],
+    )
+
+    assert result == "There is no persisted task progress for this session."
+
+
+def test_reply_discipline_grounds_status_reply_when_persisted_task_conflicts() -> None:
+    result = _apply_post_tool_reply_discipline(
+        reply="The task is completed.",
+        user_input="Where does this task stand?",
+        tool_results=[],
+        session_goal_state=SessionGoalState(
+            goal="Write a short local note file.",
+            status="blocked",
+            current_step="write_text_file",
+            last_blocker="Permission denied: /tmp/note.txt",
+            updated_at="2026-03-26T10:00:00Z",
+        ),
+    )
+
+    assert (
+        result
+        == "The persisted task is blocked on write_text_file: "
+        "Permission denied: /tmp/note.txt"
+    )

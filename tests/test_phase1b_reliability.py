@@ -31,7 +31,7 @@ def _build_native_runtime(project_root, set_profile_tool_mode):
     return settings, session_manager, tracer, command_handler
 
 
-def test_post_fast_web_search_preserves_substantive_reply(
+def test_post_fast_web_search_clamps_substantive_reply(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -127,8 +127,8 @@ def test_post_fast_web_search_preserves_substantive_reply(
         )
 
         assert reply == (
-            "Marine Leleu is a French endurance athlete, author, and podcast host. "
-            "She is also known for major speaking tours."
+            "Marine Leleu is a French endurance athlete. "
+            "I couldn't confirm a fuller biography from that quick grounding probe alone."
         )
         assert call_count == 2
     finally:
@@ -269,7 +269,7 @@ def test_corrected_ambiguity_is_no_longer_recentered_by_runtime_heuristics(
         session_manager.close()
 
 
-def test_multi_entity_mismatch_preserves_substantive_model_reply(
+def test_multi_entity_mismatch_clamps_substantive_model_reply(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -367,7 +367,10 @@ def test_multi_entity_mismatch_preserves_substantive_model_reply(
             tool_registry=tool_registry,
         )
 
-        assert reply == "Marty McFly is a fictional character, and Carlito is a wrestler."
+        assert reply == (
+            "The quick web grounding appeared to match a different entity, so I "
+            "couldn't confirm the requested details from that result alone."
+        )
         assert call_count == 2
     finally:
         session_manager.close()

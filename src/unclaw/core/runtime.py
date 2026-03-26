@@ -114,6 +114,8 @@ def run_user_turn(
     assistant_reply: str | None = None
     turn_tool_results: list[ToolResult] = []
     turn_start_message_count = len(session_manager.list_messages(session.id))
+    pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
+    pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
 
     # Track whether the streaming callback was ever invoked by the provider.
     # If a final reply exists but nothing was streamed, we emit it once as a
@@ -406,6 +408,8 @@ def run_user_turn(
         user_input=user_input,
         tool_results=turn_tool_results,
         turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
+        session_goal_state=pre_turn_goal_state,
+        session_progress_ledger=pre_turn_progress_ledger,
     )
 
     # Fallback: if a callback was registered but the provider never invoked it

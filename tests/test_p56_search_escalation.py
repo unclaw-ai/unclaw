@@ -217,7 +217,7 @@ def test_post_tool_note_no_timeout_guidance_when_no_timeout() -> None:
     assert "timed out" not in note.lower()
 
 
-def test_discipline_preserves_substantive_thin_fast_web_result_reply() -> None:
+def test_discipline_clamps_substantive_thin_fast_web_result_reply() -> None:
     thin_result = _thin_fast_web_result("McFly et Carlito")
     rich_reply = (
         "McFly et Carlito sont un duo de YouTubeurs francais fonde en 2010. "
@@ -229,7 +229,10 @@ def test_discipline_preserves_substantive_thin_fast_web_result_reply() -> None:
         user_input="fais une bio complete de McFly et Carlito",
         tool_results=[thin_result],
     )
-    assert result == rich_reply
+    assert result == (
+        "McFly et Carlito: resultat rapide I couldn't confirm a fuller "
+        "biography from that quick grounding probe alone."
+    )
 
 
 def test_discipline_does_not_clamp_acknowledged_limitation_reply() -> None:

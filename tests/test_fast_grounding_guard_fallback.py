@@ -35,7 +35,7 @@ def _mismatch_fast_web_result() -> ToolResult:
     )
 
 
-def test_substantive_reply_is_preserved_for_thin_fast_grounding() -> None:
+def test_substantive_reply_is_clamped_for_thin_fast_grounding() -> None:
     reply = (
         "Marine Leleu is a French endurance athlete, author, speaker, and "
         "podcast host with a much broader biography."
@@ -47,10 +47,14 @@ def test_substantive_reply_is_preserved_for_thin_fast_grounding() -> None:
         tool_results=[_thin_fast_web_result()],
     )
 
-    assert result == reply
+    assert (
+        result
+        == "Marine Leleu is a French endurance athlete. "
+        "I couldn't confirm a fuller biography from that quick grounding probe alone."
+    )
 
 
-def test_substantive_reply_is_preserved_for_mismatch_fast_grounding() -> None:
+def test_substantive_reply_is_clamped_for_mismatch_fast_grounding() -> None:
     reply = "Marine Leleu is a politician with a long public career."
 
     result = _apply_post_tool_reply_discipline(
@@ -59,7 +63,11 @@ def test_substantive_reply_is_preserved_for_mismatch_fast_grounding() -> None:
         tool_results=[_mismatch_fast_web_result()],
     )
 
-    assert result == reply
+    assert (
+        result
+        == "The quick web grounding appeared to match a different entity, so I "
+        "couldn't confirm the requested details from that result alone."
+    )
 
 
 @pytest.mark.parametrize(
