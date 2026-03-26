@@ -11,7 +11,10 @@ from typing import Any
 
 from unclaw.core.context_builder import build_untrusted_tool_message_content
 from unclaw.core.orchestrator import Orchestrator, OrchestratorTurnResult
-from unclaw.core.reply_discipline import _tool_result_has_thin_search_evidence
+from unclaw.core.reply_discipline import (
+    _build_grounded_reply_facts,
+    _tool_result_has_thin_search_evidence,
+)
 from unclaw.core.session_manager import SessionManager
 from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_TOOL_RESULT_POLL_INTERVAL_SECONDS
 from unclaw.llm.base import LLMContentCallback, LLMMessage, LLMResponse, LLMRole
@@ -124,7 +127,7 @@ def _run_agent_loop(
     context_messages: list[LLMMessage] = list(first_response.context_messages)
     current_response = first_response
     tools_ran_in_turn = False
-    continuation_used = False
+    last_continuation_checked_tool_count = 0
     state_conflict_recovery_used = False
     pre_write_grounding_used = False
 
@@ -150,24 +153,33 @@ def _run_agent_loop(
             draft_reply = current_response.response.content.strip() or EMPTY_RESPONSE_REPLY
             turn_tool_results = tuple(collected_tool_results or ())
 
-            # Model-native continuation: when tools ran in this turn and the
-            # model returned text, ask it once whether the original user
-            # request is fully satisfied or if it should emit another tool
-            # call.  This is bounded to one continuation pass to avoid loops.
+            # Model-native continuation checkpoint: after a tool-backed phase
+            # returns text, ask the model to validate whether the original
+            # request is fully satisfied or whether another tool step is still
+            # required. The checkpoint runs at most once for each distinct
+            # amount of accumulated tool progress, so the loop stays bounded.
             if (
                 _continuation_check_enabled
                 and tools_ran_in_turn
-                and not continuation_used
                 and not tool_guard_state.is_cancelled()
                 and _step + 1 < max_steps
                 and user_input
-                and _should_run_continuation_check(tool_results=turn_tool_results)
+                and len(turn_tool_results) > last_continuation_checked_tool_count
+                and _should_run_continuation_check(
+                    user_input=user_input,
+                    draft_reply=draft_reply,
+                    tool_results=turn_tool_results,
+                    tool_definitions=tool_definitions,
+                    session_goal_state=session_goal_state,
+                    session_progress_ledger=session_progress_ledger,
+                )
             ):
-                continuation_used = True
+                last_continuation_checked_tool_count = len(turn_tool_results)
                 continuation_note = _build_continuation_check_note(
                     user_input=user_input,
                     draft_reply=draft_reply,
                     tool_results=turn_tool_results,
+                    tool_definitions=tool_definitions,
                     session_goal_state=session_goal_state,
                     session_progress_ledger=session_progress_ledger,
                 )
@@ -409,6 +421,7 @@ def _build_continuation_check_note(
     user_input: str,
     draft_reply: str,
     tool_results: Sequence[ToolResult] = (),
+    tool_definitions: Sequence[ToolDefinition] = (),
     session_goal_state: Any = None,
     session_progress_ledger: Sequence[Any] = (),
 ) -> str:
@@ -425,8 +438,11 @@ def _build_continuation_check_note(
             [
                 "Structured runtime facts (JSON):",
                 _serialize_note_payload(
-                    _build_continuation_check_facts(
+                    _build_continuation_check_runtime_facts(
+                        user_input=user_input,
+                        draft_reply=draft_reply,
                         tool_results=tool_results,
+                        tool_definitions=tool_definitions,
                         session_goal_state=session_goal_state,
                         session_progress_ledger=session_progress_ledger,
                     )
@@ -439,6 +455,7 @@ def _build_continuation_check_note(
             "If YES: produce the full final answer text now, including any short non-tool deliverable still requested by the user.",
             "If NO and an available tool call would make meaningful progress: "
             "emit that tool call instead of answering.",
+            "If completion_risks.phase_checkpoint_required is true, treat this as a real phase checkpoint instead of trusting the current draft.",
             "If a blocking failure remains or any action_performed flag is false, do not claim success.",
             "Do not repeat tool calls that already ran this turn unless the structured facts above clearly support a safe retry.",
         )
@@ -453,70 +470,23 @@ def _serialize_note_payload(payload: dict[str, Any]) -> str:
     return json.dumps(normalized_payload, ensure_ascii=False, indent=2, sort_keys=True)
 
 
-def _build_continuation_check_facts(
+def _build_continuation_check_runtime_facts(
     *,
+    user_input: str,
+    draft_reply: str,
     tool_results: Sequence[ToolResult],
+    tool_definitions: Sequence[ToolDefinition],
     session_goal_state: Any,
     session_progress_ledger: Sequence[Any],
 ) -> dict[str, Any]:
-    latest_tool_result = tool_results[-1] if tool_results else None
-    return {
-        "tool_summary": {
-            "tool_count": len(tool_results),
-            "successful_tool_names": [
-                tool_result.tool_name
-                for tool_result in tool_results
-                if tool_result.success is True
-            ],
-            "failed_tool_names": [
-                tool_result.tool_name
-                for tool_result in tool_results
-                if tool_result.success is False
-            ],
-            "latest_tool_name": (
-                latest_tool_result.tool_name if latest_tool_result is not None else None
-            ),
-            "latest_tool_success": (
-                latest_tool_result.success if latest_tool_result is not None else None
-            ),
-            "latest_tool_failure_kind": (
-                latest_tool_result.failure_kind
-                if latest_tool_result is not None
-                else None
-            ),
-        },
-        "evidence_quality": {
-            "thin_search_tool_names": [
-                tool_result.tool_name
-                for tool_result in tool_results
-                if _tool_result_has_thin_or_ambiguous_search_evidence(tool_result)
-            ],
-            "write_after_weak_search": _turn_has_write_after_weak_search(tool_results),
-        },
-        "blocked_actions": [
-            _build_state_conflict_fact(tool_result)
-            for tool_result in tool_results
-            if _tool_result_payload_flag(tool_result, "action_performed") is False
-        ],
-        "persisted_goal_state_before_turn": (
-            {
-                "goal": getattr(session_goal_state, "goal", None),
-                "status": getattr(session_goal_state, "status", None),
-                "current_step": getattr(session_goal_state, "current_step", None),
-                "last_blocker": getattr(session_goal_state, "last_blocker", None),
-            }
-            if session_goal_state is not None
-            else None
-        ),
-        "persisted_progress_ledger_before_turn": [
-            {
-                "status": getattr(entry, "status", None),
-                "step": getattr(entry, "step", None),
-                "detail": getattr(entry, "detail", None),
-            }
-            for entry in session_progress_ledger
-        ],
-    }
+    return _build_grounded_reply_facts(
+        user_input=user_input,
+        assistant_draft_reply=draft_reply,
+        tool_results=tool_results,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=tool_definitions,
+    )
 
 
 def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
@@ -545,30 +515,29 @@ def _tool_result_has_thin_or_ambiguous_search_evidence(tool_result: ToolResult) 
     return _tool_result_has_thin_search_evidence(tool_result)
 
 
-def _turn_has_write_after_weak_search(tool_results: Sequence[ToolResult]) -> bool:
-    if not tool_results:
-        return False
-    latest_tool_result = tool_results[-1]
-    if latest_tool_result.success is not True or latest_tool_result.tool_name != "write_text_file":
-        return False
-    return any(
-        _tool_result_has_thin_or_ambiguous_search_evidence(tool_result)
-        for tool_result in tool_results[:-1]
-    )
-
-
 def _should_run_continuation_check(
     *,
+    user_input: str,
+    draft_reply: str,
     tool_results: Sequence[ToolResult],
+    tool_definitions: Sequence[ToolDefinition],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
 ) -> bool:
     if not tool_results:
         return False
-    if any(tool_result.success is False for tool_result in tool_results):
-        return True
-    if _turn_has_write_after_weak_search(tool_results):
-        return True
-    latest_tool_result = tool_results[-1]
-    return _tool_result_has_thin_or_ambiguous_search_evidence(latest_tool_result)
+    continuation_facts = _build_continuation_check_runtime_facts(
+        user_input=user_input,
+        draft_reply=draft_reply,
+        tool_results=tool_results,
+        tool_definitions=tool_definitions,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+    )
+    completion_risks = continuation_facts.get("completion_risks")
+    if not isinstance(completion_risks, dict):
+        return False
+    return completion_risks.get("phase_checkpoint_required") is True
 
 
 def _should_run_pre_write_grounding_check(

@@ -154,6 +154,44 @@ def test_build_grounded_reply_facts_includes_no_tool_execution_claim_risks() -> 
     assert facts["completion_risks"]["deliverable_check_required"] is True
 
 
+def test_build_grounded_reply_facts_marks_phase_checkpoint_for_preparatory_search_turn() -> None:
+    facts = _build_grounded_reply_facts(
+        user_input="Research Marine Leleu, save a note, then tell me what you saved.",
+        assistant_draft_reply="I found the information.",
+        tool_results=[
+            ToolResult.ok(
+                tool_name="search_web",
+                output_text="Grounded search result",
+                payload={
+                    "query": "Marine Leleu biography",
+                    "summary_points": ["Marine Leleu is a French endurance athlete."],
+                    "display_sources": [
+                        {"title": "Profile", "url": "https://example.com/profile"},
+                        {"title": "Interview", "url": "https://example.com/interview"},
+                    ],
+                    "evidence_count": 4,
+                    "finding_count": 2,
+                },
+            ),
+        ],
+        available_tool_definitions=(
+            SEARCH_WEB_DEFINITION,
+            WRITE_TEXT_FILE_DEFINITION,
+        ),
+    )
+
+    assert facts["tool_permission_summary"] == {
+        "observed_permission_levels": ("network",),
+        "side_effect_tool_names_ran": (),
+        "side_effect_tool_succeeded": False,
+        "network_tool_names_ran": ("search_web",),
+        "local_path_observation_tool_names": (),
+        "preparatory_tool_turn": True,
+    }
+    assert facts["completion_risks"]["phase_checkpoint_required"] is True
+    assert facts["completion_risks"]["deliverable_check_required"] is True
+
+
 def test_structural_finalization_fallback_uses_persisted_task_state_summary() -> None:
     result = _build_structural_finalization_fallback(
         reply="The task is completed.",

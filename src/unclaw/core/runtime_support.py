@@ -252,16 +252,33 @@ def _parse_grounded_reply_finalization_response(response_text: str) -> str | Non
 
 def _turn_requires_grounded_reply_finalization(
     *,
+    user_input: str,
+    assistant_draft_reply: str,
     tool_results: Sequence[ToolResult],
     session_goal_state: Any,
     session_progress_ledger: Sequence[Any],
+    available_tool_definitions: Sequence[ToolDefinition],
     no_tool_execution_claim_risk_assessment: _NoToolExecutionClaimRiskAssessment | None,
 ) -> bool:
-    del session_progress_ledger
+    grounded_facts = _build_grounded_reply_facts(
+        user_input=user_input,
+        assistant_draft_reply=assistant_draft_reply,
+        tool_results=tool_results,
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=available_tool_definitions,
+        no_tool_execution_claim_risks=(
+            no_tool_execution_claim_risk_assessment.as_payload()
+            if no_tool_execution_claim_risk_assessment is not None
+            else None
+        ),
+    )
     if tool_results:
-        if any(
-            tool_result.tool_name in {"write_text_file", "fast_web_search", "search_web"}
-            for tool_result in tool_results
+        current_turn_tool_summary = grounded_facts["current_turn_tool_summary"]
+        completion_risks = grounded_facts["completion_risks"]
+        if (
+            completion_risks["deliverable_check_required"]
+            or current_turn_tool_summary["grounded_search_succeeded"]
         ):
             return True
         return any(_tool_result_requires_honesty_finalization(tool_result) for tool_result in tool_results)
@@ -269,17 +286,14 @@ def _turn_requires_grounded_reply_finalization(
     # arithmetic/chat stays cheap. We still finalize when persisted task
     # state is terminal or when the bounded no-tool honesty rescue returned
     # structured risk flags that the draft implied unsupported completion.
-    if session_goal_state is not None:
-        status = getattr(session_goal_state, "status", None)
-        if status in ("completed", "blocked"):
-            return True
-    if no_tool_execution_claim_risk_assessment is None:
-        return False
+    execution_claim_risks = grounded_facts["execution_claim_risks"]
+    completion_risks = grounded_facts["completion_risks"]
     return any(
         (
-            no_tool_execution_claim_risk_assessment.unsupported_execution_claim_risk,
-            no_tool_execution_claim_risk_assessment.completion_without_execution_risk,
-            no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk,
+            execution_claim_risks["unsupported_execution_claim_risk"],
+            execution_claim_risks["completion_without_execution_risk"],
+            execution_claim_risks["multi_deliverable_request_risk"],
+            completion_risks["deliverable_check_required"],
         )
     )
 
@@ -333,9 +347,12 @@ def _finalize_grounded_reply(
         )
 
     finalization_required = _turn_requires_grounded_reply_finalization(
+        user_input=user_input,
+        assistant_draft_reply=stripped_draft_reply,
         tool_results=tool_results,
         session_goal_state=session_goal_state,
         session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=available_tool_definitions,
         no_tool_execution_claim_risk_assessment=(
             no_tool_execution_claim_risk_assessment
         ),

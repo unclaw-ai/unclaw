@@ -36,6 +36,7 @@ from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 from unclaw.tools.file_tools import (
+    DELETE_FILE_DEFINITION,
     LIST_DIRECTORY_DEFINITION,
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
@@ -8174,6 +8175,179 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
         session_manager.close()
 
 
+def test_agent_loop_continuation_check_requires_write_before_final_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", True)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    output_path = settings.paths.files_dir / "marine.txt"
+    file_contents = "Marine Leleu is a French endurance athlete."
+    captured_messages: list[list[LLMMessage]] = []
+    write_calls: list[ToolCall] = []
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+            captured_messages.append(list(messages))
+
+            if _is_grounded_finalizer_call(messages):
+                return _build_grounded_finalizer_response(
+                    profile=profile,
+                    messages=messages,
+                )
+
+            call_count += 1
+            if call_count == 1:
+                return _build_tool_call_response(
+                    "search_web",
+                    {"query": "Marine Leleu biography"},
+                )
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="I found enough information.",
+                    created_at="2026-03-26T00:00:01Z",
+                    finish_reason="stop",
+                )
+            if call_count == 3:
+                checkpoint_note = next(
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.SYSTEM
+                    and message.content.startswith("Task completion check:")
+                )
+                assert '"phase_checkpoint_required": true' in checkpoint_note
+                return _build_tool_call_response(
+                    "write_text_file",
+                    {"path": str(output_path), "content": file_contents},
+                )
+            if call_count == 4:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="I saved the note.",
+                    created_at="2026-03-26T00:00:02Z",
+                    finish_reason="stop",
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="I saved the note and wrote: Marine Leleu is a French endurance athlete.",
+                created_at="2026-03-26T00:00:03Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Grounded search result",
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": [file_contents],
+                "display_sources": [
+                    {
+                        "title": "Profile",
+                        "url": "https://example.com/profile",
+                    },
+                    {
+                        "title": "Interview",
+                        "url": "https://example.com/interview",
+                    },
+                ],
+                "evidence_count": 4,
+                "finding_count": 2,
+            },
+        ),
+    )
+
+    def _write_tool(call: ToolCall) -> ToolResult:
+        write_calls.append(call)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(str(call.arguments["content"]), encoding="utf-8")
+        return ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Wrote text file: {output_path}",
+            payload={
+                "requested_path": str(output_path),
+                "resolved_path": str(output_path),
+                "created_new_file": True,
+                "created_versioned_file": False,
+                "overwrite_applied": False,
+                "file_already_exists": False,
+                "collision_policy_applied": "version",
+                "action_performed": True,
+            },
+        )
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _write_tool)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Research Marine Leleu, save a note to marine.txt, then tell me what you saved."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply.startswith(
+            "I saved the note and wrote: Marine Leleu is a French endurance athlete."
+        )
+        assert "Sources:" in reply
+        assert call_count == 5
+        assert write_calls == [
+            ToolCall(
+                tool_name="write_text_file",
+                arguments={"path": str(output_path), "content": file_contents},
+            )
+        ]
+        assert output_path.read_text(encoding="utf-8") == file_contents
+        continuation_call_count = sum(
+            1
+            for messages in _non_finalizer_calls(captured_messages)
+            if any(
+                message.role is LLMRole.SYSTEM
+                and message.content.startswith("Task completion check:")
+                for message in messages
+            )
+        )
+        assert continuation_call_count >= 2
+    finally:
+        session_manager.close()
+
+
 def test_agent_loop_skips_continuation_check_for_simple_successful_system_info_turn(
     monkeypatch,
     make_temp_project,
@@ -9200,7 +9374,7 @@ def test_grounded_facts_evidence_quality_not_thin_when_evidence_rich() -> None:
     assert evidence["write_after_thin_search"] is False
 
 
-def test_agent_loop_retries_write_collision_with_version_policy(
+def test_agent_loop_defaults_write_collision_to_version_policy(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
@@ -9231,31 +9405,11 @@ def test_agent_loop_retries_write_collision_with_version_policy(
         default_write_dir=settings.paths.files_dir,
     )
 
-    def _recovery_step(profile, messages, **kwargs):  # type: ignore[no-untyped-def]
-        del profile, kwargs
-        recovery_note = next(
-            message.content
-            for message in messages
-            if message.role is LLMRole.SYSTEM
-            and message.content.startswith("State conflict recovery:")
-        )
-        assert "suggested version path" in recovery_note.lower()
-        assert str(target) in recovery_note
-        return _build_tool_call_response(
-            "write_text_file",
-            {
-                "path": str(target),
-                "content": "updated",
-                "collision_policy": "version",
-            },
-        )
-
     fake_provider = build_scripted_ollama_provider(
         _build_tool_call_response(
             "write_text_file",
             {"path": str(target), "content": "updated"},
         ),
-        _recovery_step,
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
@@ -9378,6 +9532,156 @@ def test_delete_confirmation_required_failure_is_reported_honestly(
 
         assert reply == "The file was not deleted because confirmation was required."
         assert target.exists()
+    finally:
+        session_manager.close()
+
+
+def test_find_then_delete_turn_cannot_stop_before_delete_tool_result(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", True)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    target = settings.paths.files_dir / "keep.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("keep me", encoding="utf-8")
+    call_count = 0
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, *, base_url="http://127.0.0.1:11434", default_timeout_seconds=60.0):
+            del base_url, default_timeout_seconds
+
+        def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal call_count
+
+            if _is_grounded_finalizer_call(messages):
+                payload = json.loads(messages[-1].content)
+                tool_results = payload["current_turn_tool_results"]
+                assert len(tool_results) == 2
+                assert tool_results[1]["tool_name"] == "delete_file"
+                assert tool_results[1]["failure_kind"] == "confirmation_required"
+                assert tool_results[1]["action_performed"] is False
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "final_reply": (
+                                "The file was not deleted because confirmation was required."
+                            )
+                        }
+                    ),
+                    created_at="2026-03-26T00:00:04Z",
+                    finish_reason="stop",
+                )
+
+            call_count += 1
+            if call_count == 1:
+                return _build_tool_call_response(
+                    "list_directory",
+                    {"path": str(target.parent)},
+                )
+            if call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="I found keep.txt. I will delete it now.",
+                    created_at="2026-03-26T00:00:01Z",
+                    finish_reason="stop",
+                )
+            if call_count == 3:
+                checkpoint_note = next(
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.SYSTEM
+                    and message.content.startswith("Task completion check:")
+                )
+                assert '"phase_checkpoint_required": true' in checkpoint_note
+                return _build_tool_call_response(
+                    "delete_file",
+                    {"path": str(target)},
+                )
+            recovery_note = next(
+                message.content
+                for message in messages
+                if message.role is LLMRole.SYSTEM
+                and message.content.startswith("State conflict recovery:")
+            )
+            assert "action was not performed" in recovery_note.lower()
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The file was deleted.",
+                created_at="2026-03-26T00:00:03Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        LIST_DIRECTORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Directory: {target.parent}\n- keep.txt",
+            payload={
+                "path": str(target.parent),
+                "max_depth": 1,
+                "displayed_entries": 1,
+                "truncated": False,
+            },
+        ),
+    )
+    tool_registry.register(
+        DELETE_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error="Deletion was not performed. Pass confirm=true to delete the file.",
+            payload={
+                "requested_path": str(target),
+                "resolved_path": str(target),
+                "confirmed": False,
+                "confirm_required": True,
+                "action_performed": False,
+            },
+            failure_kind="confirmation_required",
+        ),
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Find keep.txt and delete it."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "The file was not deleted because confirmation was required."
+        assert target.exists()
+        assert call_count == 5
     finally:
         session_manager.close()
 

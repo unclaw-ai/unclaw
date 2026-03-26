@@ -113,14 +113,12 @@ class _TerminalAssistantStream:
             sys.stdout.flush()
             return
 
-        # Final answer differs from streamed draft — show the corrected
-        # version.  This path is now rare: post-tool streaming is suppressed
-        # when grounded finalization will run, so divergence only occurs on
-        # genuine late corrections.
+        # Fallback: render the final answer without any refinement marker.
+        # The CLI now suppresses assistant streaming by default, so this
+        # branch should be rare and primarily serves direct unit usage.
         if not streamed_text.endswith("\n"):
             sys.stdout.write("\n")
         sys.stdout.flush()
-        print("[answer refined]")
         print(final_text)
 
 
@@ -241,6 +239,7 @@ def run_cli(
             if result.tool_call is not None:
                 if is_search_tool_call(result.tool_call):
                     assistant_stream = _TerminalAssistantStream()
+                    assistant_stream.suppress_live_output()
                     assistant_reply = run_search_command(
                         session_manager=session_manager,
                         command_handler=command_handler,
@@ -305,6 +304,7 @@ def run_cli(
             session_id=session.id,
         )
         assistant_stream = _TerminalAssistantStream()
+        assistant_stream.suppress_live_output()
         assistant_reply = run_user_turn(
             session_manager=session_manager,
             command_handler=command_handler,

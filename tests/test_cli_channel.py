@@ -15,7 +15,11 @@ from unclaw.llm.base import LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.settings import load_settings
-from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
+from unclaw.tools.file_tools import (
+    DELETE_FILE_DEFINITION,
+    LIST_DIRECTORY_DEFINITION,
+    WRITE_TEXT_FILE_DEFINITION,
+)
 from unclaw.tools.contracts import (
     ToolCall,
     ToolDefinition,
@@ -86,26 +90,21 @@ def test_terminal_assistant_stream_renders_final_reply_when_nothing_streamed(cap
     assert capsys.readouterr().out == "Unclaw> Saved reply\n"
 
 
-def test_terminal_assistant_stream_shows_refinement_signal_when_grounding_rewrites_answer(
+def test_terminal_assistant_stream_renders_final_answer_without_refinement_marker(
     capsys,
 ) -> None:
-    """Divergence case: streamed draft differs from grounded final answer.
-
-    This is the P4-4 path: the grounding transform replaced the streamed text
-    with a different final answer. The signal must appear and the final answer
-    must be printed. Plain chat never reaches this branch because streamed text
-    equals the final text when no grounding transform is active.
-    """
+    """Divergence case: never print a refinement marker in terminal output."""
     stream = _TerminalAssistantStream()
 
     stream.write("The answer is probably 42.")
     stream.finish("The answer is 37, confirmed by three sources.")
 
     out = capsys.readouterr().out
-    assert "[answer refined]" in out
+    assert "[answer refined]" not in out
     assert "The answer is 37, confirmed by three sources." in out
-    # "Unclaw>" appears only once — from the streaming prefix, not from the refined answer.
+    # "Unclaw>" appears only once — from the original streaming prefix.
     assert out.count("Unclaw>") == 1
+    assert "The answer is probably 42." in out
 
 
 def test_terminal_assistant_stream_no_refinement_signal_for_plain_chat(capsys) -> None:
@@ -1145,4 +1144,228 @@ def test_cli_native_search_can_continue_into_native_write_tool_loop(
     assert "Unclaw> I saved a short briefing to marine-leleu.txt." in output
     assert "Sources:\n- Marine Leleu: https://example.com/marine-leleu" in output
     assert "- Athlete Profile: https://example.com/athletes/marine-leleu" in output
+    assert "[answer refined]" not in output
+
+
+def test_cli_buffers_provisional_find_then_delete_draft_until_final_reply(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    capsys,
+) -> None:
+    import unclaw.core.agent_loop as _agent_loop
+
+    monkeypatch.setattr(_agent_loop, "_continuation_check_enabled", True)
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+    target = settings.paths.files_dir / "keep.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("keep me", encoding="utf-8")
+    responder_call_count = 0
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        LIST_DIRECTORY_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text=f"Directory: {target.parent}\n- keep.txt",
+            payload={
+                "path": str(target.parent),
+                "max_depth": 1,
+                "displayed_entries": 1,
+                "truncated": False,
+            },
+        ),
+    )
+    tool_registry.register(
+        DELETE_FILE_DEFINITION,
+        lambda call: ToolResult.failure(
+            tool_name=call.tool_name,
+            error="Deletion was not performed. Pass confirm=true to delete the file.",
+            payload={
+                "requested_path": str(target),
+                "resolved_path": str(target),
+                "confirmed": False,
+                "confirm_required": True,
+                "action_performed": False,
+            },
+            failure_kind="confirmation_required",
+        ),
+    )
+
+    class FakeOrchestratorProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal responder_call_count
+
+            if messages and messages[0].role is LLMRole.SYSTEM and messages[
+                0
+            ].content.startswith("Grounded reply finalizer for one runtime turn."):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "final_reply": (
+                                "The file was not deleted because confirmation was required."
+                            )
+                        }
+                    ),
+                    created_at="2026-03-20T10:00:04Z",
+                    finish_reason="stop",
+                )
+
+            responder_call_count += 1
+            if responder_call_count == 1:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:01Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="list_directory",
+                            arguments={"path": str(target.parent)},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "list_directory",
+                                        "arguments": {"path": str(target.parent)},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+            if responder_call_count == 2:
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="I found keep.txt. I will delete it now.",
+                    created_at="2026-03-20T10:00:02Z",
+                    finish_reason="stop",
+                )
+            if responder_call_count == 3:
+                checkpoint_note = next(
+                    message.content
+                    for message in messages
+                    if message.role is LLMRole.SYSTEM
+                    and message.content.startswith("Task completion check:")
+                )
+                assert '"phase_checkpoint_required": true' in checkpoint_note
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-20T10:00:03Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="delete_file",
+                            arguments={"path": str(target)},
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "delete_file",
+                                        "arguments": {"path": str(target)},
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="The file was deleted.",
+                created_at="2026-03-20T10:00:04Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr(
+        "unclaw.core.orchestrator.OllamaProvider",
+        FakeOrchestratorProvider,
+    )
+    monkeypatch.setattr(
+        "unclaw.core.runtime.create_default_tool_registry",
+        lambda settings_arg, session_manager=None: tool_registry,
+    )
+
+    scripted_inputs = iter(["Find keep.txt and delete it."])
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=tool_registry,
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert responder_call_count == 5
+    assert "I found keep.txt. I will delete it now." not in output
+    assert "The file was deleted." not in output
+    assert "Unclaw> The file was not deleted because confirmation was required." in output
+    assert '[tool] delete_file {"path": "' in output
     assert "[answer refined]" not in output

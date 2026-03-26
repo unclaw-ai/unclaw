@@ -68,6 +68,40 @@ def _tool_names_with_permission_level(
     )
 
 
+def _ordered_unique_strings(values: Sequence[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return tuple(ordered)
+
+
+def _tool_definition_by_name(
+    tool_definitions: Sequence[ToolDefinition],
+) -> dict[str, ToolDefinition]:
+    return {
+        tool_definition.name: tool_definition for tool_definition in tool_definitions
+    }
+
+
+def _tool_result_has_local_path_observation(tool_result: ToolResult) -> bool:
+    payload = _tool_result_payload_dict(tool_result)
+    for key in (
+        "path",
+        "resolved_path",
+        "requested_path",
+        "source_path",
+        "destination_path",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
 def _normalize_no_tool_execution_claim_risks(
     no_tool_execution_claim_risks: Mapping[str, Any] | None,
 ) -> dict[str, bool]:
@@ -180,6 +214,7 @@ def _build_grounded_reply_facts(
     available_tool_definitions: Sequence[ToolDefinition] = (),
     no_tool_execution_claim_risks: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    tool_definitions_by_name = _tool_definition_by_name(available_tool_definitions)
     normalized_tool_results = tuple(
         _normalize_tool_result(tool_result) for tool_result in tool_results
     )
@@ -235,6 +270,71 @@ def _build_grounded_reply_facts(
                 ToolPermissionLevel.NETWORK,
             }
         ),
+    )
+    observed_permission_levels = _ordered_unique_strings(
+        [
+            tool_definitions_by_name[tool_result.tool_name].permission_level.value
+            for tool_result in tool_results
+            if tool_result.tool_name in tool_definitions_by_name
+        ]
+    )
+    side_effect_tool_names_ran = _ordered_unique_strings(
+        [
+            tool_result.tool_name
+            for tool_result in tool_results
+            if tool_result.tool_name in tool_definitions_by_name
+            and tool_definitions_by_name[tool_result.tool_name].permission_level
+            in {
+                ToolPermissionLevel.LOCAL_WRITE,
+                ToolPermissionLevel.LOCAL_EXECUTE,
+            }
+        ]
+    )
+    network_tool_names_ran = _ordered_unique_strings(
+        [
+            tool_result.tool_name
+            for tool_result in tool_results
+            if tool_result.tool_name in tool_definitions_by_name
+            and tool_definitions_by_name[tool_result.tool_name].permission_level
+            is ToolPermissionLevel.NETWORK
+        ]
+    )
+    local_path_observation_tool_names = _ordered_unique_strings(
+        [
+            tool_result.tool_name
+            for tool_result in tool_results
+            if _tool_result_has_local_path_observation(tool_result)
+        ]
+    )
+    local_path_action_tool_names_ran = _ordered_unique_strings(
+        [
+            tool_result.tool_name
+            for tool_result in tool_results
+            if tool_result.tool_name in tool_definitions_by_name
+            and tool_definitions_by_name[tool_result.tool_name].permission_level
+            in {
+                ToolPermissionLevel.LOCAL_WRITE,
+                ToolPermissionLevel.LOCAL_EXECUTE,
+            }
+            and _tool_result_has_local_path_observation(tool_result)
+        ]
+    )
+    side_effect_tool_succeeded = any(
+        tool_result.success is True
+        and tool_result.tool_name in side_effect_tool_names_ran
+        for tool_result in tool_results
+    )
+    preparatory_tool_turn = (
+        bool(network_tool_names_ran) or bool(local_path_observation_tool_names)
+    ) and bool(side_effect_tool_names) and not side_effect_tool_succeeded
+    phase_checkpoint_required = any(
+        (
+            bool(state_conflict_tool_names),
+            bool(action_not_performed_tool_names),
+            bool(local_path_action_tool_names_ran),
+            has_thin_search,
+            preparatory_tool_turn,
+        )
     )
     normalized_no_tool_execution_claim_risks = (
         _normalize_no_tool_execution_claim_risks(no_tool_execution_claim_risks)
@@ -314,15 +414,25 @@ def _build_grounded_reply_facts(
             "thin_evidence_tool_names": thin_evidence_tool_names,
             "write_after_thin_search": write_succeeded and has_thin_search,
         },
+        "tool_permission_summary": {
+            "observed_permission_levels": observed_permission_levels,
+            "side_effect_tool_names_ran": side_effect_tool_names_ran,
+            "side_effect_tool_succeeded": side_effect_tool_succeeded,
+            "network_tool_names_ran": network_tool_names_ran,
+            "local_path_observation_tool_names": (
+                local_path_observation_tool_names
+            ),
+            "preparatory_tool_turn": preparatory_tool_turn,
+        },
         "execution_claim_risks": execution_claim_risks,
         "completion_risks": {
             "has_blocking_failures": bool(failed_tool_names),
             "state_conflict_tool_names": state_conflict_tool_names,
             "action_not_performed_tool_names": action_not_performed_tool_names,
             "multi_step_tool_turn": len(tool_results) > 1,
+            "phase_checkpoint_required": phase_checkpoint_required,
             "deliverable_check_required": (
-                bool(failed_tool_names)
-                or len(tool_results) > 1
+                phase_checkpoint_required
                 or write_succeeded
                 or delete_succeeded
                 or execution_claim_check_required

@@ -1859,16 +1859,17 @@ def test_active_task_resume_turn_keeps_original_goal_text_and_can_complete(
         assert goal_state.last_blocker is None
         assert output_path.read_text(encoding="utf-8") == "session note"
 
-        second_turn_system_messages = [
-            message.content
-            for message in captured_messages[3]
-            if getattr(message, "role", None) is LLMRole.SYSTEM
-        ]
-        continuity_notes = [
-            message
-            for message in second_turn_system_messages
-            if message.startswith("Session task continuity:")
-        ]
+        continuity_notes = sorted(
+            {
+                message.content
+                for messages in captured_messages
+                for message in messages
+                if getattr(message, "role", None) is LLMRole.SYSTEM
+                and isinstance(getattr(message, "content", None), str)
+                and message.content.startswith("Session task continuity:")
+                and 'current_step="read_text_file"' in message.content
+            }
+        )
         assert len(continuity_notes) == 1
         assert (
             'goal="Inspect the machine, read the local source note, then write a short local note file."'

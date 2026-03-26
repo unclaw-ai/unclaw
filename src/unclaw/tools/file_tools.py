@@ -73,8 +73,9 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
         "Write plain UTF-8 text content to a local file. "
         "Relative paths are created inside the data/files/ directory by default. "
         "Use collision_policy to control behavior when the target file already exists: "
-        "'fail' (default) — refuse and return a suggested_version_path in the payload; "
-        "'version' — write to a new timestamped sibling path (e.g. note_20260322_185430.txt); "
+        "'version' (default) — write to a new timestamped sibling path "
+        "(e.g. note_20260322_185430.txt); "
+        "'fail' — refuse and return a suggested_version_path in the payload; "
         "'overwrite' — replace the existing file (requires dev mode). "
         "On refusal, the payload always contains suggested_version_path: use that path "
         "(collision_policy='version') instead of inventing an unrelated filename. "
@@ -87,9 +88,9 @@ WRITE_TEXT_FILE_DEFINITION = ToolDefinition(
         "collision_policy": ToolArgumentSpec(
             description=(
                 "How to handle a collision when the target file already exists. "
-                "Allowed values: 'fail' (default) — refuse if file exists; "
-                "'version' — write to a new timestamped sibling path "
+                "Allowed values: 'version' (default) — write to a new timestamped sibling path "
                 "(same directory, same basename, same extension, timestamp appended); "
+                "'fail' — refuse if file exists; "
                 "'overwrite' — replace the existing file (dev mode only). "
                 "After a 'fail' or blocked 'overwrite' refusal, if the user wants a "
                 "safe alternative, retry with collision_policy='version' and the same "
@@ -482,7 +483,8 @@ def write_text_file(
             error="Argument 'content' must be a string.",
         )
 
-    collision_policy_raw = call.arguments.get("collision_policy", "fail")
+    collision_policy_explicitly_requested = "collision_policy" in call.arguments
+    collision_policy_raw = call.arguments.get("collision_policy", "version")
     if not isinstance(collision_policy_raw, str):
         return ToolResult.failure(
             tool_name=tool_name,
@@ -499,6 +501,9 @@ def write_text_file(
             payload={
                 "requested_path": path_value.strip(),
                 "collision_policy": collision_policy_raw,
+                "collision_policy_explicitly_requested": (
+                    collision_policy_explicitly_requested
+                ),
                 "action_performed": False,
             },
             failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
@@ -550,6 +555,9 @@ def write_text_file(
                     "created_versioned_file": False,
                     "overwrite_applied": False,
                     "file_already_exists": True,
+                    "collision_policy_explicitly_requested": (
+                        collision_policy_explicitly_requested
+                    ),
                     "collision_policy_applied": collision_policy,
                     "suggested_collision_policy": "version",
                     "suggested_version_path": str(_generate_versioned_path(requested_path)),
@@ -576,6 +584,9 @@ def write_text_file(
                         "created_versioned_file": False,
                         "overwrite_applied": False,
                         "file_already_exists": True,
+                        "collision_policy_explicitly_requested": (
+                            collision_policy_explicitly_requested
+                        ),
                         "collision_policy_applied": collision_policy,
                         "suggested_collision_policy": "version",
                         "suggested_version_path": str(_generate_versioned_path(requested_path)),
@@ -598,6 +609,9 @@ def write_text_file(
             payload={
                 "requested_path": str(requested_path),
                 "resolved_path": str(resolved_path),
+                "collision_policy_explicitly_requested": (
+                    collision_policy_explicitly_requested
+                ),
                 "action_performed": False,
             },
             failure_kind=_UNSUPPORTED_INPUT_FAILURE_KIND,
@@ -616,6 +630,9 @@ def write_text_file(
             payload={
                 "requested_path": str(requested_path),
                 "resolved_path": str(resolved_path),
+                "collision_policy_explicitly_requested": (
+                    collision_policy_explicitly_requested
+                ),
                 "action_performed": False,
             },
         )
@@ -639,6 +656,9 @@ def write_text_file(
             "created_versioned_file": created_versioned_file,
             "overwrite_applied": overwrite_applied,
             "file_already_exists": file_already_exists,
+            "collision_policy_explicitly_requested": (
+                collision_policy_explicitly_requested
+            ),
             "collision_policy_applied": collision_policy,
             "size_chars": len(content),
         },
@@ -654,6 +674,10 @@ def _generate_versioned_path(path: Path) -> Path:
     stem = path.stem
     suffix = path.suffix  # e.g. ".txt" or ""
     versioned = path.with_name(f"{stem}_{timestamp}{suffix}")
+    attempt = 1
+    while versioned.exists():
+        versioned = path.with_name(f"{stem}_{timestamp}_{attempt:02d}{suffix}")
+        attempt += 1
     return versioned
 
 
