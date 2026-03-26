@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +64,8 @@ _GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
         "- If requested deliverables are still unsupported or blocked, say that plainly instead of pretending they are complete.",
         "- Use the original user request plus `completion_risks` to make sure every requested deliverable is addressed once. If tool-backed work succeeded but the draft only covers part of the request, add the remaining short textual deliverable in the final reply.",
         "- If blocking failures remain, say exactly what completed and what remains blocked. Do not flatten blocked turns into full success.",
+        "- If `execution_claim_risks.no_tools_ran_this_turn` is true, do not preserve unsupported claims that side effects, research, or task completion happened in this turn.",
+        "- If `execution_claim_risks.unsupported_execution_claim_risk` or `execution_claim_risks.completion_without_execution_risk` is true, explicitly say what did not happen yet and whether another tool step is still needed.",
         "- Keep the reply in the user's language when it is inferable from the request.",
         "- Do not end with promises about actions that did not happen in this turn.",
         "- Preserve supported details from the draft when they remain grounded.",
@@ -71,6 +74,28 @@ _GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
         "Return JSON only with this shape: {\"final_reply\": \"...\"}",
     )
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _NoToolExecutionClaimRiskAssessment:
+    assistant_reply: str
+    unsupported_execution_claim_risk: bool = False
+    completion_without_execution_risk: bool = False
+    multi_deliverable_request_risk: bool = False
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "unsupported_execution_claim_risk": (
+                self.unsupported_execution_claim_risk
+            ),
+            "completion_without_execution_risk": (
+                self.completion_without_execution_risk
+            ),
+            "multi_deliverable_request_risk": (
+                self.multi_deliverable_request_risk
+            ),
+            "no_tool_honesty_rescue_used": True,
+        }
 
 
 def _tool_result_payload_dict(tool_result: ToolResult) -> dict[str, Any]:
@@ -178,6 +203,8 @@ def _build_grounded_reply_finalization_messages(
     tool_results: Sequence[ToolResult],
     session_goal_state: Any,
     session_progress_ledger: Sequence[Any],
+    available_tool_definitions: Sequence[ToolDefinition],
+    no_tool_execution_claim_risks: dict[str, Any] | None,
     turn_cancelled_reply: str,
 ) -> tuple[LLMMessage, ...]:
     facts = _build_grounded_reply_facts(
@@ -187,6 +214,8 @@ def _build_grounded_reply_finalization_messages(
         turn_cancelled_reply=turn_cancelled_reply,
         session_goal_state=session_goal_state,
         session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=available_tool_definitions,
+        no_tool_execution_claim_risks=no_tool_execution_claim_risks,
     )
     return (
         LLMMessage(
@@ -226,9 +255,9 @@ def _turn_requires_grounded_reply_finalization(
     tool_results: Sequence[ToolResult],
     session_goal_state: Any,
     session_progress_ledger: Sequence[Any],
-    tool_registry: ToolRegistry | None,
+    no_tool_execution_claim_risk_assessment: _NoToolExecutionClaimRiskAssessment | None,
 ) -> bool:
-    del session_progress_ledger, tool_registry
+    del session_progress_ledger
     if tool_results:
         if any(
             tool_result.tool_name in {"write_text_file", "fast_web_search", "search_web"}
@@ -236,18 +265,23 @@ def _turn_requires_grounded_reply_finalization(
         ):
             return True
         return any(_tool_result_requires_honesty_finalization(tool_result) for tool_result in tool_results)
-    # No tools ran.  Skip finalization for most no-tool turns — the model
-    # already has the task continuity context note.  Only finalize when a
-    # terminal goal state (completed/blocked) exists, because local models
-    # may hallucinate about prior work without tool-backed evidence in the
-    # current turn.  Active goal state (the normal in-progress case) does
-    # not trigger finalization so that simple follow-up questions like
-    # arithmetic or time queries stay cheap and unmodified.
+    # No tools ran. Skip finalization for most no-tool turns so simple
+    # arithmetic/chat stays cheap. We still finalize when persisted task
+    # state is terminal or when the bounded no-tool honesty rescue returned
+    # structured risk flags that the draft implied unsupported completion.
     if session_goal_state is not None:
         status = getattr(session_goal_state, "status", None)
         if status in ("completed", "blocked"):
             return True
-    return False
+    if no_tool_execution_claim_risk_assessment is None:
+        return False
+    return any(
+        (
+            no_tool_execution_claim_risk_assessment.unsupported_execution_claim_risk,
+            no_tool_execution_claim_risk_assessment.completion_without_execution_risk,
+            no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk,
+        )
+    )
 
 
 def _tool_result_requires_honesty_finalization(tool_result: ToolResult) -> bool:
@@ -271,15 +305,40 @@ def _finalize_grounded_reply(
     tool_results: Sequence[ToolResult],
     session_goal_state: Any,
     session_progress_ledger: Sequence[Any],
+    available_tool_definitions: Sequence[ToolDefinition],
+    no_tool_execution_claim_risk_assessment: _NoToolExecutionClaimRiskAssessment | None,
     turn_cancelled_reply: str,
-    tool_registry: ToolRegistry | None,
 ) -> tuple[str, bool]:
     stripped_draft_reply = assistant_draft_reply.strip() or EMPTY_RESPONSE_REPLY
+    no_tool_execution_claim_risks = (
+        no_tool_execution_claim_risk_assessment.as_payload()
+        if no_tool_execution_claim_risk_assessment is not None
+        else None
+    )
+
+    def _build_no_tool_risk_fallback() -> str:
+        if (
+            not tool_results
+            and no_tool_execution_claim_risk_assessment is not None
+            and no_tool_execution_claim_risk_assessment.assistant_reply.strip()
+        ):
+            return no_tool_execution_claim_risk_assessment.assistant_reply.strip()
+        return _build_structural_finalization_fallback(
+            reply=stripped_draft_reply,
+            tool_results=tool_results,
+            turn_cancelled_reply=turn_cancelled_reply,
+            session_goal_state=session_goal_state,
+            session_progress_ledger=session_progress_ledger,
+            finalization_required=True,
+        )
+
     finalization_required = _turn_requires_grounded_reply_finalization(
         tool_results=tool_results,
         session_goal_state=session_goal_state,
         session_progress_ledger=session_progress_ledger,
-        tool_registry=tool_registry,
+        no_tool_execution_claim_risk_assessment=(
+            no_tool_execution_claim_risk_assessment
+        ),
     )
     if not finalization_required:
         if tool_results and all(tool_result.success is False for tool_result in tool_results):
@@ -301,6 +360,8 @@ def _finalize_grounded_reply(
         tool_results=tool_results,
         session_goal_state=session_goal_state,
         session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=available_tool_definitions,
+        no_tool_execution_claim_risks=no_tool_execution_claim_risks,
         turn_cancelled_reply=turn_cancelled_reply,
     )
 
@@ -330,33 +391,13 @@ def _finalize_grounded_reply(
                 model_duration_ms=exc.duration_ms,
                 error=str(exc),
             )
-        return (
-            _build_structural_finalization_fallback(
-                reply=stripped_draft_reply,
-                tool_results=tool_results,
-                turn_cancelled_reply=turn_cancelled_reply,
-                session_goal_state=session_goal_state,
-                session_progress_ledger=session_progress_ledger,
-                finalization_required=True,
-            ),
-            True,
-        )
+        return (_build_no_tool_risk_fallback(), True)
 
     finalized_reply = _parse_grounded_reply_finalization_response(
         turn_result.response.content
     )
     if finalized_reply is None:
-        return (
-            _build_structural_finalization_fallback(
-                reply=stripped_draft_reply,
-                tool_results=tool_results,
-                turn_cancelled_reply=turn_cancelled_reply,
-                session_goal_state=session_goal_state,
-                session_progress_ledger=session_progress_ledger,
-                finalization_required=True,
-            ),
-            True,
-        )
+        return (_build_no_tool_risk_fallback(), True)
 
     return finalized_reply, True
 
@@ -1006,16 +1047,80 @@ def _build_default_search_grounding_transform(
     return _grounding_transform
 
 
-def _build_model_native_tool_recovery_note() -> str:
+def _parse_no_tool_execution_claim_risk_response(
+    response_text: str,
+) -> _NoToolExecutionClaimRiskAssessment | None:
+    stripped_response = response_text.strip()
+    if not stripped_response:
+        return None
+
+    try:
+        payload = json.loads(stripped_response)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    assistant_reply = payload.get("assistant_reply")
+    if not isinstance(assistant_reply, str):
+        return None
+
+    normalized_reply = assistant_reply.strip()
+    if not normalized_reply:
+        return None
+
+    return _NoToolExecutionClaimRiskAssessment(
+        assistant_reply=normalized_reply,
+        unsupported_execution_claim_risk=(
+            payload.get("unsupported_execution_claim_risk") is True
+        ),
+        completion_without_execution_risk=(
+            payload.get("completion_without_execution_risk") is True
+        ),
+        multi_deliverable_request_risk=(
+            payload.get("multi_deliverable_request_risk") is True
+        ),
+    )
+
+
+def _build_model_native_tool_recovery_note(
+    *,
+    user_input: str,
+    assistant_draft_reply: str,
+    tool_definitions: Sequence[ToolDefinition],
+    session_goal_state: Any,
+    session_progress_ledger: Sequence[Any],
+) -> str:
+    facts = _build_grounded_reply_facts(
+        user_input=user_input,
+        assistant_draft_reply=assistant_draft_reply,
+        tool_results=(),
+        session_goal_state=session_goal_state,
+        session_progress_ledger=session_progress_ledger,
+        available_tool_definitions=tool_definitions,
+    )
+    json_shape = (
+        '{"assistant_reply": "...", '
+        '"unsupported_execution_claim_risk": false, '
+        '"completion_without_execution_risk": false, '
+        '"multi_deliverable_request_risk": false}'
+    )
     return "\n".join(
         (
             (
                 f"{_MODEL_NATIVE_TOOL_RECOVERY_NOTE_PREFIX} "
-                "the first pass returned no tool calls."
+                "the first pass returned text without tool calls."
             ),
-            "Reconsider the same user request using the current context and available tools.",
-            "If any available tool is needed for a better-grounded answer, emit the tool call now.",
-            "If no tool is needed, answer directly.",
+            "Reconsider the same user request using the prior draft plus the structured runtime facts below.",
+            "If an available tool call is needed for a grounded answer or meaningful progress, emit that tool call now.",
+            f"If no tool is needed, return JSON only with this shape: {json_shape}",
+            "Set unsupported_execution_claim_risk=true if the draft or revised reply would claim completed side effects, completed evidence gathering, or task completion without support from current-turn tool results or persisted task state.",
+            "Set completion_without_execution_risk=true if additional tool work is still needed before the request can honestly be called complete.",
+            "Set multi_deliverable_request_risk=true only if multiple requested deliverables remain unevenly satisfied.",
+            "If no tool ran, do not claim that any file was created, modified, deleted, searched, researched, or completed unless the persisted task state already confirms it.",
+            "Structured runtime facts (JSON):",
+            _serialize_grounded_reply_facts(facts),
         )
     )
 

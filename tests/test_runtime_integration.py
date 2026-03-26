@@ -122,6 +122,36 @@ def _build_tool_call_response(tool_name: str, arguments: dict[str, object]) -> L
     )
 
 
+def _build_no_tool_honesty_json_response(
+    assistant_reply: str,
+    *,
+    unsupported_execution_claim_risk: bool = False,
+    completion_without_execution_risk: bool = False,
+    multi_deliverable_request_risk: bool = False,
+) -> LLMResponse:
+    return LLMResponse(
+        provider="ollama",
+        model_name="fake-model",
+        content=json.dumps(
+            {
+                "assistant_reply": assistant_reply,
+                "unsupported_execution_claim_risk": (
+                    unsupported_execution_claim_risk
+                ),
+                "completion_without_execution_risk": (
+                    completion_without_execution_risk
+                ),
+                "multi_deliverable_request_risk": (
+                    multi_deliverable_request_risk
+                ),
+            },
+            ensure_ascii=False,
+        ),
+        created_at="2026-03-26T00:00:01Z",
+        finish_reason="stop",
+    )
+
+
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
     monkeypatch,
     make_temp_project,
@@ -8697,6 +8727,318 @@ def test_no_tool_chat_turn_does_not_trigger_grounded_finalization(
             "Grounded finalization was triggered for a no-tool chat turn"
         )
         assert "4" in reply
+    finally:
+        session_manager.close()
+
+
+def test_no_tool_false_file_creation_claim_gets_corrected(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    target = settings.paths.files_dir / "draft.txt"
+    tool_registry = ToolRegistry()
+
+    def _unexpected_write(call: ToolCall) -> ToolResult:
+        raise AssertionError(f"Unexpected tool call: {call}")
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _unexpected_write)
+
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The file has been created.",
+            created_at="2026-03-26T00:00:00Z",
+            finish_reason="stop",
+        ),
+        _build_no_tool_honesty_json_response(
+            "I have not created any file in this turn because no write_text_file tool ran.",
+            unsupported_execution_claim_risk=True,
+            completion_without_execution_risk=True,
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = f"Create a local note file at {target.name}."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert (
+            reply
+            == "I have not created any file in this turn because no write_text_file tool ran."
+        )
+        assert not target.exists()
+
+        finalizer_calls = [
+            messages
+            for messages in captured_messages
+            if _is_grounded_finalizer_call(messages)
+        ]
+        assert len(finalizer_calls) == 1
+        payload = json.loads(finalizer_calls[0][-1].content)
+        assert payload["current_turn_tool_summary"]["tool_count"] == 0
+        assert payload["execution_claim_risks"]["no_tools_ran_this_turn"] is True
+        assert payload["execution_claim_risks"]["side_effect_tools_available"] is True
+        assert payload["execution_claim_risks"]["unsupported_execution_claim_risk"] is True
+        assert payload["execution_claim_risks"]["completion_without_execution_risk"] is True
+    finally:
+        session_manager.close()
+
+
+def test_no_tool_false_research_complete_claim_gets_corrected(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    tool_registry = ToolRegistry()
+
+    def _unexpected_search(call: ToolCall) -> ToolResult:
+        raise AssertionError(f"Unexpected tool call: {call}")
+
+    tool_registry.register(SEARCH_WEB_DEFINITION, _unexpected_search)
+
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The research is complete.",
+            created_at="2026-03-26T00:00:00Z",
+            finish_reason="stop",
+        ),
+        _build_no_tool_honesty_json_response(
+            "I have not run grounded web research in this turn, so I cannot say the research is complete yet.",
+            unsupported_execution_claim_risk=True,
+            completion_without_execution_risk=True,
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "Research the local mayor and tell me when the research is complete."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert (
+            reply
+            == "I have not run grounded web research in this turn, so I cannot say the research is complete yet."
+        )
+
+        finalizer_calls = [
+            messages
+            for messages in captured_messages
+            if _is_grounded_finalizer_call(messages)
+        ]
+        assert len(finalizer_calls) == 1
+        payload = json.loads(finalizer_calls[0][-1].content)
+        assert payload["execution_claim_risks"]["no_tools_ran_this_turn"] is True
+        assert (
+            payload["execution_claim_risks"]["evidence_gathering_tools_available"]
+            is True
+        )
+        assert payload["execution_claim_risks"]["side_effect_tools_available"] is False
+        assert payload["execution_claim_risks"]["unsupported_execution_claim_risk"] is True
+    finally:
+        session_manager.close()
+
+
+def test_brand_new_task_after_completed_goal_cannot_be_falsely_marked_done_without_tools(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    previous_goal = "Write the previous note."
+    target = settings.paths.files_dir / "second-note.txt"
+    tool_registry = ToolRegistry()
+
+    def _unexpected_write(call: ToolCall) -> ToolResult:
+        raise AssertionError(f"Unexpected tool call: {call}")
+
+    tool_registry.register(WRITE_TEXT_FILE_DEFINITION, _unexpected_write)
+
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="The new file was created.",
+            created_at="2026-03-26T00:00:00Z",
+            finish_reason="stop",
+        ),
+        _build_no_tool_honesty_json_response(
+            "I have not created a new file in this turn.",
+            unsupported_execution_claim_risk=True,
+            completion_without_execution_risk=True,
+        ),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.persist_session_goal_state(
+            session_id=session.id,
+            goal=previous_goal,
+            status="completed",
+            current_step="write_text_file",
+        )
+
+        prompt = f"Create a different file named {target.name}."
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "I have not created a new file in this turn."
+        assert not target.exists()
+
+        goal_state = session_manager.get_session_goal_state(session.id)
+        assert goal_state is not None
+        assert goal_state.goal == previous_goal
+        assert goal_state.status == "completed"
+
+        finalizer_calls = [
+            messages
+            for messages in captured_messages
+            if _is_grounded_finalizer_call(messages)
+        ]
+        assert len(finalizer_calls) == 1
+        payload = json.loads(finalizer_calls[0][-1].content)
+        assert payload["execution_claim_risks"]["persisted_goal_state_status"] == "completed"
+        assert payload["execution_claim_risks"]["unsupported_execution_claim_risk"] is True
+    finally:
+        session_manager.close()
+
+
+def test_no_tool_honesty_rescue_keeps_simple_arithmetic_turn_cheap(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="unused",
+        ),
+    )
+
+    fake_provider = build_scripted_ollama_provider(
+        LLMResponse(
+            provider="ollama",
+            model_name="fake-model",
+            content="2+2 is 4.",
+            created_at="2026-03-26T00:00:00Z",
+            finish_reason="stop",
+        ),
+        _build_no_tool_honesty_json_response("2+2 is 4."),
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        prompt = "What is 2+2?"
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        assert reply == "2+2 is 4."
+        assert len(_non_finalizer_calls(captured_messages)) == 2
+        assert not any(
+            _is_grounded_finalizer_call(messages)
+            for messages in captured_messages
+        )
     finally:
         session_manager.close()
 

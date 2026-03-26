@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from unclaw.constants import EMPTY_RESPONSE_REPLY
-from unclaw.tools.contracts import ToolResult
+from unclaw.tools.contracts import ToolDefinition, ToolPermissionLevel, ToolResult
 
 if TYPE_CHECKING:
     from unclaw.core.session_manager import SessionGoalState, SessionProgressEntry
@@ -54,6 +54,48 @@ def _tool_result_timed_out(tool_result: ToolResult) -> bool:
         part for part in (tool_result.error, tool_result.output_text) if part
     )
     return "timed out" in haystack.casefold()
+
+
+def _tool_names_with_permission_level(
+    tool_definitions: Sequence[ToolDefinition],
+    *,
+    permission_levels: frozenset[ToolPermissionLevel],
+) -> tuple[str, ...]:
+    return tuple(
+        tool_definition.name
+        for tool_definition in tool_definitions
+        if tool_definition.permission_level in permission_levels
+    )
+
+
+def _normalize_no_tool_execution_claim_risks(
+    no_tool_execution_claim_risks: Mapping[str, Any] | None,
+) -> dict[str, bool]:
+    if not isinstance(no_tool_execution_claim_risks, Mapping):
+        return {
+            "unsupported_execution_claim_risk": False,
+            "completion_without_execution_risk": False,
+            "multi_deliverable_request_risk": False,
+            "no_tool_honesty_rescue_used": False,
+        }
+
+    return {
+        "unsupported_execution_claim_risk": (
+            no_tool_execution_claim_risks.get("unsupported_execution_claim_risk")
+            is True
+        ),
+        "completion_without_execution_risk": (
+            no_tool_execution_claim_risks.get("completion_without_execution_risk")
+            is True
+        ),
+        "multi_deliverable_request_risk": (
+            no_tool_execution_claim_risks.get("multi_deliverable_request_risk")
+            is True
+        ),
+        "no_tool_honesty_rescue_used": (
+            no_tool_execution_claim_risks.get("no_tool_honesty_rescue_used") is True
+        ),
+    }
 
 
 def _normalize_tool_result(tool_result: ToolResult) -> dict[str, Any]:
@@ -135,6 +177,8 @@ def _build_grounded_reply_facts(
     turn_cancelled_reply: str = _DEFAULT_TURN_CANCELLED_REPLY,
     session_goal_state: SessionGoalState | None = None,
     session_progress_ledger: Sequence[SessionProgressEntry] = (),
+    available_tool_definitions: Sequence[ToolDefinition] = (),
+    no_tool_execution_claim_risks: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_tool_results = tuple(
         _normalize_tool_result(tool_result) for tool_result in tool_results
@@ -171,6 +215,70 @@ def _build_grounded_reply_facts(
         for tool_result in tool_results
         if _tool_result_action_performed(tool_result) is False
     )
+    persisted_goal_state_status = (
+        session_goal_state.status if session_goal_state is not None else "none"
+    )
+    side_effect_tool_names = _tool_names_with_permission_level(
+        available_tool_definitions,
+        permission_levels=frozenset(
+            {
+                ToolPermissionLevel.LOCAL_WRITE,
+                ToolPermissionLevel.LOCAL_EXECUTE,
+            }
+        ),
+    )
+    evidence_gathering_tool_names = _tool_names_with_permission_level(
+        available_tool_definitions,
+        permission_levels=frozenset(
+            {
+                ToolPermissionLevel.LOCAL_READ,
+                ToolPermissionLevel.NETWORK,
+            }
+        ),
+    )
+    normalized_no_tool_execution_claim_risks = (
+        _normalize_no_tool_execution_claim_risks(no_tool_execution_claim_risks)
+    )
+    execution_claim_risks = {
+        "no_tools_ran_this_turn": not tool_results,
+        "side_effect_tools_available": bool(side_effect_tool_names),
+        "side_effect_tool_names": side_effect_tool_names,
+        "evidence_gathering_tools_available": bool(evidence_gathering_tool_names),
+        "evidence_gathering_tool_names": evidence_gathering_tool_names,
+        "persisted_goal_state_status": persisted_goal_state_status,
+        "persisted_progress_entry_count": len(session_progress_ledger),
+        "completion_without_execution_risk": (
+            normalized_no_tool_execution_claim_risks[
+                "completion_without_execution_risk"
+            ]
+        ),
+        "unsupported_execution_claim_risk": (
+            normalized_no_tool_execution_claim_risks[
+                "unsupported_execution_claim_risk"
+            ]
+            or (
+                not tool_results
+                and persisted_goal_state_status in {"completed", "blocked"}
+            )
+        ),
+        "multi_deliverable_request_risk": (
+            normalized_no_tool_execution_claim_risks[
+                "multi_deliverable_request_risk"
+            ]
+        ),
+        "no_tool_honesty_rescue_used": (
+            normalized_no_tool_execution_claim_risks[
+                "no_tool_honesty_rescue_used"
+            ]
+        ),
+    }
+    execution_claim_check_required = any(
+        (
+            execution_claim_risks["completion_without_execution_risk"],
+            execution_claim_risks["unsupported_execution_claim_risk"],
+            execution_claim_risks["multi_deliverable_request_risk"],
+        )
+    )
 
     return {
         "user_input": user_input,
@@ -206,6 +314,7 @@ def _build_grounded_reply_facts(
             "thin_evidence_tool_names": thin_evidence_tool_names,
             "write_after_thin_search": write_succeeded and has_thin_search,
         },
+        "execution_claim_risks": execution_claim_risks,
         "completion_risks": {
             "has_blocking_failures": bool(failed_tool_names),
             "state_conflict_tool_names": state_conflict_tool_names,
@@ -216,6 +325,7 @@ def _build_grounded_reply_facts(
                 or len(tool_results) > 1
                 or write_succeeded
                 or delete_succeeded
+                or execution_claim_check_required
             ),
         },
         "persisted_goal_state_before_turn": _normalize_session_goal_state(

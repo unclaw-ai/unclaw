@@ -10,7 +10,9 @@ from unclaw.core.reply_discipline import (
     _build_structural_finalization_fallback,
 )
 from unclaw.core.session_manager import SessionGoalState, SessionProgressEntry
+from unclaw.tools.file_tools import WRITE_TEXT_FILE_DEFINITION
 from unclaw.tools.contracts import ToolResult
+from unclaw.tools.web_tools import SEARCH_WEB_DEFINITION
 
 pytestmark = pytest.mark.unit
 
@@ -117,6 +119,39 @@ def test_build_grounded_reply_facts_packages_structural_runtime_evidence() -> No
             "updated_at": "2026-03-26T10:00:00Z",
         },
     )
+
+
+def test_build_grounded_reply_facts_includes_no_tool_execution_claim_risks() -> None:
+    facts = _build_grounded_reply_facts(
+        user_input="Create a note and research the topic.",
+        assistant_draft_reply="Done.",
+        tool_results=[],
+        available_tool_definitions=(
+            WRITE_TEXT_FILE_DEFINITION,
+            SEARCH_WEB_DEFINITION,
+        ),
+        no_tool_execution_claim_risks={
+            "unsupported_execution_claim_risk": True,
+            "completion_without_execution_risk": True,
+            "multi_deliverable_request_risk": True,
+            "no_tool_honesty_rescue_used": True,
+        },
+    )
+
+    assert facts["execution_claim_risks"] == {
+        "no_tools_ran_this_turn": True,
+        "side_effect_tools_available": True,
+        "side_effect_tool_names": ("write_text_file",),
+        "evidence_gathering_tools_available": True,
+        "evidence_gathering_tool_names": ("search_web",),
+        "persisted_goal_state_status": "none",
+        "persisted_progress_entry_count": 0,
+        "completion_without_execution_risk": True,
+        "unsupported_execution_claim_risk": True,
+        "multi_deliverable_request_risk": True,
+        "no_tool_honesty_rescue_used": True,
+    }
+    assert facts["completion_risks"]["deliverable_check_required"] is True
 
 
 def test_structural_finalization_fallback_uses_persisted_task_state_summary() -> None:

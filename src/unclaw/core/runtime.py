@@ -116,6 +116,7 @@ def run_user_turn(
     pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
     orchestrator: Orchestrator | None = None
     grounded_finalization_used = False
+    no_tool_execution_claim_risk_assessment = None
 
     buffered_stream_chunks: list[str] | None
     _effective_stream_func: LLMContentCallback | None
@@ -207,7 +208,13 @@ def run_user_turn(
 
             def _finalize_responder_turn(
                 turn_result: OrchestratorTurnResult,
-            ) -> tuple[OrchestratorTurnResult, str | None]:
+                *,
+                parse_no_tool_execution_claim_risk: bool = False,
+            ) -> tuple[
+                OrchestratorTurnResult,
+                str | None,
+                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
+            ]:
                 active_tracer.trace_model_succeeded(
                     session_id=session.id,
                     provider=turn_result.response.provider,
@@ -219,6 +226,7 @@ def run_user_turn(
                 )
 
                 inline_tool_reply: str | None = None
+                no_tool_execution_claim_risk = None
                 if not turn_result.response.tool_calls:
                     inline_tool_response, inline_tool_reply = (
                         _agent_loop._recover_inline_native_tool_response(
@@ -232,14 +240,38 @@ def run_user_turn(
                             turn_result,
                             response=inline_tool_response,
                         )
+                    elif parse_no_tool_execution_claim_risk:
+                        no_tool_execution_claim_risk = (
+                            _runtime_support._parse_no_tool_execution_claim_risk_response(
+                                turn_result.response.content
+                            )
+                        )
+                        if no_tool_execution_claim_risk is not None:
+                            turn_result = replace(
+                                turn_result,
+                                response=replace(
+                                    turn_result.response,
+                                    content=(
+                                        no_tool_execution_claim_risk.assistant_reply
+                                    ),
+                                ),
+                            )
 
-                return turn_result, inline_tool_reply
+                return (
+                    turn_result,
+                    inline_tool_reply,
+                    no_tool_execution_claim_risk,
+                )
 
             def _run_responder_turn(
                 *,
                 system_notes: tuple[str, ...],
                 content_callback: LLMContentCallback | None,
-            ) -> tuple[OrchestratorTurnResult, str | None]:
+            ) -> tuple[
+                OrchestratorTurnResult,
+                str | None,
+                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
+            ]:
                 turn_result = orchestrator.run_turn(
                     session_id=session.id,
                     user_message=user_input,
@@ -257,7 +289,11 @@ def run_user_turn(
                 prior_context_messages: tuple[LLMMessage, ...],
                 recovery_note: str,
                 content_callback: LLMContentCallback | None,
-            ) -> tuple[OrchestratorTurnResult, str | None]:
+            ) -> tuple[
+                OrchestratorTurnResult,
+                str | None,
+                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
+            ]:
                 recovery_messages = list(prior_context_messages)
                 insert_index = len(recovery_messages)
                 for index in range(len(recovery_messages) - 1, -1, -1):
@@ -276,7 +312,10 @@ def run_user_turn(
                     content_callback=content_callback,
                     tools=responder_tool_definitions,
                 )
-                return _finalize_responder_turn(turn_result)
+                return _finalize_responder_turn(
+                    turn_result,
+                    parse_no_tool_execution_claim_risk=True,
+                )
 
             initial_stream_chunks: list[str] | None = None
             initial_content_callback = _effective_stream_func
@@ -300,9 +339,11 @@ def run_user_turn(
                 initial_stream_chunks.clear()
 
             if assistant_reply is None:
-                response, assistant_reply = _run_responder_turn(
-                    system_notes=system_context_notes,
-                    content_callback=initial_content_callback,
+                response, assistant_reply, no_tool_execution_claim_risk_assessment = (
+                    _run_responder_turn(
+                        system_notes=system_context_notes,
+                        content_callback=initial_content_callback,
+                    )
                 )
 
                 if (
@@ -312,12 +353,27 @@ def run_user_turn(
                     and not turn_tool_results
                     and not tool_guard_state.is_cancelled()
                 ):
-                    response, assistant_reply = _run_responder_recovery_turn(
-                        prior_context_messages=response.context_messages,
-                        recovery_note=(
-                            _runtime_support._build_model_native_tool_recovery_note()
-                        ),
-                        content_callback=_effective_stream_func,
+                    response, assistant_reply, no_tool_execution_claim_risk_assessment = (
+                        _run_responder_recovery_turn(
+                            prior_context_messages=response.context_messages,
+                            recovery_note=(
+                                _runtime_support._build_model_native_tool_recovery_note(
+                                    user_input=user_input,
+                                    assistant_draft_reply=(
+                                        response.response.content.strip()
+                                        or EMPTY_RESPONSE_REPLY
+                                    ),
+                                    tool_definitions=(
+                                        responder_tool_definitions or ()
+                                    ),
+                                    session_goal_state=pre_turn_goal_state,
+                                    session_progress_ledger=(
+                                        pre_turn_progress_ledger
+                                    ),
+                                )
+                            ),
+                            content_callback=None,
+                        )
                     )
                 elif assistant_reply is None and not response.response.tool_calls:
                     _flush_initial_stream_chunks()
@@ -406,8 +462,11 @@ def run_user_turn(
             tool_results=turn_tool_results,
             session_goal_state=pre_turn_goal_state,
             session_progress_ledger=pre_turn_progress_ledger,
+            available_tool_definitions=tuple(responder_tool_definitions or ()),
+            no_tool_execution_claim_risk_assessment=(
+                no_tool_execution_claim_risk_assessment
+            ),
             turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-            tool_registry=tool_registry,
         )
     )
 
