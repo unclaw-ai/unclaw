@@ -7,6 +7,7 @@ from dataclasses import replace
 from time import perf_counter
 
 import unclaw.core.agent_loop as _agent_loop
+import unclaw.core.mission_runner as _mission_runner
 from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
@@ -114,9 +115,18 @@ def run_user_turn(
     turn_start_message_count = len(session_manager.list_messages(session.id))
     pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
     pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
+    pre_turn_mission_state = session_manager.get_current_mission_state(session.id)
+    mission_context_state = pre_turn_mission_state
+    if mission_context_state is None and pre_turn_goal_state is not None:
+        mission_context_state = _mission_runner.build_compat_mission_state_from_legacy_goal_state(
+            legacy_goal_state=pre_turn_goal_state,
+            legacy_progress_ledger=pre_turn_progress_ledger,
+        )
     orchestrator: Orchestrator | None = None
     grounded_finalization_used = False
     no_tool_execution_claim_risk_assessment = None
+    mission_execution_used = False
+    mission_execution_persisted = False
 
     buffered_stream_chunks: list[str] | None
     _effective_stream_func: LLMContentCallback | None
@@ -379,7 +389,67 @@ def run_user_turn(
                     _flush_initial_stream_chunks()
 
                 # --- Legacy native tool loop fallback ---
+                def _response_starts_with_mission_file_tool_call(
+                    turn_result: OrchestratorTurnResult,
+                ) -> bool:
+                    if not turn_result.response.tool_calls:
+                        return False
+                    return any(
+                        tool_call.tool_name == "write_text_file"
+                        for tool_call in turn_result.response.tool_calls
+                    )
+
                 if (
+                    assistant_reply is None
+                    and responder_tool_definitions
+                    and max_agent_steps > 0
+                    and (
+                        (
+                            mission_context_state is not None
+                            and mission_context_state.status == "active"
+                            and (
+                                bool(response.response.tool_calls)
+                                or (
+                                    no_tool_execution_claim_risk_assessment is not None
+                                    and (
+                                        no_tool_execution_claim_risk_assessment.completion_without_execution_risk
+                                        or no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
+                                    )
+                                )
+                            )
+                        )
+                        or _response_starts_with_mission_file_tool_call(response)
+                        or (
+                            no_tool_execution_claim_risk_assessment is not None
+                            and pre_turn_goal_state is None
+                            and (
+                                no_tool_execution_claim_risk_assessment.completion_without_execution_risk
+                                or no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
+                            )
+                        )
+                    )
+                ):
+                    mission_result = _mission_runner.run_mission_turn(
+                        first_response=response,
+                        session_manager=session_manager,
+                        tool_definitions=responder_tool_definitions,
+                        tool_registry=active_tool_registry,
+                        orchestrator=orchestrator,
+                        tracer=active_tracer,
+                        session_id=session.id,
+                        user_input=user_input,
+                        model_profile_name=selected_model_profile_name,
+                        thinking_enabled=thinking_enabled,
+                        max_steps=max_agent_steps,
+                        tool_guard_state=tool_guard_state,
+                        tool_call_callback=tool_call_callback,
+                        initial_mission_state=mission_context_state,
+                    )
+                    turn_tool_results = list(mission_result.tool_results)
+                    assistant_reply = mission_result.assistant_reply
+                    mission_execution_used = True
+                    mission_execution_persisted = mission_result.persisted
+                elif (
                     assistant_reply is None
                     and response.response.tool_calls
                     and responder_tool_definitions
@@ -482,21 +552,22 @@ def run_user_turn(
         assistant_reply,
         session_id=session.id,
     )
-    _runtime_support._persist_session_goal_state_from_runtime_facts(
-        session_manager=session_manager,
-        session_id=session.id,
-        user_input=user_input,
-        tool_results=turn_tool_results,
-        assistant_reply=assistant_reply,
-        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-    )
-    _runtime_support._persist_session_progress_ledger_from_runtime_facts(
-        session_manager=session_manager,
-        session_id=session.id,
-        tool_results=turn_tool_results,
-        assistant_reply=assistant_reply,
-        turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-    )
+    if mission_execution_persisted or not mission_execution_used:
+        _runtime_support._persist_session_goal_state_from_runtime_facts(
+            session_manager=session_manager,
+            session_id=session.id,
+            user_input=user_input,
+            tool_results=turn_tool_results,
+            assistant_reply=assistant_reply,
+            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
+        )
+        _runtime_support._persist_session_progress_ledger_from_runtime_facts(
+            session_manager=session_manager,
+            session_id=session.id,
+            tool_results=turn_tool_results,
+            assistant_reply=assistant_reply,
+            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
+        )
     active_tracer.trace_assistant_reply_persisted(
         session_id=session.id,
         output_length=len(assistant_reply),

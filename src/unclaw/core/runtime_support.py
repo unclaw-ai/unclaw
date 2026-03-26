@@ -36,7 +36,7 @@ _MODEL_NATIVE_TOOL_RECOVERY_NOTE_PREFIX = "Tool reconsideration note:"
 _SEARCH_REPAIR_FACTS_NOTE_PREFIX = "Search repair facts:"
 _SESSION_GOAL_STATE_NOTE_PREFIX = "Session goal state:"
 _SESSION_PROGRESS_LEDGER_NOTE_PREFIX = "Session progress ledger:"
-_SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session task continuity:"
+_SESSION_TASK_CONTINUITY_NOTE_PREFIX = "Session mission continuity:"
 _WRITE_SUCCESS_TOOL_NAME = "write_text_file"
 _STATE_CONFLICT_FAILURE_KINDS = frozenset(
     {
@@ -59,12 +59,12 @@ _GROUNDED_REPLY_FINALIZER_SYSTEM_PROMPT = "\n".join(
         "- Do not claim that a file was created, saved, updated, or modified unless the current turn includes a successful `write_text_file` tool result.",
         "- Do not claim that a file was deleted unless the current turn includes a successful `delete_file` tool result.",
         "- If any tool payload says `action_performed` is false, explicitly say that the action did not happen.",
-        "- Do not claim research, search completion, biography completion, or overall task completion unless the evidence and persisted task state support it.",
-        "- If the user is asking about task status or progress, answer from the persisted task state before the turn plus the current-turn execution facts.",
+        "- Do not claim research, search completion, biography completion, or overall mission completion unless the evidence and persisted mission state support it.",
+        "- If the user is asking about mission status or progress, answer from the persisted mission state before the turn plus the current-turn execution facts.",
         "- If requested deliverables are still unsupported or blocked, say that plainly instead of pretending they are complete.",
         "- Use the original user request plus `completion_risks` to make sure every requested deliverable is addressed once. If tool-backed work succeeded but the draft only covers part of the request, add the remaining short textual deliverable in the final reply.",
         "- If blocking failures remain, say exactly what completed and what remains blocked. Do not flatten blocked turns into full success.",
-        "- If `execution_claim_risks.no_tools_ran_this_turn` is true, do not preserve unsupported claims that side effects, research, or task completion happened in this turn.",
+        "- If `execution_claim_risks.no_tools_ran_this_turn` is true, do not preserve unsupported claims that side effects, research, or mission completion happened in this turn.",
         "- If `execution_claim_risks.unsupported_execution_claim_risk` or `execution_claim_risks.completion_without_execution_risk` is true, explicitly say what did not happen yet and whether another tool step is still needed.",
         "- Keep the reply in the user's language when it is inferable from the request.",
         "- Do not end with promises about actions that did not happen in this turn.",
@@ -283,7 +283,7 @@ def _turn_requires_grounded_reply_finalization(
             return True
         return any(_tool_result_requires_honesty_finalization(tool_result) for tool_result in tool_results)
     # No tools ran. Skip finalization for most no-tool turns so simple
-    # arithmetic/chat stays cheap. We still finalize when persisted task
+    # arithmetic/chat stays cheap. We still finalize when persisted mission
     # state is terminal or when the bounded no-tool honesty rescue returned
     # structured risk flags that the draft implied unsupported completion.
     execution_claim_risks = grounded_facts["execution_claim_risks"]
@@ -1132,10 +1132,10 @@ def _build_model_native_tool_recovery_note(
             "Reconsider the same user request using the prior draft plus the structured runtime facts below.",
             "If an available tool call is needed for a grounded answer or meaningful progress, emit that tool call now.",
             f"If no tool is needed, return JSON only with this shape: {json_shape}",
-            "Set unsupported_execution_claim_risk=true if the draft or revised reply would claim completed side effects, completed evidence gathering, or task completion without support from current-turn tool results or persisted task state.",
+            "Set unsupported_execution_claim_risk=true if the draft or revised reply would claim completed side effects, completed evidence gathering, or mission completion without support from current-turn tool results or persisted mission state.",
             "Set completion_without_execution_risk=true if additional tool work is still needed before the request can honestly be called complete.",
             "Set multi_deliverable_request_risk=true only if multiple requested deliverables remain unevenly satisfied.",
-            "If no tool ran, do not claim that any file was created, modified, deleted, searched, researched, or completed unless the persisted task state already confirms it.",
+            "If no tool ran, do not claim that any file was created, modified, deleted, searched, researched, or completed unless the persisted mission state already confirms it.",
             "Structured runtime facts (JSON):",
             _serialize_grounded_reply_facts(facts),
         )

@@ -473,24 +473,24 @@ def _build_grounded_task_status_reply(
     session_progress_ledger: Sequence[SessionProgressEntry],
 ) -> str:
     if session_goal_state is None:
-        return "There is no persisted task progress for this session."
+        return "There is no persisted mission progress for this session."
 
     if session_goal_state.status == "completed":
-        return f"The persisted task is completed: {session_goal_state.goal}"
+        return f"The persisted mission is completed: {session_goal_state.goal}"
 
     if session_goal_state.status == "blocked":
         blocker = session_goal_state.last_blocker or "no blocker detail was persisted"
         step = session_goal_state.current_step or "the current step"
-        return f"The persisted task is blocked on {step}: {blocker}"
+        return f"The persisted mission is blocked on {step}: {blocker}"
 
     latest_entry = session_progress_ledger[-1] if session_progress_ledger else None
     step = session_goal_state.current_step or (
         latest_entry.step if latest_entry is not None else "the current step"
     )
     if latest_entry is None:
-        return f"The persisted task is active on {step}."
+        return f"The persisted mission is active on {step}."
     return (
-        f"The persisted task is active on {step}. "
+        f"The persisted mission is active on {step}. "
         f"Latest persisted progress: {latest_entry.detail}"
     )
 
@@ -517,7 +517,7 @@ def _build_structural_finalization_fallback(
     if finalization_required and not tool_results:
         return (
             "I did not execute any tools in this turn, so I cannot confirm "
-            "additional completed actions."
+            "additional completed mission work."
         )
 
     if tool_results and all(tool_result.success is False for tool_result in tool_results):

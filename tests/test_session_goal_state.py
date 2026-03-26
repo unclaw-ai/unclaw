@@ -1183,7 +1183,7 @@ def test_completed_task_substantive_search_turn_handoffs_goal_before_write_and_u
         continuity_notes = [
             message
             for message in third_turn_system_messages
-            if message.startswith("Session task continuity:")
+            if message.startswith("Session mission continuity:")
         ]
         assert len(continuity_notes) == 1
         assert (
@@ -1568,7 +1568,7 @@ def test_later_turn_injects_compact_completed_task_continuity_note_with_model_re
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session task continuity:")
+            not message.startswith("Session mission continuity:")
             for message in first_turn_system_messages
         )
 
@@ -1581,7 +1581,7 @@ def test_later_turn_injects_compact_completed_task_continuity_note_with_model_re
         continuity_notes = [
             message
             for message in second_turn_system_messages
-            if message.startswith("Session task continuity:")
+            if message.startswith("Session mission continuity:")
         ]
         assert len(continuity_notes) == 1
         assert all(
@@ -1726,7 +1726,7 @@ def test_blocked_task_compact_continuation_turn_keeps_original_goal_text_and_can
         continuity_notes = [
             message
             for message in second_turn_system_messages
-            if message.startswith("Session task continuity:")
+            if message.startswith("Session mission continuity:")
         ]
         assert len(continuity_notes) == 1
         assert 'goal="Read the local source note, then write a short local note file."' in (
@@ -1866,7 +1866,7 @@ def test_active_task_resume_turn_keeps_original_goal_text_and_can_complete(
                 for message in messages
                 if getattr(message, "role", None) is LLMRole.SYSTEM
                 and isinstance(getattr(message, "content", None), str)
-                and message.content.startswith("Session task continuity:")
+                and message.content.startswith("Session mission continuity:")
                 and 'current_step="read_text_file"' in message.content
             }
         )
@@ -2166,7 +2166,7 @@ def test_chat_only_sessions_remain_unchanged_without_goal_state(
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session task continuity:")
+            not message.startswith("Session mission continuity:")
             for message in system_messages
         )
         event_types = [
@@ -2260,7 +2260,7 @@ def test_session_goal_state_stays_bounded_and_tracks_runtime_blockers(
             session_id=session.id,
         )
         assert continuity_note is not None
-        assert continuity_note.startswith("Session task continuity:")
+        assert continuity_note.startswith("Session mission continuity:")
         assert len(continuity_note) < 600
         assert "Earlier conversation fragment" not in continuity_note
         assert 'status="blocked"' in continuity_note

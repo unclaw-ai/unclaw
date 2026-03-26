@@ -7,7 +7,13 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Self
+from uuid import uuid4
 
+from unclaw.core.mission_state import (
+    MissionState,
+    parse_mission_state,
+    serialize_mission_state,
+)
 from unclaw.db.repositories import EventRepository, MessageRepository, SessionRepository
 from unclaw.db.sqlite import initialize_schema, open_connection
 from unclaw.errors import UnclawError
@@ -20,6 +26,7 @@ from unclaw.settings import Settings
 
 _SESSION_GOAL_STATE_EVENT_TYPE = "session.goal_state.updated"
 _SESSION_PROGRESS_LEDGER_EVENT_TYPE = "session.progress.ledger.updated"
+_SESSION_MISSION_STATE_EVENT_TYPE = "session.mission_state.updated"
 _SESSION_GOAL_STATUS_VALUES = frozenset({"active", "blocked", "completed"})
 _SESSION_GOAL_MAX_CHARS = 240
 _SESSION_GOAL_STEP_MAX_CHARS = 80
@@ -224,23 +231,31 @@ class SessionManager:
     ) -> SessionGoalState | None:
         """Return the latest persisted goal state for one session, if present."""
         resolved_session_id = self._resolve_session_id(session_id)
-        row = self.connection.execute(
-            """
-            SELECT payload_json
-            FROM events
-            WHERE session_id = ?
-              AND event_type = ?
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (resolved_session_id, _SESSION_GOAL_STATE_EVENT_TYPE),
-        ).fetchone()
-        if row is None:
+        mission_row = self._load_latest_event_row(
+            resolved_session_id,
+            _SESSION_MISSION_STATE_EVENT_TYPE,
+        )
+        goal_row = self._load_latest_event_row(
+            resolved_session_id,
+            _SESSION_GOAL_STATE_EVENT_TYPE,
+        )
+
+        if goal_row is not None:
+            payload_json = goal_row["payload_json"]
+            if isinstance(payload_json, str):
+                goal_state = _parse_session_goal_state(payload_json)
+                if goal_state is not None:
+                    return goal_state
+
+        if mission_row is None:
             return None
-        payload_json = row["payload_json"]
+        payload_json = mission_row["payload_json"]
         if not isinstance(payload_json, str):
             return None
-        return _parse_session_goal_state(payload_json)
+        mission_state = parse_mission_state(payload_json)
+        if mission_state is None:
+            return None
+        return _project_session_goal_state_from_mission(mission_state)
 
     def persist_session_goal_state(
         self,
@@ -295,23 +310,31 @@ class SessionManager:
     ) -> tuple[SessionProgressEntry, ...]:
         """Return the latest persisted progress ledger snapshot for one session."""
         resolved_session_id = self._resolve_session_id(session_id)
-        row = self.connection.execute(
-            """
-            SELECT payload_json
-            FROM events
-            WHERE session_id = ?
-              AND event_type = ?
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (resolved_session_id, _SESSION_PROGRESS_LEDGER_EVENT_TYPE),
-        ).fetchone()
-        if row is None:
+        mission_row = self._load_latest_event_row(
+            resolved_session_id,
+            _SESSION_MISSION_STATE_EVENT_TYPE,
+        )
+        ledger_row = self._load_latest_event_row(
+            resolved_session_id,
+            _SESSION_PROGRESS_LEDGER_EVENT_TYPE,
+        )
+
+        if ledger_row is not None:
+            payload_json = ledger_row["payload_json"]
+            if isinstance(payload_json, str):
+                ledger = _parse_session_progress_ledger(payload_json)
+                if ledger:
+                    return ledger
+
+        if mission_row is None:
             return ()
-        payload_json = row["payload_json"]
+        payload_json = mission_row["payload_json"]
         if not isinstance(payload_json, str):
             return ()
-        return _parse_session_progress_ledger(payload_json)
+        mission_state = parse_mission_state(payload_json)
+        if mission_state is None:
+            return ()
+        return _project_session_progress_ledger_from_mission(mission_state)
 
     def persist_session_progress_entry(
         self,
@@ -346,7 +369,7 @@ class SessionManager:
             updated_at=timestamp,
         )
         existing_entries = list(
-            self.get_session_progress_ledger(resolved_session_id)
+            self._load_legacy_progress_ledger_only(resolved_session_id)
         )
         ledger = tuple(
             (existing_entries + [next_entry])[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :]
@@ -360,6 +383,118 @@ class SessionManager:
             created_at=timestamp,
         )
         return ledger
+
+    def get_current_mission_state(
+        self,
+        session_id: str | None = None,
+    ) -> MissionState | None:
+        """Return the latest persisted mission state for one session, if present."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        row = self.connection.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE session_id = ?
+              AND event_type = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (resolved_session_id, _SESSION_MISSION_STATE_EVENT_TYPE),
+        ).fetchone()
+        if row is None:
+            return None
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str):
+            return None
+        return parse_mission_state(payload_json)
+
+    def persist_mission_state(
+        self,
+        mission_state: MissionState,
+        *,
+        session_id: str | None = None,
+        message: str = "Session mission state updated.",
+    ) -> MissionState:
+        """Persist one mission-state snapshot for a session."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        if self.load_session(resolved_session_id) is None:
+            raise SessionManagerError(
+                f"Session '{resolved_session_id}' is not available."
+            )
+
+        serialized_payload = serialize_mission_state(mission_state)
+        self.event_repository.add_event(
+            session_id=resolved_session_id,
+            event_type=_SESSION_MISSION_STATE_EVENT_TYPE,
+            level=EventLevel.INFO,
+            message=message,
+            payload_json=serialized_payload,
+            created_at=mission_state.updated_at,
+        )
+        return mission_state
+
+    def create_mission_id(self) -> str:
+        """Return a new stable mission identifier."""
+        return f"mission-{uuid4().hex[:12]}"
+
+    def persist_legacy_mission_projection(
+        self,
+        *,
+        mission_state: MissionState,
+        session_id: str | None = None,
+    ) -> None:
+        """Emit legacy goal/progress events derived from the mission snapshot."""
+        resolved_session_id = self._resolve_session_id(session_id)
+        goal_state = _project_session_goal_state_from_mission(mission_state)
+        progress_ledger = _project_session_progress_ledger_from_mission(mission_state)
+        self.event_repository.add_event(
+            session_id=resolved_session_id,
+            event_type=_SESSION_GOAL_STATE_EVENT_TYPE,
+            level=EventLevel.INFO,
+            message="Session mission state projected to legacy goal state.",
+            payload_json=_serialize_session_goal_state(goal_state),
+            created_at=mission_state.updated_at,
+        )
+        self.event_repository.add_event(
+            session_id=resolved_session_id,
+            event_type=_SESSION_PROGRESS_LEDGER_EVENT_TYPE,
+            level=EventLevel.INFO,
+            message="Session mission state projected to legacy progress ledger.",
+            payload_json=_serialize_session_progress_ledger(progress_ledger),
+            created_at=mission_state.updated_at,
+        )
+
+    def _load_latest_event_row(
+        self,
+        session_id: str,
+        event_type: str,
+    ) -> sqlite3.Row | None:
+        return self.connection.execute(
+            """
+            SELECT payload_json, created_at
+            FROM events
+            WHERE session_id = ?
+              AND event_type = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """,
+            (session_id, event_type),
+        ).fetchone()
+
+    def _load_legacy_progress_ledger_only(
+        self,
+        session_id: str,
+    ) -> tuple[SessionProgressEntry, ...]:
+        row = self._load_latest_event_row(
+            session_id,
+            _SESSION_PROGRESS_LEDGER_EVENT_TYPE,
+        )
+        if row is None:
+            return ()
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str):
+            return ()
+        return _parse_session_progress_ledger(payload_json)
 
     def _restore_current_session(self) -> None:
         sessions = self.session_repository.list_sessions()
@@ -515,6 +650,110 @@ def _parse_session_progress_ledger(
             )
         except ValueError:
             return ()
+
+    return tuple(entries[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :])
+
+
+def _project_session_goal_state_from_mission(
+    mission_state: MissionState,
+) -> SessionGoalState:
+    active_deliverable = mission_state.get_deliverable()
+    current_step = mission_state.active_task
+    if current_step is None:
+        latest_completed_deliverable = next(
+            (
+                deliverable
+                for deliverable in reversed(mission_state.deliverables)
+                if deliverable.status == "completed"
+            ),
+            None,
+        )
+        if latest_completed_deliverable is not None:
+            current_step = latest_completed_deliverable.task
+    last_blocker = mission_state.last_blocker
+    if active_deliverable is not None:
+        if current_step is None:
+            current_step = active_deliverable.task
+        if mission_state.status == "blocked" and last_blocker is None:
+            last_blocker = active_deliverable.blocker
+
+    return SessionGoalState(
+        goal=mission_state.goal,
+        status=mission_state.status,
+        current_step=current_step,
+        last_blocker=last_blocker,
+        updated_at=mission_state.updated_at,
+    )
+
+
+def _project_session_progress_ledger_from_mission(
+    mission_state: MissionState,
+) -> tuple[SessionProgressEntry, ...]:
+    entries: list[SessionProgressEntry] = []
+    projected_step = mission_state.active_task
+    if projected_step is None:
+        latest_completed_deliverable = next(
+            (
+                deliverable
+                for deliverable in reversed(mission_state.deliverables)
+                if deliverable.status == "completed"
+            ),
+            None,
+        )
+        if latest_completed_deliverable is not None:
+            projected_step = latest_completed_deliverable.task
+
+    def _append_entries(status: str, values: tuple[str, ...]) -> None:
+        for value in values[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :]:
+            entries.append(
+                SessionProgressEntry(
+                    status=status,
+                    step=projected_step or "mission",
+                    detail=_normalize_bounded_text(
+                        value,
+                        field_name="detail",
+                        max_chars=_SESSION_PROGRESS_DETAIL_MAX_CHARS,
+                        required=True,
+                    ),
+                    updated_at=mission_state.updated_at,
+                )
+            )
+
+    _append_entries("active", mission_state.retry_history)
+    _append_entries("active", mission_state.repair_history)
+    if mission_state.status == "blocked":
+        blocker = mission_state.last_blocker or "mission blocked"
+        entries.append(
+            SessionProgressEntry(
+                status="blocked",
+                step=projected_step or "mission",
+                detail=_normalize_bounded_text(
+                    blocker,
+                    field_name="detail",
+                    max_chars=_SESSION_PROGRESS_DETAIL_MAX_CHARS,
+                    required=True,
+                ),
+                updated_at=mission_state.updated_at,
+            )
+        )
+    elif mission_state.status == "completed":
+        entries.append(
+            SessionProgressEntry(
+                status="completed",
+                step=projected_step or "mission",
+                detail="mission deliverables verified",
+                updated_at=mission_state.updated_at,
+            )
+        )
+    elif projected_step is not None:
+        entries.append(
+            SessionProgressEntry(
+                status="active",
+                step=projected_step,
+                detail="mission step in progress",
+                updated_at=mission_state.updated_at,
+            )
+        )
 
     return tuple(entries[-_SESSION_PROGRESS_LEDGER_MAX_ENTRIES :])
 

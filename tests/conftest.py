@@ -93,12 +93,12 @@ class ScriptedFakeOllamaProvider:
 
     @staticmethod
     def _is_continuation_check_call(messages: Sequence[Any]) -> bool:
-        """Detect agent-loop continuation check (Task completion check:)."""
+        """Detect agent-loop continuation check."""
         if not messages:
             return False
         last_content = getattr(messages[-1], "content", "")
         return isinstance(last_content, str) and last_content.startswith(
-            "Task completion check:"
+            ("Task completion check:", "Mission continuation check:")
         )
 
     @staticmethod
@@ -108,6 +108,24 @@ class ScriptedFakeOllamaProvider:
         last_content = getattr(messages[-1], "content", "")
         return isinstance(last_content, str) and last_content.startswith(
             "Pre-write grounding check:"
+        )
+
+    @staticmethod
+    def _is_mission_planner_call(messages: Sequence[Any]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            "Mission planner for the Unclaw local agent runtime."
+        )
+
+    @staticmethod
+    def _is_mission_verifier_call(messages: Sequence[Any]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            "Mission step verifier for the Unclaw local agent runtime."
         )
 
     @classmethod
@@ -160,6 +178,340 @@ class ScriptedFakeOllamaProvider:
             provider="ollama",
             model_name=profile.model_name,
             content="I couldn't safely revise the pending write from the available facts.",
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
+        )
+
+    @classmethod
+    def _build_auto_mission_planner_response(
+        cls, profile: Any, messages: Sequence[Any]
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {}
+        if messages:
+            raw_content = getattr(messages[-1], "content", "")
+            if isinstance(raw_content, str):
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    payload = parsed
+
+        existing_mission = payload.get("existing_mission_state")
+        user_input = payload.get("user_input")
+        mission_action = (
+            "continue_existing"
+            if isinstance(existing_mission, dict)
+            else "start_new"
+        )
+        mission_goal = None
+        deliverables: list[dict[str, str]] = []
+        active_deliverable_id = None
+        if isinstance(existing_mission, dict):
+            raw_goal = existing_mission.get("goal")
+            if isinstance(raw_goal, str):
+                mission_goal = raw_goal
+            raw_deliverables = existing_mission.get("deliverables")
+            if isinstance(raw_deliverables, list):
+                for raw_deliverable in raw_deliverables[:4]:
+                    if not isinstance(raw_deliverable, dict):
+                        continue
+                    deliverable_id = raw_deliverable.get("deliverable_id")
+                    task = raw_deliverable.get("task")
+                    deliverable = raw_deliverable.get("deliverable")
+                    verification = raw_deliverable.get("verification")
+                    if all(isinstance(value, str) for value in (deliverable_id, task, deliverable, verification)):
+                        deliverables.append(
+                            {
+                                "id": deliverable_id,
+                                "task": task,
+                                "deliverable": deliverable,
+                                "verification": verification,
+                            }
+                        )
+            raw_active_id = existing_mission.get("active_deliverable_id")
+            if isinstance(raw_active_id, str):
+                active_deliverable_id = raw_active_id
+
+        if mission_goal is None and isinstance(user_input, str):
+            mission_goal = user_input
+        if not deliverables and isinstance(user_input, str):
+            deliverables.append(
+                {
+                    "id": "d1",
+                    "task": "Complete the requested mission",
+                    "deliverable": user_input,
+                    "verification": "The requested outcome is verified from runtime facts.",
+                }
+            )
+            active_deliverable_id = "d1"
+
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content=json.dumps(
+                {
+                    "mission_action": mission_action,
+                    "mission_goal": mission_goal or "",
+                    "deliverables": deliverables,
+                    "active_deliverable_id": active_deliverable_id,
+                    "summary": "auto mission plan",
+                },
+                ensure_ascii=False,
+            ),
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
+        )
+
+    @classmethod
+    def _build_auto_mission_verifier_response(
+        cls, profile: Any, messages: Sequence[Any]
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {}
+        if messages:
+            raw_content = getattr(messages[-1], "content", "")
+            if isinstance(raw_content, str):
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    payload = parsed
+
+        mission_state = (
+            payload.get("mission_state")
+            if isinstance(payload.get("mission_state"), dict)
+            else {}
+        )
+        latest_tool_results = payload.get("latest_tool_results")
+        if not isinstance(latest_tool_results, list):
+            latest_tool_results = []
+        draft_reply = payload.get("draft_reply")
+        retry_budget_remaining = payload.get("retry_budget_remaining")
+        active_deliverable_id = mission_state.get("active_deliverable_id")
+        deliverables = mission_state.get("deliverables")
+        has_pending_deliverables = False
+        if isinstance(deliverables, list):
+            has_pending_deliverables = any(
+                isinstance(item, dict)
+                and item.get("deliverable_id") != active_deliverable_id
+                and item.get("status") in {"pending", "active"}
+                for item in deliverables
+            )
+
+        def _result_payload(item: dict[str, Any]) -> dict[str, Any]:
+            payload_value = item.get("payload")
+            return payload_value if isinstance(payload_value, dict) else {}
+
+        if latest_tool_results:
+            if all(
+                isinstance(item, dict) and item.get("success") is False
+                for item in latest_tool_results
+            ):
+                timed_out = any(
+                    isinstance(item, dict)
+                    and (
+                        item.get("failure_kind") == "timeout"
+                        or _result_payload(item).get("execution_state") == "timed_out"
+                        or "timed out" in str(item.get("error", "")).casefold()
+                    )
+                    for item in latest_tool_results
+                )
+                if timed_out and isinstance(retry_budget_remaining, int) and retry_budget_remaining > 0:
+                    decision = {
+                        "mission_status": "active",
+                        "active_deliverable_id": active_deliverable_id,
+                        "current_deliverable_status": "active",
+                        "missing": "A retry is still needed after the timeout.",
+                        "blocker": None,
+                        "artifact_paths": [],
+                        "evidence": [],
+                        "next_action": "continue",
+                        "notes_for_next_step": "Retry the active deliverable with a narrower tool step.",
+                        "assistant_reply": None,
+                    }
+                elif any(
+                    isinstance(item, dict)
+                    and item.get("tool_name")
+                    in {"write_text_file", "delete_file", "read_text_file"}
+                    for item in latest_tool_results
+                ):
+                    latest_error = ""
+                    if latest_tool_results and isinstance(latest_tool_results[-1], dict):
+                        latest_error = str(
+                            latest_tool_results[-1].get("error")
+                            or latest_tool_results[-1].get("output_text")
+                            or ""
+                        )
+                    decision = {
+                        "mission_status": "active",
+                        "active_deliverable_id": active_deliverable_id,
+                        "current_deliverable_status": "active",
+                        "missing": "A repaired step is still needed after the failed tool result.",
+                        "blocker": latest_error or None,
+                        "artifact_paths": [],
+                        "evidence": [],
+                        "next_action": "continue",
+                        "notes_for_next_step": "Repair the active deliverable with another bounded tool step.",
+                        "assistant_reply": None,
+                    }
+                else:
+                    latest_error = ""
+                    if latest_tool_results and isinstance(latest_tool_results[-1], dict):
+                        latest_error = str(
+                            latest_tool_results[-1].get("error")
+                            or latest_tool_results[-1].get("output_text")
+                            or ""
+                        )
+                    decision = {
+                        "mission_status": "blocked",
+                        "active_deliverable_id": active_deliverable_id,
+                        "current_deliverable_status": "blocked",
+                        "missing": None,
+                        "blocker": latest_error or "mission step failed",
+                        "artifact_paths": [],
+                        "evidence": [],
+                        "next_action": "blocked_reply",
+                        "notes_for_next_step": None,
+                        "assistant_reply": None,
+                    }
+            else:
+                side_effect_success = any(
+                    isinstance(item, dict)
+                    and item.get("success") is True
+                    and item.get("tool_name") in {"write_text_file", "delete_file"}
+                    for item in latest_tool_results
+                )
+                artifact_paths: list[str] = []
+                evidence: list[str] = []
+                for item in latest_tool_results:
+                    if not isinstance(item, dict):
+                        continue
+                    item_payload = _result_payload(item)
+                    for key in ("resolved_path", "path", "requested_path"):
+                        value = item_payload.get(key)
+                        if isinstance(value, str) and value not in artifact_paths:
+                            artifact_paths.append(value)
+                    summary_points = item_payload.get("summary_points")
+                    if isinstance(summary_points, list):
+                        for summary_point in summary_points:
+                            if isinstance(summary_point, str):
+                                evidence.append(summary_point)
+                    display_sources = item_payload.get("display_sources")
+                    if isinstance(display_sources, list):
+                        for display_source in display_sources:
+                            if (
+                                isinstance(display_source, dict)
+                                and isinstance(display_source.get("url"), str)
+                            ):
+                                evidence.append(display_source["url"])
+
+                if side_effect_success:
+                    decision = {
+                        "mission_status": (
+                            "completed" if not has_pending_deliverables else "active"
+                        ),
+                        "active_deliverable_id": None,
+                        "current_deliverable_status": "completed",
+                        "missing": None,
+                        "blocker": None,
+                        "artifact_paths": artifact_paths[:4],
+                        "evidence": evidence[:4],
+                        "next_action": "continue",
+                        "notes_for_next_step": "Answer from the verified side effect and continue only if another deliverable remains.",
+                        "assistant_reply": None,
+                    }
+                else:
+                    decision = {
+                        "mission_status": "active",
+                        "active_deliverable_id": active_deliverable_id,
+                        "current_deliverable_status": "active",
+                        "missing": "A user-facing answer from the verified tool evidence is still needed.",
+                        "blocker": None,
+                        "artifact_paths": artifact_paths[:4],
+                        "evidence": evidence[:4],
+                        "next_action": "continue",
+                        "notes_for_next_step": "Use the verified tool evidence to answer the user or continue the next deliverable.",
+                        "assistant_reply": None,
+                    }
+        else:
+            has_verified_progress = bool(
+                mission_state.get("last_verified_artifact_paths")
+                or mission_state.get("last_successful_evidence")
+            )
+            if mission_state.get("status") == "blocked":
+                decision = {
+                    "mission_status": "blocked",
+                    "active_deliverable_id": active_deliverable_id,
+                    "current_deliverable_status": "blocked",
+                    "missing": None,
+                    "blocker": mission_state.get("last_blocker"),
+                    "artifact_paths": list(mission_state.get("last_verified_artifact_paths", []))
+                    if isinstance(mission_state.get("last_verified_artifact_paths"), list)
+                    else [],
+                    "evidence": list(mission_state.get("last_successful_evidence", []))
+                    if isinstance(mission_state.get("last_successful_evidence"), list)
+                    else [],
+                    "next_action": "blocked_reply",
+                    "notes_for_next_step": None,
+                    "assistant_reply": draft_reply if isinstance(draft_reply, str) and draft_reply.strip() else None,
+                }
+            elif isinstance(draft_reply, str) and draft_reply.strip() and has_verified_progress:
+                decision = {
+                    "mission_status": "completed",
+                    "active_deliverable_id": None,
+                    "current_deliverable_status": "completed",
+                    "missing": None,
+                    "blocker": mission_state.get("last_blocker"),
+                    "artifact_paths": list(mission_state.get("last_verified_artifact_paths", []))
+                    if isinstance(mission_state.get("last_verified_artifact_paths"), list)
+                    else [],
+                    "evidence": list(mission_state.get("last_successful_evidence", []))
+                    if isinstance(mission_state.get("last_successful_evidence"), list)
+                    else [],
+                    "next_action": "final_reply",
+                    "notes_for_next_step": None,
+                    "assistant_reply": draft_reply,
+                }
+            elif isinstance(draft_reply, str) and draft_reply.strip():
+                decision = {
+                    "mission_status": "blocked",
+                    "active_deliverable_id": active_deliverable_id,
+                    "current_deliverable_status": "blocked",
+                    "missing": None,
+                    "blocker": mission_state.get("last_blocker"),
+                    "artifact_paths": list(mission_state.get("last_verified_artifact_paths", []))
+                    if isinstance(mission_state.get("last_verified_artifact_paths"), list)
+                    else [],
+                    "evidence": list(mission_state.get("last_successful_evidence", []))
+                    if isinstance(mission_state.get("last_successful_evidence"), list)
+                    else [],
+                    "next_action": "blocked_reply",
+                    "notes_for_next_step": None,
+                    "assistant_reply": draft_reply,
+                }
+            else:
+                decision = {
+                    "mission_status": mission_state.get("status", "active"),
+                    "active_deliverable_id": active_deliverable_id,
+                    "current_deliverable_status": "active",
+                    "missing": None,
+                    "blocker": mission_state.get("last_blocker"),
+                    "artifact_paths": list(mission_state.get("last_verified_artifact_paths", []))
+                    if isinstance(mission_state.get("last_verified_artifact_paths"), list)
+                    else [],
+                    "evidence": list(mission_state.get("last_successful_evidence", []))
+                    if isinstance(mission_state.get("last_successful_evidence"), list)
+                    else [],
+                    "next_action": "continue",
+                    "notes_for_next_step": "Another step is needed.",
+                    "assistant_reply": None,
+                }
+
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content=json.dumps(decision, ensure_ascii=False),
             created_at="2026-03-26T00:00:01Z",
             finish_reason="stop",
         )
@@ -269,6 +621,16 @@ class ScriptedFakeOllamaProvider:
 
         if provider_cls._is_pre_write_grounding_check_call(messages):
             return provider_cls._build_auto_pre_write_grounding_response(
+                profile, messages
+            )
+
+        if provider_cls._is_mission_planner_call(messages):
+            return provider_cls._build_auto_mission_planner_response(
+                profile, messages
+            )
+
+        if provider_cls._is_mission_verifier_call(messages):
+            return provider_cls._build_auto_mission_verifier_response(
                 profile, messages
             )
 

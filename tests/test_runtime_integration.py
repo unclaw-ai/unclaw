@@ -8058,7 +8058,7 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
     make_temp_project,
     set_profile_tool_mode,
 ) -> None:
-    """After tools ran, the continuation check asks the model if the task is done.
+    """After tools ran, the continuation check asks the model if the mission is done.
 
     The model should get a second chance to emit tool calls if it decides the
     task is not yet complete, instead of stopping at the first text reply.
@@ -8111,7 +8111,7 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
                     created_at="2026-03-26T00:00:01Z",
                     finish_reason="stop",
                 )
-            # Third call (continuation check): model decides task is done.
+            # Third call (continuation check): model decides the mission is done.
             return LLMResponse(
                 provider="ollama",
                 model_name=profile.model_name,
@@ -8165,7 +8165,7 @@ def test_agent_loop_continuation_check_fires_after_first_tool_and_text(
         continuation_found = any(
             any(
                 m.role is LLMRole.SYSTEM
-                and "Task completion check:" in m.content
+                    and "Mission continuation check:" in m.content
                 for m in msgs
             )
             for msgs in non_finalizer
@@ -8238,7 +8238,7 @@ def test_agent_loop_continuation_check_requires_write_before_final_reply(
                     message.content
                     for message in messages
                     if message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Task completion check:")
+                    and message.content.startswith("Mission continuation check:")
                 )
                 assert '"phase_checkpoint_required": true' in checkpoint_note
                 return _build_tool_call_response(
@@ -8339,7 +8339,7 @@ def test_agent_loop_continuation_check_requires_write_before_final_reply(
             for messages in _non_finalizer_calls(captured_messages)
             if any(
                 message.role is LLMRole.SYSTEM
-                and message.content.startswith("Task completion check:")
+                and message.content.startswith("Mission continuation check:")
                 for message in messages
             )
         )
@@ -8430,7 +8430,7 @@ def test_agent_loop_skips_continuation_check_for_simple_successful_system_info_t
         assert not any(
             any(
                 message.role is LLMRole.SYSTEM
-                and message.content.startswith("Task completion check:")
+                and message.content.startswith("Mission continuation check:")
                 for message in messages
             )
             for messages in captured_messages
@@ -8693,7 +8693,7 @@ def test_continuation_check_note_content() -> None:
         draft_reply="Marine Leleu is an athlete.",
     )
 
-    assert "Task completion check:" in note
+    assert "Mission continuation check:" in note
     assert "Research Marine Leleu" in note
     assert "Marine Leleu is an athlete" in note
     assert "satisfied" in note.lower() or "completed" in note.lower() or "full request" in note.lower()
@@ -9612,7 +9612,7 @@ def test_find_then_delete_turn_cannot_stop_before_delete_tool_result(
                     message.content
                     for message in messages
                     if message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Task completion check:")
+                    and message.content.startswith("Mission continuation check:")
                 )
                 assert '"phase_checkpoint_required": true' in checkpoint_note
                 return _build_tool_call_response(

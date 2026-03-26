@@ -207,7 +207,7 @@ def test_structural_finalization_fallback_uses_persisted_task_state_summary() ->
 
     assert (
         result
-        == "The persisted task is blocked on write_text_file: "
+        == "The persisted mission is blocked on write_text_file: "
         "Permission denied: /tmp/note.txt"
     )
 
@@ -222,5 +222,5 @@ def test_structural_finalization_fallback_stays_generic_when_no_tools_ran() -> N
     assert (
         result
         == "I did not execute any tools in this turn, so I cannot confirm "
-        "additional completed actions."
+        "additional completed mission work."
     )

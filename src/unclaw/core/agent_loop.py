@@ -413,7 +413,7 @@ def _run_agent_loop(
     return _MAX_STEPS_FALLBACK_REPLY
 
 
-_CONTINUATION_CHECK_NOTE_PREFIX = "Task completion check:"
+_CONTINUATION_CHECK_NOTE_PREFIX = "Mission continuation check:"
 
 
 def _build_continuation_check_note(

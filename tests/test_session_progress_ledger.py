@@ -118,7 +118,7 @@ def test_session_progress_ledger_persists_bounded_tail_across_session_manager_re
             session_id=session.id,
         )
         assert note is not None
-        assert note.startswith("Session task continuity:")
+        assert note.startswith("Session mission continuity:")
         assert "\n" not in note
         assert 'goal="Write a local progress note."' in note
         assert 'status="active"' in note
@@ -222,7 +222,7 @@ def test_later_turn_injects_compact_active_task_continuity_note_without_extra_mo
         continuity_notes = [
             message
             for message in system_messages
-            if message.startswith("Session task continuity:")
+            if message.startswith("Session mission continuity:")
         ]
         assert len(continuity_notes) == 1
         assert all(
@@ -276,14 +276,14 @@ def test_one_shot_turn_without_goal_state_does_not_inject_task_continuity_note_l
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
-            content="There is no persisted task progress for this session.",
+            content="There is no persisted mission progress for this session.",
             created_at="2026-03-25T09:00:02Z",
             finish_reason="stop",
         ),
         LLMResponse(
             provider="ollama",
             model_name="fake-model",
-            content="There is no persisted task progress for this session.",
+            content="There is no persisted mission progress for this session.",
             created_at="2026-03-25T09:00:03Z",
             finish_reason="stop",
         ),
@@ -325,7 +325,7 @@ def test_one_shot_turn_without_goal_state_does_not_inject_task_continuity_note_l
             tool_registry=tool_registry,
         )
 
-        assert second_reply == "There is no persisted task progress for this session."
+        assert second_reply == "There is no persisted mission progress for this session."
         assert fake_provider.call_count() == 4
         second_turn_system_messages = [
             message.content
@@ -333,7 +333,7 @@ def test_one_shot_turn_without_goal_state_does_not_inject_task_continuity_note_l
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session task continuity:")
+            not message.startswith("Session mission continuity:")
             for message in second_turn_system_messages
         )
     finally:
@@ -1631,7 +1631,7 @@ def test_chat_only_sessions_remain_unchanged_without_progress_ledger(
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         assert all(
-            not message.startswith("Session task continuity:")
+            not message.startswith("Session mission continuity:")
             for message in system_messages
         )
         event_types = [

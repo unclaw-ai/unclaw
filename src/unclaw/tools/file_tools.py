@@ -538,6 +538,11 @@ def write_text_file(
         return access_error
 
     file_already_exists = requested_path.exists()
+    mission_id = call.arguments.get("mission_id")
+    mission_deliverable_id = call.arguments.get("mission_deliverable_id")
+    mission_write_reuse_allowed = isinstance(mission_id, str) and isinstance(
+        mission_deliverable_id, str
+    )
 
     if file_already_exists:
         if collision_policy == "fail":
@@ -566,6 +571,31 @@ def write_text_file(
                 failure_kind=_COLLISION_CONFLICT_FAILURE_KIND,
             )
         elif collision_policy == "version":
+            if mission_write_reuse_allowed and _existing_text_file_matches_requested_content(
+                requested_path=requested_path,
+                requested_content=content,
+            ):
+                return ToolResult.ok(
+                    tool_name=tool_name,
+                    output_text=(
+                        "Existing file already satisfies this mission deliverable: "
+                        f"{requested_path}"
+                    ),
+                    payload={
+                        "requested_path": str(requested_path),
+                        "resolved_path": str(requested_path),
+                        "created_new_file": False,
+                        "created_versioned_file": False,
+                        "overwrite_applied": False,
+                        "file_already_exists": True,
+                        "collision_policy_explicitly_requested": (
+                            collision_policy_explicitly_requested
+                        ),
+                        "collision_policy_applied": collision_policy,
+                        "reused_existing_file": True,
+                        "size_chars": len(content),
+                    },
+                )
             resolved_path = _generate_versioned_path(requested_path)
             created_versioned_file = True
             overwrite_applied = False
@@ -660,9 +690,25 @@ def write_text_file(
                 collision_policy_explicitly_requested
             ),
             "collision_policy_applied": collision_policy,
+            "reused_existing_file": False,
             "size_chars": len(content),
         },
     )
+
+
+def _existing_text_file_matches_requested_content(
+    *,
+    requested_path: Path,
+    requested_content: str,
+) -> bool:
+    """Return True when the existing target already contains the same text."""
+    if not requested_path.is_file():
+        return False
+    try:
+        existing_content = requested_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return existing_content == requested_content
 
 
 def _generate_versioned_path(path: Path) -> Path:

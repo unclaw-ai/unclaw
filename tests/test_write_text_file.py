@@ -318,6 +318,60 @@ def test_write_text_file_version_policy_structured_outcome(tmp_path: Path) -> No
     assert result.payload is not None
     assert result.payload["requested_path"] == str(target)
     assert result.payload["resolved_path"] != str(target)
+
+
+def test_write_text_file_reuses_existing_file_for_same_mission_deliverable(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("same content", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={
+            "path": str(target),
+            "content": "same content",
+            "collision_policy": "version",
+            "mission_id": "mission-123",
+            "mission_deliverable_id": "d1",
+        },
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["resolved_path"] == str(target)
+    assert result.payload["created_new_file"] is False
+    assert result.payload["created_versioned_file"] is False
+    assert result.payload["reused_existing_file"] is True
+    assert target.read_text(encoding="utf-8") == "same content"
+    assert len(list(tmp_path.glob("note*.txt"))) == 1
+
+
+def test_write_text_file_versions_when_same_mission_deliverable_needs_new_content(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("old content", encoding="utf-8")
+
+    call = ToolCall(
+        tool_name="write_text_file",
+        arguments={
+            "path": str(target),
+            "content": "new content",
+            "collision_policy": "version",
+            "mission_id": "mission-123",
+            "mission_deliverable_id": "d1",
+        },
+    )
+    result = write_text_file(call, allowed_roots=(tmp_path,))
+
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["resolved_path"] != str(target)
+    assert result.payload["created_versioned_file"] is True
+    assert result.payload["reused_existing_file"] is False
+    assert target.read_text(encoding="utf-8") == "old content"
     assert result.payload["created_new_file"] is True
     assert result.payload["created_versioned_file"] is True
     assert result.payload["overwrite_applied"] is False

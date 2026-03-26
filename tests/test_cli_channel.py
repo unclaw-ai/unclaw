@@ -1288,7 +1288,7 @@ def test_cli_buffers_provisional_find_then_delete_draft_until_final_reply(
                     message.content
                     for message in messages
                     if message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Task completion check:")
+                    and message.content.startswith("Mission continuation check:")
                 )
                 assert '"phase_checkpoint_required": true' in checkpoint_note
                 return LLMResponse(
