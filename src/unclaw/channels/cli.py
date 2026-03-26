@@ -37,6 +37,7 @@ from unclaw.startup import (
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 
 _TOOL_CALL_ARGUMENT_CHAR_LIMIT = 200
+_HIDDEN_TOOL_ARGUMENT_NAMES = frozenset({"mission_id", "mission_deliverable_id"})
 
 
 @dataclass(slots=True)
@@ -304,7 +305,6 @@ def run_cli(
             session_id=session.id,
         )
         assistant_stream = _TerminalAssistantStream()
-        assistant_stream.suppress_live_output()
         assistant_reply = run_user_turn(
             session_manager=session_manager,
             command_handler=command_handler,
@@ -319,6 +319,7 @@ def run_cli(
                     ),
                 )
             ),
+            mission_event_callback=assistant_stream.render_status,
         )
         assistant_stream.finish(assistant_reply)
         _refresh_session_summary(
@@ -452,12 +453,24 @@ def _build_tool_call_visibility_line(
     *,
     skill_id: str | None = None,
 ) -> str:
-    rendered_arguments = _format_tool_call_arguments(tool_call.arguments)
+    rendered_arguments = _format_tool_call_arguments(
+        _sanitize_tool_call_arguments(tool_call.arguments)
+    )
     prefix = f"skill:{skill_id}" if skill_id else "tool"
     raw_line = f"[{prefix}] {tool_call.tool_name} {rendered_arguments}"
     if _should_use_color():
         return _style_text(raw_line, "dim", True)
     return raw_line
+
+
+def _sanitize_tool_call_arguments(arguments: object) -> object:
+    if not isinstance(arguments, dict):
+        return arguments
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key not in _HIDDEN_TOOL_ARGUMENT_NAMES
+    }
 
 
 def _format_tool_call_arguments(arguments: object) -> str:

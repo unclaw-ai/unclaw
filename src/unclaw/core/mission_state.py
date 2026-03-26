@@ -14,16 +14,19 @@ _MAX_MISSION_ID_CHARS = 64
 _MAX_MISSION_GOAL_CHARS = 240
 _MAX_ACTIVE_TASK_CHARS = 120
 _MAX_BLOCKER_CHARS = 200
+_MAX_PLANNER_SUMMARY_CHARS = 200
 _MAX_DELIVERABLE_ID_CHARS = 48
 _MAX_TASK_CHARS = 120
 _MAX_DELIVERABLE_CHARS = 160
 _MAX_VERIFICATION_CHARS = 160
 _MAX_MISSING_CHARS = 200
 _MAX_HISTORY_ITEM_CHARS = 160
+_MAX_WORKING_MEMORY_ITEM_CHARS = 200
 _MAX_PATH_CHARS = 240
 _MAX_EVIDENCE_CHARS = 200
 _MAX_DELIVERABLES = 4
 _MAX_HISTORY_ENTRIES = 6
+_MAX_WORKING_MEMORY_ITEMS = 6
 _MAX_ARTIFACT_PATHS = 4
 _MAX_EVIDENCE_ITEMS = 4
 
@@ -65,6 +68,15 @@ class MissionState:
     last_successful_evidence: tuple[str, ...]
     last_blocker: str | None
     updated_at: str
+    planner_summary: str | None = None
+    execution_queue: tuple[str, ...] = ()
+    completed_steps: tuple[str, ...] = ()
+    failed_steps: tuple[str, ...] = ()
+    observed_facts: tuple[str, ...] = ()
+    artifact_facts: tuple[str, ...] = ()
+    blockers: tuple[str, ...] = ()
+    pending_repairs: tuple[str, ...] = ()
+    final_deliverables_missing: tuple[str, ...] = ()
 
     def get_deliverable(
         self,
@@ -241,6 +253,51 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
             max_chars=_MAX_BLOCKER_CHARS,
         ),
         updated_at=_normalize_timestamp(mission_state.updated_at),
+        planner_summary=_normalize_text(
+            mission_state.planner_summary,
+            field_name="planner_summary",
+            max_chars=_MAX_PLANNER_SUMMARY_CHARS,
+        ),
+        execution_queue=_normalize_text_items(
+            mission_state.execution_queue,
+            max_items=_MAX_DELIVERABLES,
+            max_chars=_MAX_DELIVERABLE_ID_CHARS,
+        ),
+        completed_steps=_normalize_text_items(
+            mission_state.completed_steps,
+            max_items=_MAX_DELIVERABLES,
+            max_chars=_MAX_DELIVERABLE_ID_CHARS,
+        ),
+        failed_steps=_normalize_text_items(
+            mission_state.failed_steps,
+            max_items=_MAX_DELIVERABLES,
+            max_chars=_MAX_DELIVERABLE_ID_CHARS,
+        ),
+        observed_facts=_normalize_text_items(
+            mission_state.observed_facts,
+            max_items=_MAX_WORKING_MEMORY_ITEMS,
+            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
+        ),
+        artifact_facts=_normalize_text_items(
+            mission_state.artifact_facts,
+            max_items=_MAX_WORKING_MEMORY_ITEMS,
+            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
+        ),
+        blockers=_normalize_text_items(
+            mission_state.blockers,
+            max_items=_MAX_WORKING_MEMORY_ITEMS,
+            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
+        ),
+        pending_repairs=_normalize_text_items(
+            mission_state.pending_repairs,
+            max_items=_MAX_WORKING_MEMORY_ITEMS,
+            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
+        ),
+        final_deliverables_missing=_normalize_text_items(
+            mission_state.final_deliverables_missing,
+            max_items=_MAX_DELIVERABLES,
+            max_chars=_MAX_DELIVERABLE_ID_CHARS,
+        ),
     )
 
 
@@ -354,6 +411,17 @@ def serialize_mission_state(mission_state: MissionState) -> str:
             "last_successful_evidence": list(normalized.last_successful_evidence),
             "last_blocker": normalized.last_blocker,
             "updated_at": normalized.updated_at,
+            "planner_summary": normalized.planner_summary,
+            "execution_queue": list(normalized.execution_queue),
+            "completed_steps": list(normalized.completed_steps),
+            "failed_steps": list(normalized.failed_steps),
+            "observed_facts": list(normalized.observed_facts),
+            "artifact_facts": list(normalized.artifact_facts),
+            "blockers": list(normalized.blockers),
+            "pending_repairs": list(normalized.pending_repairs),
+            "final_deliverables_missing": list(
+                normalized.final_deliverables_missing
+            ),
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -410,6 +478,17 @@ def parse_mission_state(payload_json: str) -> MissionState | None:
                 ),
                 last_blocker=_coerce_optional_str(parsed.get("last_blocker")),
                 updated_at=_coerce_required_str(parsed.get("updated_at")),
+                planner_summary=_coerce_optional_str(parsed.get("planner_summary")),
+                execution_queue=_coerce_str_tuple(parsed.get("execution_queue")),
+                completed_steps=_coerce_str_tuple(parsed.get("completed_steps")),
+                failed_steps=_coerce_str_tuple(parsed.get("failed_steps")),
+                observed_facts=_coerce_str_tuple(parsed.get("observed_facts")),
+                artifact_facts=_coerce_str_tuple(parsed.get("artifact_facts")),
+                blockers=_coerce_str_tuple(parsed.get("blockers")),
+                pending_repairs=_coerce_str_tuple(parsed.get("pending_repairs")),
+                final_deliverables_missing=_coerce_str_tuple(
+                    parsed.get("final_deliverables_missing")
+                ),
             )
         )
     except (TypeError, ValueError):
@@ -540,4 +619,3 @@ def _normalize_timestamp(value: str) -> str:
     if not normalized:
         raise ValueError("updated_at is required.")
     return normalized
-

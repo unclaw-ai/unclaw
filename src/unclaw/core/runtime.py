@@ -7,10 +7,11 @@ from dataclasses import replace
 from time import perf_counter
 
 import unclaw.core.agent_loop as _agent_loop
-import unclaw.core.mission_runner as _mission_runner
+import unclaw.core.agent_kernel as _agent_kernel
 from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
+from unclaw.core.mission_workspace import build_compatibility_mission_state
 from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
@@ -46,6 +47,7 @@ def run_user_turn(
     explicit_tool_call: ToolCall | None = None,
     assistant_reply_transform: Callable[[str], str] | None = None,
     tool_call_callback: Callable[[ToolCall], None] | None = None,
+    mission_event_callback: Callable[[str], None] | None = None,
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: _agent_loop.RuntimeTurnCancellation | None = None,
 ) -> str:
@@ -116,9 +118,12 @@ def run_user_turn(
     pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
     pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
     pre_turn_mission_state = session_manager.get_current_mission_state(session.id)
-    mission_context_state = pre_turn_mission_state
-    if mission_context_state is None and pre_turn_goal_state is not None:
-        mission_context_state = _mission_runner.build_compat_mission_state_from_legacy_goal_state(
+    resume_kernel_mission = _agent_kernel.should_resume_mission_in_kernel(
+        pre_turn_mission_state
+    )
+    compatibility_mission_state = None
+    if (pre_turn_mission_state is None or not resume_kernel_mission) and pre_turn_goal_state is not None:
+        compatibility_mission_state = build_compatibility_mission_state(
             legacy_goal_state=pre_turn_goal_state,
             legacy_progress_ledger=pre_turn_progress_ledger,
         )
@@ -165,10 +170,12 @@ def run_user_turn(
             command_handler=command_handler,
             session_id=session.id,
         )
-        task_continuity_note = _runtime_support._build_session_task_continuity_note(
-            session_manager=session_manager,
-            session_id=session.id,
-        )
+        task_continuity_note = None
+        if not resume_kernel_mission:
+            task_continuity_note = _runtime_support._build_session_task_continuity_note(
+                session_manager=session_manager,
+                session_id=session.id,
+            )
         local_access_note = _runtime_support._build_local_access_control_note(
             command_handler=command_handler,
         )
@@ -185,6 +192,45 @@ def run_user_turn(
 
         responder_tool_definitions = legacy_tool_definitions
         responder_capability_summary = capability_summary
+
+        if (
+            assistant_reply is None
+            and resume_kernel_mission
+            and pre_turn_mission_state is not None
+            and responder_tool_definitions
+            and max_agent_steps > 0
+        ):
+            if orchestrator is None:
+                orchestrator = Orchestrator(
+                    settings=session_manager.settings,
+                    session_manager=session_manager,
+                    tracer=active_tracer,
+                )
+            mission_result = _agent_kernel.run_agent_kernel_turn(
+                session_manager=session_manager,
+                session_id=session.id,
+                user_input=user_input,
+                orchestrator=orchestrator,
+                tracer=active_tracer,
+                tool_registry=active_tool_registry,
+                tool_definitions=responder_tool_definitions,
+                model_profile_name=selected_model_profile_name,
+                thinking_enabled=thinking_enabled,
+                capability_summary=responder_capability_summary,
+                system_context_notes=system_context_notes,
+                max_steps=max_agent_steps,
+                tool_guard_state=tool_guard_state,
+                tool_call_callback=tool_call_callback,
+                mission_event_callback=mission_event_callback,
+                content_callback=_effective_stream_func,
+                first_response=None,
+                existing_mission_state=pre_turn_mission_state,
+                compatibility_mission_state=None,
+            )
+            turn_tool_results = list(mission_result.tool_results)
+            assistant_reply = mission_result.assistant_reply
+            mission_execution_used = True
+            mission_execution_persisted = mission_result.persisted
 
         if runtime_explicit_tool_call is not None and responder_tool_definitions is None:
             assistant_reply = _agent_loop._preflight_runtime_tool_batch(
@@ -349,12 +395,14 @@ def run_user_turn(
                 initial_stream_chunks.clear()
 
             if assistant_reply is None:
+                planner_seed_response: OrchestratorTurnResult | None = None
                 response, assistant_reply, no_tool_execution_claim_risk_assessment = (
                     _run_responder_turn(
                         system_notes=system_context_notes,
                         content_callback=initial_content_callback,
                     )
                 )
+                planner_seed_response = response
 
                 if (
                     assistant_reply is None
@@ -388,40 +436,29 @@ def run_user_turn(
                 elif assistant_reply is None and not response.response.tool_calls:
                     _flush_initial_stream_chunks()
 
-                # --- Legacy native tool loop fallback ---
-                def _response_starts_with_mission_file_tool_call(
-                    turn_result: OrchestratorTurnResult,
-                ) -> bool:
-                    if not turn_result.response.tool_calls:
-                        return False
-                    return any(
-                        tool_call.tool_name == "write_text_file"
-                        for tool_call in turn_result.response.tool_calls
-                    )
+                planner_first_response = response
+                if (
+                    no_tool_execution_claim_risk_assessment is not None
+                    and planner_seed_response is not None
+                    and not planner_seed_response.response.tool_calls
+                ):
+                    planner_first_response = planner_seed_response
 
+                kernel_plan = None
                 if (
                     assistant_reply is None
                     and responder_tool_definitions
                     and max_agent_steps > 0
                     and (
                         (
-                            mission_context_state is not None
-                            and mission_context_state.status == "active"
-                            and (
-                                bool(response.response.tool_calls)
-                                or (
-                                    no_tool_execution_claim_risk_assessment is not None
-                                    and (
-                                        no_tool_execution_claim_risk_assessment.completion_without_execution_risk
-                                        or no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
-                                    )
-                                )
+                            bool(response.response.tool_calls)
+                            and _agent_kernel._response_has_local_write_tool_call(
+                                response=response,
+                                tool_definitions=responder_tool_definitions,
                             )
                         )
-                        or _response_starts_with_mission_file_tool_call(response)
                         or (
                             no_tool_execution_claim_risk_assessment is not None
-                            and pre_turn_goal_state is None
                             and (
                                 no_tool_execution_claim_risk_assessment.completion_without_execution_risk
                                 or no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
@@ -429,7 +466,34 @@ def run_user_turn(
                         )
                     )
                 ):
-                    mission_result = _mission_runner.run_mission_turn(
+                    kernel_plan = _agent_kernel.plan_mission_turn(
+                        session_manager=session_manager,
+                        session_id=session.id,
+                        user_input=user_input,
+                        orchestrator=orchestrator,
+                        tracer=active_tracer,
+                        model_profile_name=selected_model_profile_name,
+                        thinking_enabled=thinking_enabled,
+                        tool_definitions=responder_tool_definitions,
+                        first_response=planner_first_response,
+                        existing_mission_state=None,
+                        compatibility_mission_state=compatibility_mission_state,
+                    )
+
+                if (
+                    assistant_reply is None
+                    and kernel_plan is not None
+                    and kernel_plan.should_use_kernel
+                    and kernel_plan.degraded_reply is not None
+                ):
+                    assistant_reply = kernel_plan.degraded_reply
+                elif (
+                    assistant_reply is None
+                    and kernel_plan is not None
+                    and kernel_plan.should_use_kernel
+                    and kernel_plan.plan_decision is not None
+                ):
+                    mission_result = _agent_kernel.run_agent_kernel_turn(
                         first_response=response,
                         session_manager=session_manager,
                         tool_definitions=responder_tool_definitions,
@@ -440,10 +504,16 @@ def run_user_turn(
                         user_input=user_input,
                         model_profile_name=selected_model_profile_name,
                         thinking_enabled=thinking_enabled,
+                        capability_summary=responder_capability_summary,
+                        system_context_notes=system_context_notes,
                         max_steps=max_agent_steps,
                         tool_guard_state=tool_guard_state,
                         tool_call_callback=tool_call_callback,
-                        initial_mission_state=mission_context_state,
+                        mission_event_callback=mission_event_callback,
+                        content_callback=_effective_stream_func,
+                        existing_mission_state=None,
+                        compatibility_mission_state=compatibility_mission_state,
+                        planned_decision=kernel_plan.plan_decision,
                     )
                     turn_tool_results = list(mission_result.tool_results)
                     assistant_reply = mission_result.assistant_reply

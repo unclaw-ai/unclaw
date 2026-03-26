@@ -239,6 +239,32 @@ class SessionManager:
             resolved_session_id,
             _SESSION_GOAL_STATE_EVENT_TYPE,
         )
+        mission_state: MissionState | None = None
+        if mission_row is not None:
+            payload_json = mission_row["payload_json"]
+            if isinstance(payload_json, str):
+                mission_state = parse_mission_state(payload_json)
+
+        if goal_row is not None and not _mission_projection_should_dominate(mission_state):
+            payload_json = goal_row["payload_json"]
+            if isinstance(payload_json, str):
+                goal_state = _parse_session_goal_state(payload_json)
+                if goal_state is not None:
+                    return goal_state
+
+        if (
+            mission_row is not None
+            and (
+                goal_row is None
+                or (
+                    isinstance(mission_row["created_at"], str)
+                    and isinstance(goal_row["created_at"], str)
+                    and mission_row["created_at"] > goal_row["created_at"]
+                )
+            )
+        ):
+            if mission_state is not None:
+                return _project_session_goal_state_from_mission(mission_state)
 
         if goal_row is not None:
             payload_json = goal_row["payload_json"]
@@ -318,6 +344,32 @@ class SessionManager:
             resolved_session_id,
             _SESSION_PROGRESS_LEDGER_EVENT_TYPE,
         )
+        mission_state: MissionState | None = None
+        if mission_row is not None:
+            payload_json = mission_row["payload_json"]
+            if isinstance(payload_json, str):
+                mission_state = parse_mission_state(payload_json)
+
+        if ledger_row is not None and not _mission_projection_should_dominate(mission_state):
+            payload_json = ledger_row["payload_json"]
+            if isinstance(payload_json, str):
+                ledger = _parse_session_progress_ledger(payload_json)
+                if ledger:
+                    return ledger
+
+        if (
+            mission_row is not None
+            and (
+                ledger_row is None
+                or (
+                    isinstance(mission_row["created_at"], str)
+                    and isinstance(ledger_row["created_at"], str)
+                    and mission_row["created_at"] > ledger_row["created_at"]
+                )
+            )
+        ):
+            if mission_state is not None:
+                return _project_session_progress_ledger_from_mission(mission_state)
 
         if ledger_row is not None:
             payload_json = ledger_row["payload_json"]
@@ -683,6 +735,21 @@ def _project_session_goal_state_from_mission(
         current_step=current_step,
         last_blocker=last_blocker,
         updated_at=mission_state.updated_at,
+    )
+
+
+def _mission_projection_should_dominate(mission_state: MissionState | None) -> bool:
+    if mission_state is None:
+        return False
+    if len(mission_state.deliverables) > 1:
+        return True
+    return bool(
+        mission_state.retry_history
+        or mission_state.repair_history
+        or (
+            mission_state.status != "completed"
+            and mission_state.pending_repairs
+        )
     )
 
 

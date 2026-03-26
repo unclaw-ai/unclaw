@@ -16,21 +16,25 @@ _MISSION_PROGRESS_NOTE_PREFIX = "Mission progress check:"
 _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
     (
         "Mission planner for the Unclaw local agent runtime.",
-        "Plan only from the user's request plus any persisted mission state.",
+        "Plan only from the user's request plus the compact persisted mission workspace.",
         "Hard rules:",
         "- Mission means the full user-requested outcome across one or more steps and turns.",
         "- Task means one concrete sub-objective inside that mission.",
-        "- Deliverables must be concrete and verifiable.",
+        "- Deliverables must be concrete, compact, and verifiable.",
         "- Keep the plan compact for local models: at most 4 deliverables.",
-        "- Use the existing mission when the user is continuing, repairing, resuming, or asking mission status for the same outcome.",
+        "- Use the actual existing mission when the user is continuing, repairing, resuming, or asking mission status for the same outcome.",
+        "- `compatibility_mission_state` is weak legacy context only. Do not continue it unless the user is clearly asking for that same old mission and no newer actual mission exists.",
         "- Start a new mission only when the user is clearly asking for a different outcome.",
         "- If the request can be answered honestly in one reply with no durable execution, choose direct_reply_only.",
+        "- Do not collapse a compound mission into one generic deliverable unless the user's request truly has only one deliverable.",
+        "- Do not rewrite a deliverable into a tool name.",
         "Return JSON only with this shape:",
         (
             '{"mission_action":"start_new|continue_existing|direct_reply_only",'
             '"mission_goal":"...",'
             '"deliverables":[{"id":"d1","task":"...","deliverable":"...",'
-            '"verification":"..."}],'
+            '"verification":"...","depends_on":["d0"]}],'
+            '"execution_queue":["d1"],'
             '"active_deliverable_id":"d1",'
             '"summary":"..."}'
         ),
@@ -47,6 +51,7 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
         "- If a timeout or failure can still be repaired within budget, keep the mission active and say what is missing.",
         "- If retry budget is exhausted or a blocker is unrecoverable from the given facts, mark the mission blocked.",
         "- If an existing file might already satisfy the active deliverable but it is not verified yet, keep the mission active and request a verification read in notes_for_next_step.",
+        "- Do not mark the mission completed while any final_deliverables_missing item remains.",
         "Return JSON only with this shape:",
         (
             '{"mission_status":"active|blocked|completed",'
@@ -56,7 +61,9 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
             '"blocker":"...",'
             '"artifact_paths":["..."],'
             '"evidence":["..."],'
+            '"final_deliverables_missing":["d2"],'
             '"next_action":"continue|final_reply|blocked_reply",'
+            '"repair_strategy":"...",'
             '"notes_for_next_step":"...",'
             '"assistant_reply":"..."}'
         ),
@@ -73,6 +80,7 @@ class MissionPlanDecision:
     deliverables: tuple[MissionDeliverableState, ...]
     active_deliverable_id: str | None
     summary: str
+    execution_queue: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,12 +97,15 @@ class MissionVerificationDecision:
     next_action: str
     notes_for_next_step: str | None
     assistant_reply: str | None
+    final_deliverables_missing: tuple[str, ...] = ()
+    repair_strategy: str | None = None
 
 
 def build_mission_plan_messages(
     *,
     user_input: str,
     existing_mission_state: MissionState | None,
+    compatibility_mission_state: MissionState | None,
     first_response: Any | None,
     available_tool_names: Sequence[str],
 ) -> tuple[LLMMessage, ...]:
@@ -106,6 +117,11 @@ def build_mission_plan_messages(
         "existing_mission_state": (
             _serialize_mission_state(existing_mission_state)
             if existing_mission_state is not None
+            else None
+        ),
+        "compatibility_mission_state": (
+            _serialize_mission_state(compatibility_mission_state)
+            if compatibility_mission_state is not None
             else None
         ),
         "first_response_summary": _serialize_first_response(first_response),
@@ -144,6 +160,7 @@ def parse_mission_plan_response(
 
     mission_goal = _read_optional_text(payload.get("mission_goal"))
     summary = _read_optional_text(payload.get("summary")) or "mission plan prepared"
+    execution_queue = _read_text_list(payload.get("execution_queue"))
     deliverables_payload = payload.get("deliverables")
     if not isinstance(deliverables_payload, list):
         return None
@@ -179,11 +196,16 @@ def parse_mission_plan_response(
     active_deliverable_id = _read_optional_text(payload.get("active_deliverable_id"))
     if active_deliverable_id is None and deliverables:
         active_deliverable_id = deliverables[0].deliverable_id
+    if not execution_queue:
+        execution_queue = tuple(
+            deliverable.deliverable_id for deliverable in deliverables
+        )
 
     return MissionPlanDecision(
         mission_action=mission_action,
         mission_goal=mission_goal,
         deliverables=tuple(deliverables),
+        execution_queue=execution_queue,
         active_deliverable_id=active_deliverable_id,
         summary=summary,
     )
@@ -264,7 +286,11 @@ def parse_mission_verification_response(
         blocker=_read_optional_text(payload.get("blocker")),
         artifact_paths=_read_text_list(payload.get("artifact_paths")),
         evidence=_read_text_list(payload.get("evidence")),
+        final_deliverables_missing=_read_text_list(
+            payload.get("final_deliverables_missing")
+        ),
         next_action=next_action,
+        repair_strategy=_read_optional_text(payload.get("repair_strategy")),
         notes_for_next_step=_read_optional_text(payload.get("notes_for_next_step")),
         assistant_reply=_read_optional_text(payload.get("assistant_reply")),
     )
@@ -288,6 +314,8 @@ def build_mission_progress_note(
         "blocker": verification_decision.blocker,
         "artifact_paths": verification_decision.artifact_paths,
         "evidence": verification_decision.evidence,
+        "final_deliverables_missing": verification_decision.final_deliverables_missing,
+        "repair_strategy": verification_decision.repair_strategy,
         "notes_for_next_step": verification_decision.notes_for_next_step,
         "latest_tool_results": tuple(
             _serialize_tool_result(tool_result) for tool_result in latest_tool_results
@@ -348,6 +376,15 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "active_task": mission_state.active_task,
         "completed_deliverables": mission_state.completed_deliverables,
         "blocked_deliverables": mission_state.blocked_deliverables,
+        "execution_queue": mission_state.execution_queue,
+        "completed_steps": mission_state.completed_steps,
+        "failed_steps": mission_state.failed_steps,
+        "observed_facts": mission_state.observed_facts,
+        "artifact_facts": mission_state.artifact_facts,
+        "blockers": mission_state.blockers,
+        "pending_repairs": mission_state.pending_repairs,
+        "final_deliverables_missing": mission_state.final_deliverables_missing,
+        "planner_summary": mission_state.planner_summary,
         "deliverables": tuple(
             {
                 "deliverable_id": deliverable.deliverable_id,
@@ -458,4 +495,3 @@ def _read_text_list(value: Any) -> tuple[str, ...]:
         if normalized is not None:
             items.append(normalized)
     return tuple(items)
-

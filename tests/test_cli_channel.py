@@ -18,7 +18,10 @@ from unclaw.settings import load_settings
 from unclaw.tools.file_tools import (
     DELETE_FILE_DEFINITION,
     LIST_DIRECTORY_DEFINITION,
+    READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
+    read_text_file,
+    write_text_file,
 )
 from unclaw.tools.contracts import (
     ToolCall,
@@ -1369,3 +1372,262 @@ def test_cli_buffers_provisional_find_then_delete_draft_until_final_reply(
     assert "Unclaw> The file was not deleted because confirmation was required." in output
     assert '[tool] delete_file {"path": "' in output
     assert "[answer refined]" not in output
+
+
+def test_cli_shows_live_mission_progress_lines_for_kernel_turn(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    capsys,
+) -> None:
+    project_root = make_temp_project()
+    settings = load_settings(project_root=project_root)
+    set_profile_tool_mode(settings, "main", tool_mode="native")
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(
+            build_or_refresh_session_summary=lambda _session_id: None
+        ),
+    )
+    output_path = settings.paths.files_dir / "cli-kernel-note.txt"
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: write_text_file(
+            call,
+            allowed_roots=(settings.paths.project_root,),
+            default_write_dir=settings.paths.files_dir,
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: read_text_file(
+            call,
+            read_allowed_roots=(settings.paths.project_root,),
+            default_read_dir=settings.paths.files_dir,
+        ),
+    )
+
+    class FakeProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, tools
+            if messages and messages[0].role is LLMRole.SYSTEM and messages[
+                0
+            ].content.startswith("Grounded reply finalizer for one runtime turn."):
+                payload = json.loads(messages[-1].content)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {"final_reply": payload["assistant_draft_reply"]},
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:05Z",
+                    finish_reason="stop",
+                )
+
+            if messages and messages[0].role is LLMRole.SYSTEM and messages[
+                0
+            ].content.startswith("Mission planner for the Unclaw local agent runtime."):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "start_new",
+                            "mission_goal": "Write the note and finish with a joke.",
+                            "deliverables": [
+                                {
+                                    "id": "d1",
+                                    "task": "Write the local note",
+                                    "deliverable": "Local note file",
+                                    "verification": "The file is written and read back.",
+                                },
+                                {
+                                    "id": "d2",
+                                    "task": "Tell the final joke",
+                                    "deliverable": "Final joke reply",
+                                    "verification": "The joke is present in the final reply.",
+                                },
+                            ],
+                            "execution_queue": ["d1", "d2"],
+                            "active_deliverable_id": "d1",
+                            "summary": "cli kernel mission",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:01Z",
+                    finish_reason="stop",
+                )
+
+            if messages and messages[0].role is LLMRole.SYSTEM and messages[
+                0
+            ].content.startswith("Mission step verifier for the Unclaw local agent runtime."):
+                payload = json.loads(messages[-1].content)
+                latest_tool_results = payload.get("latest_tool_results", [])
+                draft_reply = payload.get("draft_reply", "")
+                if latest_tool_results:
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "active",
+                                "active_deliverable_id": "d2",
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [str(output_path)],
+                                "evidence": [],
+                                "final_deliverables_missing": ["d2"],
+                                "next_action": "continue",
+                                "repair_strategy": None,
+                                "notes_for_next_step": "Finish with the requested joke.",
+                                "assistant_reply": None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T11:00:03Z",
+                        finish_reason="stop",
+                    )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_status": "completed",
+                            "active_deliverable_id": None,
+                            "current_deliverable_status": "completed",
+                            "missing": None,
+                            "blocker": None,
+                            "artifact_paths": [str(output_path)],
+                            "evidence": [],
+                            "final_deliverables_missing": [],
+                            "next_action": "final_reply",
+                            "repair_strategy": None,
+                            "notes_for_next_step": None,
+                            "assistant_reply": draft_reply,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:05Z",
+                    finish_reason="stop",
+                )
+
+            if not any(message.role is LLMRole.TOOL for message in messages):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content="",
+                    created_at="2026-03-26T11:00:00Z",
+                    finish_reason="stop",
+                    tool_calls=(
+                        ToolCall(
+                            tool_name="write_text_file",
+                            arguments={
+                                "path": str(output_path),
+                                "content": "cli kernel note",
+                            },
+                        ),
+                    ),
+                    raw_payload={
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "function": {
+                                        "name": "write_text_file",
+                                        "arguments": {
+                                            "path": str(output_path),
+                                            "content": "cli kernel note",
+                                        },
+                                    }
+                                }
+                            ],
+                        }
+                    },
+                )
+
+            reply = "Note saved. Joke: The CLI found the live kernel."
+            if content_callback is not None:
+                content_callback(reply)
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=reply,
+                created_at="2026-03-26T11:00:04Z",
+                finish_reason="stop",
+            )
+
+        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+            del timeout_seconds
+            return True
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+    monkeypatch.setattr(
+        "unclaw.core.runtime.create_default_tool_registry",
+        lambda settings_arg, session_manager=None: tool_registry,
+    )
+
+    scripted_inputs = iter(["Write a local note and finish with a joke."])
+
+    def fake_input(_prompt: str) -> str:
+        try:
+            return next(scripted_inputs)
+        except StopIteration as exc:
+            raise EOFError from exc
+
+    monkeypatch.setattr("builtins.input", fake_input)
+
+    try:
+        exit_code = run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            memory_manager=SimpleNamespace(
+                build_or_refresh_session_summary=lambda _session_id: None
+            ),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: None,
+                registry=tool_registry,
+            ),
+        )
+    finally:
+        session_manager.close()
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "[mission] planning" in output
+    assert "[mission] executing d1" in output
+    assert "[mission] verifying d1" in output
+    assert "[mission] completed d1" in output
+    assert "[mission] executing d2" in output
+    assert "[mission] finalizing" in output
+    assert '[tool] write_text_file {"content": "cli kernel note", "path": ' in output
+    assert "Unclaw> Note saved. Joke: The CLI found the live kernel." in output
