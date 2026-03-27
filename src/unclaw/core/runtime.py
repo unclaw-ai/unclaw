@@ -444,18 +444,45 @@ def run_user_turn(
                 ):
                     planner_first_response = planner_seed_response
 
+                # Kernel-first mission entry: evaluate mission planning
+                # when the initial response includes tool calls that
+                # may require durable kernel management.  Two cases:
+                #   1. The response itself has a local_write tool call
+                #      (e.g. write_text_file) — always enters the planner.
+                #   2. The response has a search-family tool call AND
+                #      write tools are available in the palette — enters
+                #      the planner because the search may be the first
+                #      step of a compound research→write mission.
+                # This avoids triggering the planner for unrelated tools
+                # (system_info, run_terminal_command, etc.) which would
+                # create unwanted mission state and overwrite goal state.
+                _SEARCH_FAMILY_TOOL_NAMES = frozenset(
+                    {"search_web", "fast_web_search"}
+                )
+                _response_has_search_family_call = any(
+                    tc.tool_name in _SEARCH_FAMILY_TOOL_NAMES
+                    for tc in (response.response.tool_calls or ())
+                )
+                _palette_has_local_write = (
+                    responder_tool_definitions is not None
+                    and any(
+                        td.permission_level.value == "local_write"
+                        for td in responder_tool_definitions
+                    )
+                )
                 kernel_plan = None
                 if (
                     assistant_reply is None
                     and responder_tool_definitions
                     and max_agent_steps > 0
                     and (
-                        (
-                            bool(response.response.tool_calls)
-                            and _agent_kernel._response_has_local_write_tool_call(
-                                response=response,
-                                tool_definitions=responder_tool_definitions,
-                            )
+                        _agent_kernel._response_has_local_write_tool_call(
+                            response=response,
+                            tool_definitions=responder_tool_definitions,
+                        )
+                        or (
+                            _response_has_search_family_call
+                            and _palette_has_local_write
                         )
                         or (
                             no_tool_execution_claim_risk_assessment is not None
@@ -493,6 +520,14 @@ def run_user_turn(
                     and kernel_plan.should_use_kernel
                     and kernel_plan.plan_decision is not None
                 ):
+                    # Compatibility containment: when starting a new
+                    # mission, do not leak blocked/active compatibility
+                    # state into the kernel.
+                    kernel_compat_state = (
+                        None
+                        if kernel_plan.plan_decision.mission_action == "start_new"
+                        else compatibility_mission_state
+                    )
                     mission_result = _agent_kernel.run_agent_kernel_turn(
                         first_response=response,
                         session_manager=session_manager,
@@ -512,7 +547,7 @@ def run_user_turn(
                         mission_event_callback=mission_event_callback,
                         content_callback=_effective_stream_func,
                         existing_mission_state=None,
-                        compatibility_mission_state=compatibility_mission_state,
+                        compatibility_mission_state=kernel_compat_state,
                         planned_decision=kernel_plan.plan_decision,
                     )
                     turn_tool_results = list(mission_result.tool_results)

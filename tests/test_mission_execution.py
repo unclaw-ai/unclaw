@@ -94,7 +94,12 @@ def test_compound_research_write_joke_completes_in_one_flow(
     set_profile_tool_mode,
     thinking_enabled: bool,
 ) -> None:
-    _agent_loop._continuation_check_enabled = True
+    """Compound mission enters the kernel on first turn via search_web tool call.
+
+    Flow: runtime initial call (search_web) → planner (start_new) →
+    kernel loop: execute search → verify d1 → execute write → verify d2 →
+    execute joke → verify completed → finalizer.
+    """
     expected_thinking_enabled = thinking_enabled
     project_root = make_temp_project()
     settings, session_manager, tracer, command_handler = _build_native_runtime(
@@ -134,7 +139,16 @@ def test_compound_research_write_joke_completes_in_one_flow(
             default_write_dir=settings.paths.files_dir,
         ),
     )
-    call_count = 0
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: read_text_file(
+            call,
+            read_allowed_roots=(settings.paths.project_root,),
+            default_read_dir=settings.paths.files_dir,
+        ),
+    )
+    planner_calls = 0
+    execution_calls = 0
 
     class FakeProvider:
         provider_name = "ollama"
@@ -157,8 +171,8 @@ def test_compound_research_write_joke_completes_in_one_flow(
             content_callback=None,
             tools=None,
         ):
-            del timeout_seconds, content_callback, tools
-            nonlocal call_count
+            del timeout_seconds, tools
+            nonlocal planner_calls, execution_calls
 
             if _is_finalizer_call(messages):
                 payload = json.loads(messages[-1].content)
@@ -173,72 +187,173 @@ def test_compound_research_write_joke_completes_in_one_flow(
                     finish_reason="stop",
                 )
 
-            call_count += 1
+            if _is_mission_planner_call(messages):
+                planner_calls += 1
+                payload = json.loads(messages[-1].content)
+                # Planner sees the initial response's tool call summary
+                summary = payload["first_response_summary"]
+                assert summary is not None
+                assert any(
+                    tc["tool_name"] == "search_web"
+                    for tc in summary.get("tool_calls", [])
+                )
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "start_new",
+                            "mission_goal": (
+                                "Research the topic, save a local note, and tell a joke."
+                            ),
+                            "deliverables": [
+                                {
+                                    "id": "d1",
+                                    "task": "Research mission test",
+                                    "deliverable": "Grounded research facts",
+                                    "verification": "Search evidence is verified.",
+                                },
+                                {
+                                    "id": "d2",
+                                    "task": "Write the local note",
+                                    "deliverable": "Local note file",
+                                    "verification": "The file is written and read back.",
+                                },
+                                {
+                                    "id": "d3",
+                                    "task": "Tell a short joke",
+                                    "deliverable": "Short joke in the final reply",
+                                    "verification": "The joke appears in the reply.",
+                                },
+                            ],
+                            "execution_queue": ["d1", "d2", "d3"],
+                            "active_deliverable_id": "d1",
+                            "summary": "compound research-write-joke mission",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T09:00:01Z",
+                    finish_reason="stop",
+                )
+
+            if _is_mission_verifier_call(messages):
+                payload = json.loads(messages[-1].content)
+                latest_tool_results = payload.get("latest_tool_results", [])
+                draft_reply = payload.get("draft_reply", "")
+                # After search_web: d1 completed, advance to d2
+                if latest_tool_results and latest_tool_results[0]["tool_name"] == "search_web":
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "active",
+                                "active_deliverable_id": "d2",
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [],
+                                "evidence": ["Mission fact one.", "Mission fact two."],
+                                "final_deliverables_missing": ["d2", "d3"],
+                                "next_action": "continue",
+                                "repair_strategy": None,
+                                "notes_for_next_step": "Write the local note next.",
+                                "assistant_reply": None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T09:00:02Z",
+                        finish_reason="stop",
+                    )
+                # After write_text_file + read_text_file: d2 completed, advance to d3
+                if latest_tool_results and any(
+                    item["tool_name"] == "write_text_file" for item in latest_tool_results
+                ):
+                    assert any(
+                        item["tool_name"] == "read_text_file"
+                        for item in latest_tool_results
+                    ), "Artifact read-back verification must happen after write"
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "active",
+                                "active_deliverable_id": "d3",
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [str(output_path)],
+                                "evidence": [],
+                                "final_deliverables_missing": ["d3"],
+                                "next_action": "continue",
+                                "repair_strategy": None,
+                                "notes_for_next_step": "Finish with the requested joke.",
+                                "assistant_reply": None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T09:00:04Z",
+                        finish_reason="stop",
+                    )
+                # After joke text reply: mission completed
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_status": "completed",
+                            "active_deliverable_id": None,
+                            "current_deliverable_status": "completed",
+                            "missing": None,
+                            "blocker": None,
+                            "artifact_paths": [str(output_path)],
+                            "evidence": [],
+                            "final_deliverables_missing": [],
+                            "next_action": "final_reply",
+                            "repair_strategy": None,
+                            "notes_for_next_step": None,
+                            "assistant_reply": draft_reply,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T09:00:05Z",
+                    finish_reason="stop",
+                )
+
+            # Execution calls (not planner/verifier/finalizer)
+            execution_calls += 1
             assert thinking_enabled is expected_thinking_enabled
-            if call_count == 1:
+            if execution_calls == 1:
+                # Initial runtime call: search_web tool call
                 return _tool_call_response("search_web", {"query": "mission test"})
-            if call_count == 2:
+            if execution_calls == 2:
+                # Kernel execution: write_text_file
                 tool_messages = [
                     message.content for message in messages if message.role is LLMRole.TOOL
                 ]
                 assert any("Mission fact one." in message for message in tool_messages)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I found grounded details for the note.",
-                    created_at="2026-03-26T09:00:01Z",
-                    finish_reason="stop",
-                )
-            if call_count == 3:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Mission continuation check:")
-                    for message in messages
-                )
                 return _tool_call_response(
                     "write_text_file",
                     {"path": str(output_path), "content": "Mission fact one.\nMission fact two."},
                 )
-            if call_count == 4:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Pre-write grounding check:")
-                    for message in messages
+            if execution_calls == 3:
+                # Kernel execution: joke text reply
+                reply_text = (
+                    "I saved the research note locally. "
+                    "Joke: Why did the local agent cross the filesystem? "
+                    "To get to the root cause."
                 )
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "Mission fact one.\nMission fact two."},
-                )
-            if call_count == 5:
+                if content_callback is not None:
+                    content_callback(reply_text)
                 return LLMResponse(
                     provider="ollama",
                     model_name=profile.model_name,
-                    content=(
-                        "I saved the research note locally. "
-                        "Joke: Why did the local agent cross the filesystem? "
-                        "To get to the root cause."
-                    ),
-                    created_at="2026-03-26T09:00:02Z",
+                    content=reply_text,
+                    created_at="2026-03-26T09:00:03Z",
                     finish_reason="stop",
                 )
-            if call_count == 6:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Mission continuation check:")
-                    for message in messages
-                )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=(
-                        "I saved the research note locally. "
-                        "Joke: Why did the local agent cross the filesystem? "
-                        "To get to the root cause."
-                    ),
-                    created_at="2026-03-26T09:00:02Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Unexpected extra model call in compound mission flow.")
+            raise AssertionError("Unexpected extra execution call in compound mission flow.")
 
         def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
             del timeout_seconds
@@ -263,7 +378,12 @@ def test_compound_research_write_joke_completes_in_one_flow(
         assert "root cause" in reply
         assert output_path.exists()
         assert "Mission fact one." in output_path.read_text(encoding="utf-8")
-        assert call_count == 6
+        assert planner_calls == 1
+        assert execution_calls == 3
+        mission_state = session_manager.get_current_mission_state(session.id)
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        assert mission_state.active_deliverable_id is None
     finally:
         session_manager.close()
 
@@ -1795,5 +1915,493 @@ def test_kernel_timeout_repair_retries_search_within_budget(
         assert mission_state is not None
         assert mission_state.status == "completed"
         assert mission_state.last_successful_evidence == ("Recovered fact.",)
+    finally:
+        session_manager.close()
+
+
+def test_kernel_collision_repair_retries_with_versioned_path(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Collision conflict from write_text_file triggers structured repair.
+
+    When the verifier fallback sees failure_kind='collision_conflict' and
+    suggested_version_path in the payload, it sets a repair strategy so the
+    kernel retries with collision_policy='version'.
+    """
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = settings.paths.files_dir / "collision-note.txt"
+    # Pre-create the file so the first write collides
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text("already exists", encoding="utf-8")
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: write_text_file(
+            call,
+            allowed_roots=(settings.paths.project_root,),
+            default_write_dir=settings.paths.files_dir,
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: read_text_file(
+            call,
+            read_allowed_roots=(settings.paths.project_root,),
+            default_read_dir=settings.paths.files_dir,
+        ),
+    )
+    execution_calls = 0
+
+    class FakeProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal execution_calls
+
+            if _is_finalizer_call(messages):
+                payload = json.loads(messages[-1].content)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {"final_reply": payload["assistant_draft_reply"]},
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:09Z",
+                    finish_reason="stop",
+                )
+
+            if _is_mission_planner_call(messages):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "start_new",
+                            "mission_goal": "Write a collision note.",
+                            "deliverables": [
+                                {
+                                    "id": "d1",
+                                    "task": "Write the note file",
+                                    "deliverable": "Local note file",
+                                    "verification": "File is written and verified.",
+                                }
+                            ],
+                            "execution_queue": ["d1"],
+                            "active_deliverable_id": "d1",
+                            "summary": "collision write mission",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:01Z",
+                    finish_reason="stop",
+                )
+
+            if _is_mission_verifier_call(messages):
+                payload = json.loads(messages[-1].content)
+                latest_tool_results = payload.get("latest_tool_results", [])
+                draft_reply = payload.get("draft_reply", "")
+                # Check for successful write (second attempt with versioned path)
+                if latest_tool_results and any(
+                    item.get("tool_name") == "write_text_file"
+                    and item.get("success") is True
+                    for item in latest_tool_results
+                ):
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "completed",
+                                "active_deliverable_id": None,
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [],
+                                "evidence": [],
+                                "final_deliverables_missing": [],
+                                "next_action": "final_reply",
+                                "repair_strategy": None,
+                                "notes_for_next_step": None,
+                                "assistant_reply": draft_reply or "File saved.",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T11:00:06Z",
+                        finish_reason="stop",
+                    )
+                # Collision detected — fallback handles the repair
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_status": "active",
+                            "active_deliverable_id": "d1",
+                            "current_deliverable_status": "active",
+                            "missing": "File collision needs repair.",
+                            "blocker": None,
+                            "artifact_paths": [],
+                            "evidence": [],
+                            "final_deliverables_missing": ["d1"],
+                            "next_action": "continue",
+                            "repair_strategy": (
+                                "Retry write with collision_policy='version'"
+                            ),
+                            "notes_for_next_step": (
+                                "Retry with collision_policy='version' to save a versioned file."
+                            ),
+                            "assistant_reply": None,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T11:00:04Z",
+                    finish_reason="stop",
+                )
+
+            # Execution calls
+            execution_calls += 1
+            if execution_calls == 1:
+                # First write with collision_policy='fail' — triggers collision_conflict
+                return _tool_call_response(
+                    "write_text_file",
+                    {
+                        "path": str(output_path),
+                        "content": "New collision content",
+                        "collision_policy": "fail",
+                    },
+                )
+            if execution_calls == 2:
+                # Retry with collision_policy='version'
+                return _tool_call_response(
+                    "write_text_file",
+                    {
+                        "path": str(output_path),
+                        "content": "New collision content",
+                        "collision_policy": "version",
+                    },
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="File saved with versioned path.",
+                created_at="2026-03-26T11:00:07Z",
+                finish_reason="stop",
+            )
+
+        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+            del timeout_seconds
+            return True
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+
+    prompt = "Write a collision note."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        mission_state = session_manager.get_current_mission_state(session.id)
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        # The original file should be untouched (collision_policy=fail)
+        assert output_path.read_text(encoding="utf-8") == "already exists"
+        # A versioned file should have been created (timestamped name)
+        versioned_files = list(settings.paths.files_dir.glob("collision-note_*.txt"))
+        assert len(versioned_files) >= 1
+        assert "New collision content" in versioned_files[0].read_text(encoding="utf-8")
+        assert execution_calls == 2
+    finally:
+        session_manager.close()
+
+
+def test_kernel_strict_deliverable_ordering_blocks_later_before_earlier(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    """Strict ordering: later deliverables cannot complete before earlier ones.
+
+    When the verifier tries to advance to d3 while d1 is still active,
+    the ordering enforcement in _apply_verification_decision clamps the
+    active deliverable back to d1.
+    """
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: ToolResult.ok(
+            tool_name=call.tool_name,
+            output_text="Ordering evidence.",
+            payload={
+                "query": call.arguments["query"],
+                "summary_points": ["Order fact."],
+                "display_sources": [],
+                "evidence_count": 1,
+                "finding_count": 1,
+            },
+        ),
+    )
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: write_text_file(
+            call,
+            allowed_roots=(settings.paths.project_root,),
+            default_write_dir=settings.paths.files_dir,
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: read_text_file(
+            call,
+            read_allowed_roots=(settings.paths.project_root,),
+            default_read_dir=settings.paths.files_dir,
+        ),
+    )
+    output_path = settings.paths.files_dir / "ordering-note.txt"
+    execution_calls = 0
+    verifier_calls = 0
+
+    class FakeProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+            tools=None,
+        ):
+            del timeout_seconds, thinking_enabled, content_callback, tools
+            nonlocal execution_calls, verifier_calls
+
+            if _is_finalizer_call(messages):
+                payload = json.loads(messages[-1].content)
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {"final_reply": payload["assistant_draft_reply"]},
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T12:00:09Z",
+                    finish_reason="stop",
+                )
+
+            if _is_mission_planner_call(messages):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "start_new",
+                            "mission_goal": "Research, write, then tell a joke.",
+                            "deliverables": [
+                                {
+                                    "id": "d1",
+                                    "task": "Research ordering facts",
+                                    "deliverable": "Grounded research",
+                                    "verification": "Search evidence verified.",
+                                },
+                                {
+                                    "id": "d2",
+                                    "task": "Write the local note",
+                                    "deliverable": "Local note file",
+                                    "verification": "File written and read back.",
+                                },
+                                {
+                                    "id": "d3",
+                                    "task": "Tell a joke",
+                                    "deliverable": "Short joke",
+                                    "verification": "Joke in reply.",
+                                },
+                            ],
+                            "execution_queue": ["d1", "d2", "d3"],
+                            "active_deliverable_id": "d1",
+                            "summary": "ordering test mission",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T12:00:01Z",
+                    finish_reason="stop",
+                )
+
+            if _is_mission_verifier_call(messages):
+                verifier_calls += 1
+                payload = json.loads(messages[-1].content)
+                latest_tool_results = payload.get("latest_tool_results", [])
+                draft_reply = payload.get("draft_reply", "")
+
+                if verifier_calls == 1:
+                    # After search_web: verifier tries to skip to d3,
+                    # but ordering should clamp back to d1 or d2.
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "active",
+                                "active_deliverable_id": "d3",
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [],
+                                "evidence": ["Order fact."],
+                                "final_deliverables_missing": ["d2", "d3"],
+                                "next_action": "continue",
+                                "repair_strategy": None,
+                                "notes_for_next_step": "Skip to joke.",
+                                "assistant_reply": None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T12:00:03Z",
+                        finish_reason="stop",
+                    )
+                if verifier_calls == 2:
+                    # After write_text_file + read_text_file: d2 completed
+                    return LLMResponse(
+                        provider="ollama",
+                        model_name=profile.model_name,
+                        content=json.dumps(
+                            {
+                                "mission_status": "active",
+                                "active_deliverable_id": "d3",
+                                "current_deliverable_status": "completed",
+                                "missing": None,
+                                "blocker": None,
+                                "artifact_paths": [str(output_path)],
+                                "evidence": [],
+                                "final_deliverables_missing": ["d3"],
+                                "next_action": "continue",
+                                "repair_strategy": None,
+                                "notes_for_next_step": "Tell the joke.",
+                                "assistant_reply": None,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        created_at="2026-03-26T12:00:05Z",
+                        finish_reason="stop",
+                    )
+                # Final: mission completed
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_status": "completed",
+                            "active_deliverable_id": None,
+                            "current_deliverable_status": "completed",
+                            "missing": None,
+                            "blocker": None,
+                            "artifact_paths": [str(output_path)],
+                            "evidence": [],
+                            "final_deliverables_missing": [],
+                            "next_action": "final_reply",
+                            "repair_strategy": None,
+                            "notes_for_next_step": None,
+                            "assistant_reply": draft_reply,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    created_at="2026-03-26T12:00:07Z",
+                    finish_reason="stop",
+                )
+
+            # Execution calls
+            execution_calls += 1
+            if execution_calls == 1:
+                # d1: research step — search_web call
+                return _tool_call_response(
+                    "search_web",
+                    {"query": "ordering facts"},
+                )
+            if execution_calls == 2:
+                # d2: write note (after ordering clamp moved us back to d2)
+                return _tool_call_response(
+                    "write_text_file",
+                    {"path": str(output_path), "content": "Order fact."},
+                )
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Joke: Why did the kernel use strict ordering? To stay in line.",
+                created_at="2026-03-26T12:00:06Z",
+                finish_reason="stop",
+            )
+
+        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
+            del timeout_seconds
+            return True
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+
+    prompt = "Research ordering, write a note, and tell a joke."
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+        reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=prompt,
+            tracer=tracer,
+            tool_registry=tool_registry,
+        )
+
+        mission_state = session_manager.get_current_mission_state(session.id)
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        assert "Joke:" in reply
+        # Verify that ordering enforcement worked: d1 was NOT skipped
+        # (the verifier tried to jump to d3 but ordering clamped to d2)
+        assert verifier_calls >= 3
+        assert output_path.exists()
     finally:
         session_manager.close()

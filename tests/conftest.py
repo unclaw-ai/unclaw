@@ -198,12 +198,32 @@ class ScriptedFakeOllamaProvider:
                     payload = parsed
 
         existing_mission = payload.get("existing_mission_state")
+        compatibility_mission = payload.get("compatibility_mission_state")
         user_input = payload.get("user_input")
-        mission_action = (
-            "continue_existing"
-            if isinstance(existing_mission, dict)
-            else "start_new"
+        first_response_summary = payload.get("first_response_summary")
+
+        # Determine mission action: continue_existing for active missions,
+        # direct_reply_only for simple single-tool turns (no existing
+        # mission, single search-family tool call), start_new otherwise.
+        _SEARCH_FAMILY = {"search_web", "fast_web_search"}
+        first_response_tool_calls = (
+            first_response_summary.get("tool_calls", [])
+            if isinstance(first_response_summary, dict)
+            else []
         )
+        _is_single_search_only = (
+            len(first_response_tool_calls) == 1
+            and isinstance(first_response_tool_calls[0], dict)
+            and first_response_tool_calls[0].get("tool_name") in _SEARCH_FAMILY
+        )
+        if isinstance(existing_mission, dict):
+            mission_action = "continue_existing"
+        elif _is_single_search_only:
+            # A single search-family tool call without an active mission
+            # does not need kernel management — let the agent loop handle it.
+            mission_action = "direct_reply_only"
+        else:
+            mission_action = "start_new"
         mission_goal = None
         deliverables: list[dict[str, str]] = []
         active_deliverable_id = None

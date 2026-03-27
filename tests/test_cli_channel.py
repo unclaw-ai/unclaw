@@ -1006,7 +1006,48 @@ def test_cli_native_search_can_continue_into_native_write_tool_loop(
             content_callback=None,
             tools=None,
         ):
-            del profile, messages, timeout_seconds, thinking_enabled, tools
+            del timeout_seconds, thinking_enabled, tools
+            # Handle mission planner/verifier calls transparently
+            if (
+                bool(messages)
+                and messages[0].role is LLMRole.SYSTEM
+                and messages[0].content.startswith(
+                    "Mission planner for the Unclaw local agent runtime."
+                )
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "direct_reply_only",
+                            "deliverables": [
+                                {
+                                    "id": "d1",
+                                    "task": "direct reply",
+                                    "deliverable": "reply",
+                                    "verification": "n/a",
+                                }
+                            ],
+                            "summary": "direct reply only",
+                        }
+                    ),
+                    created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
+            if (
+                bool(messages)
+                and messages[0].role is LLMRole.SYSTEM
+                and messages[0].content.startswith(
+                    "Mission step verifier for the Unclaw local agent runtime."
+                )
+            ):
+                return LLMResponse(
+                    provider="ollama", model_name=profile.model_name,
+                    content="{}", created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
+            del profile, messages
             nonlocal responder_call_count
             responder_call_count += 1
             if responder_call_count == 1:

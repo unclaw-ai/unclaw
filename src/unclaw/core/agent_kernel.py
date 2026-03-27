@@ -127,25 +127,13 @@ def plan_mission_turn(
             )
         return AgentKernelPlan(should_use_kernel=False, plan_decision=None)
 
-    if first_response is None:
-        return AgentKernelPlan(should_use_kernel=True, plan_decision=plan_decision)
     if plan_decision.mission_action == "direct_reply_only":
         return AgentKernelPlan(should_use_kernel=False, plan_decision=plan_decision)
 
-    first_response_has_local_write = _response_has_local_write_tool_call(
-        response=first_response,
-        tool_definitions=tool_definitions,
-    )
-    should_use_kernel = (
-        existing_mission_state is not None
-        or compatibility_mission_state is not None
-        or len(plan_decision.deliverables) > 1
-        or first_response_has_local_write
-    )
-    return AgentKernelPlan(
-        should_use_kernel=should_use_kernel,
-        plan_decision=plan_decision,
-    )
+    # Kernel-first: any non-direct_reply_only plan enters the kernel
+    # immediately. The planner decides whether durable execution is needed;
+    # the runtime does not second-guess with narrow heuristics.
+    return AgentKernelPlan(should_use_kernel=True, plan_decision=plan_decision)
 
 
 def run_agent_kernel_turn(
@@ -826,6 +814,26 @@ def _apply_verification_decision(
             ),
             None,
         )
+
+    # Strict deliverable ordering: do not advance past uncompleted earlier
+    # deliverables in the execution queue.  This prevents a later textual
+    # deliverable (e.g. "tell a joke") from completing before an earlier
+    # durable deliverable (e.g. "write file") is verified.
+    if (
+        active_deliverable_id is not None
+        and mission_state.execution_queue
+        and verification_decision.mission_status != "completed"
+    ):
+        status_by_id = {
+            d.deliverable_id: d.status for d in next_deliverables
+        }
+        for queued_id in mission_state.execution_queue:
+            if queued_id == active_deliverable_id:
+                break
+            if status_by_id.get(queued_id) not in {"completed", "blocked"}:
+                active_deliverable_id = queued_id
+                break
+
     normalized_deliverables = [
         replace(deliverable, status="active", updated_at=updated_at)
         if deliverable.deliverable_id == active_deliverable_id
@@ -916,6 +924,35 @@ def _build_safe_verification_fallback(
                 notes_for_next_step="Retry the active deliverable with a narrower step.",
                 assistant_reply=None,
             )
+
+        # Structured recovery: collision_conflict is repairable via versioning
+        if active_deliverable is not None and active_deliverable.repair_count < _MISSION_REPAIR_BUDGET_PER_DELIVERABLE:
+            collision_result = _find_collision_conflict_result(latest_tool_results)
+            if collision_result is not None:
+                payload = collision_result.payload if isinstance(collision_result.payload, dict) else {}
+                suggested_path = payload.get("suggested_version_path")
+                repair_note = "Retry write with collision_policy='version'"
+                if isinstance(suggested_path, str) and suggested_path:
+                    repair_note += f" or use suggested path: {suggested_path}"
+                return MissionVerificationDecision(
+                    mission_status="active",
+                    active_deliverable_id=active_deliverable_id,
+                    current_deliverable_status="active",
+                    missing="File collision needs resolution via versioning.",
+                    blocker=None,
+                    artifact_paths=(),
+                    evidence=(),
+                    final_deliverables_missing=mission_state.final_deliverables_missing,
+                    next_action="continue",
+                    repair_strategy=repair_note,
+                    notes_for_next_step=(
+                        "The target file already exists. Retry with "
+                        "collision_policy='version' to create a versioned copy."
+                        + (f" Suggested path: {suggested_path}" if isinstance(suggested_path, str) and suggested_path else "")
+                    ),
+                    assistant_reply=None,
+                )
+
         blocker = latest_tool_results[-1].error or latest_tool_results[-1].output_text
         return MissionVerificationDecision(
             mission_status="blocked",
@@ -968,6 +1005,19 @@ def _build_safe_verification_fallback(
         notes_for_next_step="Continue the mission and verify the remaining deliverables.",
         assistant_reply=None,
     )
+
+
+def _find_collision_conflict_result(
+    tool_results: Sequence[ToolResult],
+) -> ToolResult | None:
+    """Return the first collision_conflict failure from structured tool metadata."""
+    for tool_result in tool_results:
+        if (
+            tool_result.success is False
+            and tool_result.failure_kind == "collision_conflict"
+        ):
+            return tool_result
+    return None
 
 
 def _mark_blocked_mission(
@@ -1110,7 +1160,17 @@ def _build_mission_status_reply(mission_state: MissionState) -> str | None:
         active_task = mission_state.active_task or "the active mission step"
         return f"The mission is blocked on {active_task}: {blocker}"
     if mission_state.active_task is not None:
-        return f"The mission is active on {mission_state.active_task}."
+        # Build per-deliverable status for honest reporting
+        deliverable_lines: list[str] = []
+        for deliverable in mission_state.deliverables:
+            deliverable_lines.append(
+                f"  - {deliverable.deliverable_id} ({deliverable.task}): {deliverable.status}"
+            )
+        status_detail = "\n".join(deliverable_lines) if deliverable_lines else ""
+        base = f"The mission is active on {mission_state.active_task}."
+        if status_detail:
+            return f"{base}\nDeliverables:\n{status_detail}"
+        return base
     return None
 
 

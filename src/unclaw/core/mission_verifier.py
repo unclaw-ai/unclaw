@@ -26,8 +26,12 @@ _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
         "- `compatibility_mission_state` is weak legacy context only. Do not continue it unless the user is clearly asking for that same old mission and no newer actual mission exists.",
         "- Start a new mission only when the user is clearly asking for a different outcome.",
         "- If the request can be answered honestly in one reply with no durable execution, choose direct_reply_only.",
+        "- direct_reply_only is appropriate when the request can be satisfied by calling tools (search, read) and returning the result in one response, without persisting new artifacts or tracking multi-step progress.",
+        "- start_new is appropriate when the request involves creating or writing files, multi-step processes with dependencies, compound requests with multiple distinct deliverables, or any outcome requiring persistent artifacts.",
         "- Do not collapse a compound mission into one generic deliverable unless the user's request truly has only one deliverable.",
         "- Do not rewrite a deliverable into a tool name.",
+        "- The execution_queue defines strict ordering: later deliverables cannot complete before earlier ones are verified.",
+        "- A compound request like 'research X, write it to a file, then tell a joke' must produce separate deliverables for each distinct outcome (research, file write, joke), not one collapsed deliverable.",
         "Return JSON only with this shape:",
         (
             '{"mission_action":"start_new|continue_existing|direct_reply_only",'
@@ -52,6 +56,9 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
         "- If retry budget is exhausted or a blocker is unrecoverable from the given facts, mark the mission blocked.",
         "- If an existing file might already satisfy the active deliverable but it is not verified yet, keep the mission active and request a verification read in notes_for_next_step.",
         "- Do not mark the mission completed while any final_deliverables_missing item remains.",
+        "- Strict ordering: do not mark a later deliverable (by execution_queue order) as completed before verifying that all earlier deliverables are completed.",
+        "- If a tool result shows failure_kind='collision_conflict' and provides suggested_version_path in its payload, this is a repairable failure. Set repair_strategy to retry with collision_policy='version' and the suggested path. Do not block on collision conflicts when repair budget remains.",
+        "- When reporting mission status, base judgment on actual persisted state and tool results only. Do not claim inability to access local files if file tools are available. Do not claim the mission is blocked if it is repairable. Do not say a later deliverable is pending if an earlier one is still unverified and blocking progression.",
         "Return JSON only with this shape:",
         (
             '{"mission_status":"active|blocked|completed",'

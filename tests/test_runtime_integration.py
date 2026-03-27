@@ -63,6 +63,42 @@ def _is_grounded_finalizer_call(messages: list[LLMMessage]) -> bool:
     ].content.startswith("Grounded reply finalizer for one runtime turn.")
 
 
+def _is_mission_planner_call(messages) -> bool:  # type: ignore[no-untyped-def]
+    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
+        0
+    ].content.startswith("Mission planner for the Unclaw local agent runtime.")
+
+
+def _is_mission_verifier_call(messages) -> bool:  # type: ignore[no-untyped-def]
+    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
+        0
+    ].content.startswith("Mission step verifier for the Unclaw local agent runtime.")
+
+
+def _build_direct_reply_planner_response(profile) -> LLMResponse:  # type: ignore[no-untyped-def]
+    return LLMResponse(
+        provider="ollama",
+        model_name=profile.model_name,
+        content=json.dumps(
+            {
+                "mission_action": "direct_reply_only",
+                "deliverables": [
+                    {
+                        "id": "d1",
+                        "task": "direct reply",
+                        "deliverable": "reply",
+                        "verification": "n/a",
+                    }
+                ],
+                "summary": "direct reply only",
+            },
+            ensure_ascii=False,
+        ),
+        created_at="2026-03-26T00:00:00Z",
+        finish_reason="stop",
+    )
+
+
 def _build_grounded_finalizer_response(
     *,
     profile,
@@ -1920,6 +1956,14 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             tools=None,
         ):
             del timeout_seconds, thinking_enabled, content_callback
+            if _is_mission_planner_call(messages):
+                return _build_direct_reply_planner_response(profile)
+            if _is_mission_verifier_call(messages):
+                return LLMResponse(
+                    provider="ollama", model_name=profile.model_name,
+                    content="{}", created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
             nonlocal responder_call_count
             responder_call_count += 1
             captured_turn_tools.append(tools)
@@ -2081,6 +2125,8 @@ def test_run_user_turn_native_search_can_continue_into_shared_native_write_tool_
             "runtime.started",
             "model.called",
             "model.succeeded",
+            "model.called",       # mission planner call
+            "model.succeeded",    # mission planner success
             "tool.started",
             "tool.finished",
             "model.called",
@@ -8211,6 +8257,14 @@ def test_agent_loop_continuation_check_requires_write_before_final_reply(
         def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
             del timeout_seconds, thinking_enabled, content_callback, tools
             nonlocal call_count
+            if _is_mission_planner_call(messages):
+                return _build_direct_reply_planner_response(profile)
+            if _is_mission_verifier_call(messages):
+                return LLMResponse(
+                    provider="ollama", model_name=profile.model_name,
+                    content="{}", created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
             captured_messages.append(list(messages))
 
             if _is_grounded_finalizer_call(messages):
@@ -9723,6 +9777,14 @@ def test_pre_write_grounding_revises_thin_research_write_content(
         def chat(self, profile, messages, *, timeout_seconds=None, thinking_enabled=False, content_callback=None, tools=None):
             del timeout_seconds, thinking_enabled, tools
             nonlocal call_count
+            if _is_mission_planner_call(messages):
+                return _build_direct_reply_planner_response(profile)
+            if _is_mission_verifier_call(messages):
+                return LLMResponse(
+                    provider="ollama", model_name=profile.model_name,
+                    content="{}", created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
             if _is_grounded_finalizer_call(messages):
                 return _build_grounded_finalizer_response(
                     profile=profile,

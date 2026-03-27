@@ -572,6 +572,42 @@ def test_v1_native_search_turn_keeps_shared_native_responder_tools(
             del base_url, default_timeout_seconds
 
         def chat(self, profile, messages, **kwargs):
+            # Handle mission planner/verifier calls transparently
+            if (
+                bool(messages)
+                and getattr(messages[0], "role", None) is LLMRole.SYSTEM
+                and getattr(messages[0], "content", "").startswith(
+                    "Mission planner for the Unclaw local agent runtime."
+                )
+            ):
+                return LLMResponse(
+                    provider="ollama",
+                    model_name=profile.model_name,
+                    content=json.dumps(
+                        {
+                            "mission_action": "direct_reply_only",
+                            "deliverables": [
+                                {"id": "d1", "task": "direct reply",
+                                 "deliverable": "reply", "verification": "n/a"}
+                            ],
+                            "summary": "direct reply only",
+                        }
+                    ),
+                    created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
+            if (
+                bool(messages)
+                and getattr(messages[0], "role", None) is LLMRole.SYSTEM
+                and getattr(messages[0], "content", "").startswith(
+                    "Mission step verifier for the Unclaw local agent runtime."
+                )
+            ):
+                return LLMResponse(
+                    provider="ollama", model_name=profile.model_name,
+                    content="{}", created_at="2026-03-26T00:00:00Z",
+                    finish_reason="stop",
+                )
             del messages
             tools = kwargs.get("tools")
             if tools is None:
