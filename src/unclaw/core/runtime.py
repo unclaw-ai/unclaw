@@ -197,7 +197,6 @@ def run_user_turn(
             assistant_reply is None
             and resume_kernel_mission
             and pre_turn_mission_state is not None
-            and responder_tool_definitions
             and max_agent_steps > 0
         ):
             if orchestrator is None:
@@ -213,7 +212,7 @@ def run_user_turn(
                 orchestrator=orchestrator,
                 tracer=active_tracer,
                 tool_registry=active_tool_registry,
-                tool_definitions=responder_tool_definitions,
+                tool_definitions=tuple(responder_tool_definitions or ()),
                 model_profile_name=selected_model_profile_name,
                 thinking_enabled=thinking_enabled,
                 capability_summary=responder_capability_summary,
@@ -486,10 +485,7 @@ def run_user_turn(
                         )
                         or (
                             no_tool_execution_claim_risk_assessment is not None
-                            and (
-                                no_tool_execution_claim_risk_assessment.completion_without_execution_risk
-                                or no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
-                            )
+                            and no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
                         )
                     )
                 ):
@@ -501,7 +497,7 @@ def run_user_turn(
                         tracer=active_tracer,
                         model_profile_name=selected_model_profile_name,
                         thinking_enabled=thinking_enabled,
-                        tool_definitions=responder_tool_definitions,
+                        tool_definitions=tuple(responder_tool_definitions or ()),
                         first_response=planner_first_response,
                         existing_mission_state=None,
                         compatibility_mission_state=compatibility_mission_state,
@@ -529,9 +525,11 @@ def run_user_turn(
                         else compatibility_mission_state
                     )
                     mission_result = _agent_kernel.run_agent_kernel_turn(
-                        first_response=response,
+                        first_response=(
+                            response if response.response.tool_calls else None
+                        ),
                         session_manager=session_manager,
-                        tool_definitions=responder_tool_definitions,
+                        tool_definitions=tuple(responder_tool_definitions or ()),
                         tool_registry=active_tool_registry,
                         orchestrator=orchestrator,
                         tracer=active_tracer,

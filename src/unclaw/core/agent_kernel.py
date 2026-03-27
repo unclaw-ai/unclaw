@@ -10,7 +10,11 @@ import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.execution_queue import resolve_active_deliverable_id
 from unclaw.core.mission_events import MissionEventCallback, emit_mission_event
-from unclaw.core.mission_state import MissionDeliverableState, MissionState
+from unclaw.core.mission_state import (
+    MissionDeliverableState,
+    MissionState,
+    mission_completion_ready,
+)
 from unclaw.core.mission_verifier import (
     MissionPlanDecision,
     MissionVerificationDecision,
@@ -73,15 +77,11 @@ def should_resume_mission_in_kernel(mission_state: MissionState | None) -> bool:
 
     if mission_state is None:
         return False
-    if len(mission_state.deliverables) > 1:
-        return True
     if mission_state.status != "active":
         return False
-    return bool(
-        mission_state.retry_history
-        or mission_state.repair_history
-        or mission_state.pending_repairs
-    )
+    if mission_state.executor_state in {"blocked", "completed"}:
+        return False
+    return True
 
 
 def plan_mission_turn(
@@ -236,7 +236,6 @@ def run_agent_kernel_turn(
     current_response = first_response
     accumulated_tool_results: list[ToolResult] = []
     final_reply: str | None = None
-    execution_announced = False
 
     for step_index in range(max_steps):
         mission_state = synchronize_mission_working_memory(
@@ -245,7 +244,9 @@ def run_agent_kernel_turn(
         )
         session_manager.persist_mission_state(mission_state, session_id=session_id)
         active_deliverable = mission_state.get_deliverable()
-        active_deliverable_id = active_deliverable.deliverable_id if active_deliverable else None
+        active_deliverable_id = (
+            active_deliverable.deliverable_id if active_deliverable is not None else None
+        )
 
         if tool_guard_state.is_cancelled():
             mission_state = _mark_blocked_mission(
@@ -253,17 +254,92 @@ def run_agent_kernel_turn(
                 blocker=_agent_loop._TURN_CANCELLED_REPLY,
                 updated_at=utc_now_iso(),
             )
+            session_manager.persist_mission_state(mission_state, session_id=session_id)
+            emit_mission_event(
+                mission_event_callback,
+                scope="mission",
+                detail="mission blocked",
+            )
             final_reply = _agent_loop._TURN_CANCELLED_REPLY
             break
 
-        if current_response is None:
-            detail = (
-                f"executing {active_deliverable_id}"
-                if active_deliverable_id is not None
-                else "executing"
+        if mission_completion_ready(mission_state):
+            emit_mission_event(
+                mission_event_callback,
+                scope="mission",
+                detail="mission completed",
             )
-            emit_mission_event(mission_event_callback, scope="mission", detail=detail)
-            execution_announced = True
+            final_reply = (
+                mission_state.final_verified_reply
+                or _build_mission_status_reply(mission_state)
+                or _MISSION_STATUS_INCOMPLETE_REPLY
+            )
+            break
+
+        if active_deliverable is None:
+            final_reply = (
+                _build_mission_status_reply(mission_state)
+                or _MISSION_STATUS_INCOMPLETE_REPLY
+            )
+            break
+
+        if current_response is not None and mission_state.executor_state not in {
+            "executing",
+            "awaiting_tool_result",
+            "awaiting_verification",
+        }:
+            mission_state = _transition_mission_execution_state(
+                mission_state=mission_state,
+                executor_state="executing",
+                executor_reason="execute the active deliverable",
+                waiting_for=f"model action for {active_deliverable.task}",
+                advance_condition=active_deliverable.verification,
+                deliverable_execution_state="executing",
+                verifier_notes=None,
+                updated_at=utc_now_iso(),
+            )
+            session_manager.persist_mission_state(mission_state, session_id=session_id)
+            emit_mission_event(
+                mission_event_callback,
+                scope="mission",
+                detail=_render_mission_transition(
+                    active_deliverable_id=active_deliverable_id,
+                    executor_state=mission_state.executor_state,
+                ),
+            )
+
+        if current_response is None:
+            mission_state = _transition_mission_execution_state(
+                mission_state=mission_state,
+                executor_state=(
+                    "repairing" if mission_state.pending_repairs else "executing"
+                ),
+                executor_reason=(
+                    "repair the active deliverable"
+                    if mission_state.pending_repairs
+                    else "execute the active deliverable"
+                ),
+                waiting_for=f"model action for {active_deliverable.task}",
+                advance_condition=active_deliverable.verification,
+                deliverable_execution_state=(
+                    "repairing" if mission_state.pending_repairs else "executing"
+                ),
+                verifier_notes=(
+                    mission_state.verifier_outputs[-1]
+                    if mission_state.verifier_outputs
+                    else None
+                ),
+                updated_at=utc_now_iso(),
+            )
+            session_manager.persist_mission_state(mission_state, session_id=session_id)
+            emit_mission_event(
+                mission_event_callback,
+                scope="mission",
+                detail=_render_mission_transition(
+                    active_deliverable_id=active_deliverable_id,
+                    executor_state=mission_state.executor_state,
+                ),
+            )
             current_response = _call_execution_turn(
                 orchestrator=orchestrator,
                 tracer=tracer,
@@ -281,16 +357,27 @@ def run_agent_kernel_turn(
 
         latest_tool_results: tuple[ToolResult, ...] = ()
         draft_reply = current_response.response.content.strip()
-        if not execution_announced:
-            detail = (
-                f"executing {active_deliverable_id}"
-                if active_deliverable_id is not None
-                else "executing"
-            )
-            emit_mission_event(mission_event_callback, scope="mission", detail=detail)
-            execution_announced = True
 
         if current_response.response.tool_calls:
+            mission_state = _transition_mission_execution_state(
+                mission_state=mission_state,
+                executor_state="awaiting_tool_result",
+                executor_reason="wait for tool results",
+                waiting_for=f"tool results for {active_deliverable_id}",
+                advance_condition=active_deliverable.verification,
+                deliverable_execution_state="awaiting_tool_result",
+                verifier_notes=None,
+                updated_at=utc_now_iso(),
+            )
+            session_manager.persist_mission_state(mission_state, session_id=session_id)
+            emit_mission_event(
+                mission_event_callback,
+                scope="mission",
+                detail=_render_mission_transition(
+                    active_deliverable_id=active_deliverable_id,
+                    executor_state=mission_state.executor_state,
+                ),
+            )
             stop_reply = _agent_loop._preflight_runtime_tool_batch(
                 tool_calls=current_response.response.tool_calls,
                 tool_guard_state=tool_guard_state,
@@ -343,11 +430,30 @@ def run_agent_kernel_turn(
             )
             draft_reply = ""
 
+        mission_state = _transition_mission_execution_state(
+            mission_state=mission_state,
+            executor_state="awaiting_verification",
+            executor_reason="wait for verification",
+            waiting_for=(
+                f"verification of tool evidence for {active_deliverable_id}"
+                if latest_tool_results
+                else f"verification of the reply for {active_deliverable_id}"
+            ),
+            advance_condition=active_deliverable.verification,
+            deliverable_execution_state="awaiting_verification",
+            verifier_notes=None,
+            updated_at=utc_now_iso(),
+        )
+        session_manager.persist_mission_state(mission_state, session_id=session_id)
+
         if active_deliverable_id is not None:
             emit_mission_event(
                 mission_event_callback,
                 scope="mission",
-                detail=f"verifying {active_deliverable_id}",
+                detail=_render_mission_transition(
+                    active_deliverable_id=active_deliverable_id,
+                    executor_state=mission_state.executor_state,
+                ),
             )
         verification_decision = _verify_mission(
             orchestrator=orchestrator,
@@ -366,6 +472,7 @@ def run_agent_kernel_turn(
             mission_state=mission_state,
             verification_decision=verification_decision,
             latest_tool_results=latest_tool_results,
+            draft_reply=draft_reply or "",
             updated_at=utc_now_iso(),
         )
         session_manager.persist_mission_state(mission_state, session_id=session_id)
@@ -381,73 +488,51 @@ def run_agent_kernel_turn(
             emit_mission_event(
                 mission_event_callback,
                 scope="mission",
-                detail=f"completed {active_deliverable_id}",
+                detail=f"{active_deliverable_id} completed",
             )
-        elif (
+        if (
             active_deliverable_id is not None
-            and verification_decision.next_action == "continue"
-            and (verification_decision.repair_strategy or verification_decision.notes_for_next_step)
+            and mission_state.executor_state == "repairing"
+            and mission_state.active_deliverable_id == active_deliverable_id
         ):
             emit_mission_event(
                 mission_event_callback,
                 scope="mission",
-                detail=f"repair {active_deliverable_id}",
+                detail=f"repairing {active_deliverable_id}",
             )
 
-        if mission_state.status == "completed":
-            if verification_decision.assistant_reply:
-                emit_mission_event(
-                    mission_event_callback,
-                    scope="mission",
-                    detail="finalizing",
-                )
-                final_reply = verification_decision.assistant_reply
-                break
-            if draft_reply:
-                emit_mission_event(
-                    mission_event_callback,
-                    scope="mission",
-                    detail="finalizing",
-                )
-                final_reply = draft_reply
-                break
+        if mission_completion_ready(mission_state):
             emit_mission_event(
                 mission_event_callback,
                 scope="mission",
-                detail="finalizing",
+                detail="mission completed",
             )
-            context_messages = _prepare_next_execution_messages(
-                context_messages=context_messages,
-                mission_state=mission_state,
-                verification_decision=verification_decision,
-                user_input=user_input,
-                draft_reply=draft_reply,
-                latest_tool_results=latest_tool_results,
-                tool_definitions=tool_definitions,
+            final_reply = (
+                mission_state.final_verified_reply
+                or verification_decision.assistant_reply
+                or _build_mission_status_reply(mission_state)
+                or _MISSION_STATUS_INCOMPLETE_REPLY
             )
-            current_response = None
-            continue
+            break
 
-        if verification_decision.next_action == "blocked_reply" or mission_state.status == "blocked":
+        if (
+            verification_decision.next_action == "blocked_reply"
+            or mission_state.status == "blocked"
+            or mission_state.executor_state == "blocked"
+        ):
             emit_mission_event(
                 mission_event_callback,
                 scope="mission",
-                detail="finalizing",
+                detail="mission blocked",
             )
             final_reply = (
                 verification_decision.assistant_reply
-                or draft_reply
                 or _build_mission_status_reply(mission_state)
                 or _MISSION_STATUS_BLOCKED_REPLY
             )
             break
 
         if step_index + 1 >= max_steps:
-            emit_mission_event(
-                mission_event_callback,
-                scope="mission",
-                detail="finalizing",
-            )
             final_reply = _MISSION_STATUS_INCOMPLETE_REPLY
             break
 
@@ -461,7 +546,6 @@ def run_agent_kernel_turn(
             tool_definitions=tool_definitions,
         )
         current_response = None
-        execution_announced = False
 
     if final_reply is None:
         final_reply = _MISSION_STATUS_INCOMPLETE_REPLY
@@ -660,6 +744,7 @@ def _resolve_mission_state(
             plan_decision.active_deliverable_id
             or (deliverables[0].deliverable_id if deliverables else None)
         ),
+        execution_queue=plan_decision.execution_queue,
         planner_summary=plan_decision.summary,
         updated_at=updated_at,
     )
@@ -750,6 +835,7 @@ def _apply_verification_decision(
     mission_state: MissionState,
     verification_decision: MissionVerificationDecision,
     latest_tool_results: Sequence[ToolResult],
+    draft_reply: str,
     updated_at: str,
 ) -> MissionState:
     current_deliverable = mission_state.get_deliverable()
@@ -770,6 +856,15 @@ def _apply_verification_decision(
         if retry_note:
             retry_history.append(retry_note)
 
+    final_verified_reply = mission_state.final_verified_reply
+    active_deliverable_id = mission_state.active_deliverable_id
+    executor_state = "ready"
+    executor_reason = "continue the mission"
+    waiting_for: str | None = None
+    advance_condition: str | None = None
+    verifier_output_items: tuple[str, ...] = ()
+    repair_items: tuple[str, ...] = ()
+
     if current_deliverable is not None:
         retry_count = current_deliverable.retry_count
         repair_count = current_deliverable.repair_count
@@ -782,11 +877,59 @@ def _apply_verification_decision(
             repair_count += 1
             if verification_decision.notes_for_next_step:
                 repair_history.append(verification_decision.notes_for_next_step)
+        deliverable_status = verification_decision.current_deliverable_status
+        deliverable_execution_state = "ready"
+        if deliverable_status == "completed":
+            deliverable_execution_state = "completed"
+        elif (
+            verification_decision.mission_status == "blocked"
+            or verification_decision.next_action == "blocked_reply"
+        ):
+            deliverable_execution_state = "blocked"
+        elif retry_requested or verification_decision.repair_strategy:
+            deliverable_execution_state = "repairing"
+        elif verification_decision.notes_for_next_step:
+            deliverable_execution_state = "repairing"
+
+        if (
+            deliverable_status == "completed"
+            and current_deliverable.mode == "artifact"
+            and not _has_verified_artifact_evidence(
+                mission_state=mission_state,
+                current_deliverable=current_deliverable,
+                latest_tool_results=latest_tool_results,
+                artifact_paths=verification_decision.artifact_paths,
+                evidence=verification_decision.evidence,
+            )
+        ):
+            deliverable_status = "active"
+            deliverable_execution_state = "repairing"
+            verifier_output_items = (
+                "Read the artifact back and verify its contents before completion.",
+            )
+            repair_items = verifier_output_items
+
+        if (
+            deliverable_status == "completed"
+            and current_deliverable.mode in {"reply", "mixed"}
+        ):
+            candidate_reply = verification_decision.assistant_reply or draft_reply.strip()
+            if candidate_reply:
+                final_verified_reply = candidate_reply
+
         updated_deliverable = replace(
             current_deliverable,
-            status=verification_decision.current_deliverable_status,
-            missing=verification_decision.missing,
-            blocker=verification_decision.blocker,
+            status=deliverable_status,
+            missing=(
+                verification_decision.missing
+                if deliverable_status != "completed"
+                else None
+            ),
+            blocker=(
+                verification_decision.blocker
+                if deliverable_execution_state == "blocked"
+                else None
+            ),
             attempt_count=current_deliverable.attempt_count + 1,
             retry_count=retry_count,
             repair_count=repair_count,
@@ -796,6 +939,24 @@ def _apply_verification_decision(
             ),
             evidence=verification_decision.evidence or current_deliverable.evidence,
             updated_at=updated_at,
+            execution_state=deliverable_execution_state,
+            waiting_for=(
+                verification_decision.notes_for_next_step
+                or verification_decision.repair_strategy
+                or (
+                    "mission deliverable verified"
+                    if deliverable_status == "completed"
+                    else current_deliverable.waiting_for
+                )
+            ),
+            advance_condition=(
+                None if deliverable_status == "completed" else current_deliverable.verification
+            ),
+            verifier_notes=(
+                verification_decision.notes_for_next_step
+                or verification_decision.repair_strategy
+                or (verifier_output_items[0] if verifier_output_items else None)
+            ),
         )
         next_deliverables = [
             updated_deliverable
@@ -803,42 +964,32 @@ def _apply_verification_decision(
             else deliverable
             for deliverable in next_deliverables
         ]
+        if updated_deliverable.status == "completed":
+            active_deliverable_id = None
+        else:
+            active_deliverable_id = updated_deliverable.deliverable_id
 
-    active_deliverable_id = verification_decision.active_deliverable_id
-    if active_deliverable_id is None and verification_decision.mission_status != "completed":
-        active_deliverable_id = next(
-            (
-                deliverable.deliverable_id
-                for deliverable in next_deliverables
-                if deliverable.status in {"pending", "active"}
-            ),
-            None,
-        )
-
-    # Strict deliverable ordering: do not advance past uncompleted earlier
-    # deliverables in the execution queue.  This prevents a later textual
-    # deliverable (e.g. "tell a joke") from completing before an earlier
-    # durable deliverable (e.g. "write file") is verified.
     if (
-        active_deliverable_id is not None
-        and mission_state.execution_queue
+        verification_decision.active_deliverable_id is not None
         and verification_decision.mission_status != "completed"
     ):
-        status_by_id = {
-            d.deliverable_id: d.status for d in next_deliverables
-        }
-        for queued_id in mission_state.execution_queue:
-            if queued_id == active_deliverable_id:
-                break
-            if status_by_id.get(queued_id) not in {"completed", "blocked"}:
-                active_deliverable_id = queued_id
-                break
+        active_deliverable_id = verification_decision.active_deliverable_id
+
+    if verification_decision.mission_status != "blocked":
+        active_deliverable_id = _next_unresolved_deliverable_id(
+            deliverables=tuple(next_deliverables),
+            execution_queue=mission_state.execution_queue,
+            preferred_deliverable_id=active_deliverable_id,
+        )
+    else:
+        active_deliverable_id = mission_state.active_deliverable_id
 
     normalized_deliverables = [
-        replace(deliverable, status="active", updated_at=updated_at)
-        if deliverable.deliverable_id == active_deliverable_id
-        and deliverable.status == "pending"
-        else deliverable
+        _normalize_deliverable_activation(
+            deliverable=deliverable,
+            active_deliverable_id=active_deliverable_id,
+            updated_at=updated_at,
+        )
         for deliverable in next_deliverables
     ]
     artifact_facts = tuple(
@@ -849,19 +1000,71 @@ def _apply_verification_decision(
         if verification_decision.blocker is not None
         else ()
     )
-    repair_items = ()
-    if verification_decision.mission_status != "completed":
+    if not repair_items and verification_decision.mission_status != "completed":
         if verification_decision.repair_strategy is not None:
             repair_items = (verification_decision.repair_strategy,)
         elif (
             verification_decision.notes_for_next_step
             and verification_decision.next_action == "continue"
+            and verification_decision.current_deliverable_status != "completed"
         ):
             repair_items = (verification_decision.notes_for_next_step,)
 
+    if not verifier_output_items:
+        verifier_output_items = tuple(
+            item
+            for item in (
+                verification_decision.notes_for_next_step,
+                verification_decision.repair_strategy,
+                verification_decision.missing,
+            )
+            if item
+        )
+
+    computed_missing = tuple(
+        deliverable.deliverable_id
+        for deliverable in normalized_deliverables
+        if deliverable.status != "completed"
+    )
+    if verification_decision.next_action == "blocked_reply" or verification_decision.mission_status == "blocked":
+        executor_state = "blocked"
+        executor_reason = "mission blocked"
+    elif not computed_missing and not repair_items:
+        executor_state = "completed"
+        executor_reason = "mission verified complete"
+        active_deliverable_id = None
+    elif repair_items:
+        executor_state = "repairing"
+        executor_reason = "repair the active deliverable before advancing"
+        active_target = next(
+            (
+                deliverable
+                for deliverable in normalized_deliverables
+                if deliverable.deliverable_id == active_deliverable_id
+            ),
+            None,
+        )
+        waiting_for = repair_items[0]
+        advance_condition = (
+            active_target.verification if active_target is not None else None
+        )
+    else:
+        executor_state = "ready"
+        executor_reason = "advance to the next verified step"
+        active_target = next(
+            (
+                deliverable
+                for deliverable in normalized_deliverables
+                if deliverable.deliverable_id == active_deliverable_id
+            ),
+            None,
+        )
+        if active_target is not None:
+            waiting_for = f"execute {active_target.task}"
+            advance_condition = active_target.verification
+
     updated_state = replace(
         mission_state,
-        status=verification_decision.mission_status,
         active_deliverable_id=active_deliverable_id,
         deliverables=tuple(normalized_deliverables),
         retry_history=tuple(retry_history[-6:]),
@@ -875,28 +1078,24 @@ def _apply_verification_decision(
         ),
         last_blocker=verification_decision.blocker or mission_state.last_blocker,
         updated_at=updated_at,
+        final_deliverables_missing=tuple(
+            dict.fromkeys(computed_missing + verification_decision.final_deliverables_missing)
+        ),
     )
-    synchronized = synchronize_mission_working_memory(
+    return synchronize_mission_working_memory(
         updated_state,
         updated_at=updated_at,
         observed_facts=verification_decision.evidence,
         artifact_facts=artifact_facts,
         blockers=blocker_items,
         pending_repairs=repair_items,
+        executor_state=executor_state,
+        executor_reason=executor_reason,
+        waiting_for=waiting_for,
+        advance_condition=advance_condition,
+        verifier_outputs=verifier_output_items,
+        final_verified_reply=final_verified_reply,
     )
-    if verification_decision.final_deliverables_missing:
-        synchronized = replace(
-            synchronized,
-            final_deliverables_missing=verification_decision.final_deliverables_missing,
-            status=(
-                "completed"
-                if not verification_decision.final_deliverables_missing
-                else synchronized.status
-            ),
-        )
-        if verification_decision.final_deliverables_missing:
-            synchronized = replace(synchronized, status="active")
-    return synchronized
 
 
 def _build_safe_verification_fallback(
@@ -907,9 +1106,17 @@ def _build_safe_verification_fallback(
 ) -> MissionVerificationDecision:
     active_deliverable = mission_state.get_deliverable()
     active_deliverable_id = mission_state.active_deliverable_id
-    if latest_tool_results and any(tool_result.success is False for tool_result in latest_tool_results):
-        timed_out = any(_tool_result_timed_out(tool_result) for tool_result in latest_tool_results)
-        if timed_out and active_deliverable is not None and active_deliverable.retry_count < _MISSION_RETRY_BUDGET_PER_DELIVERABLE:
+    if latest_tool_results and any(
+        tool_result.success is False for tool_result in latest_tool_results
+    ):
+        timed_out = any(
+            _tool_result_timed_out(tool_result) for tool_result in latest_tool_results
+        )
+        if (
+            timed_out
+            and active_deliverable is not None
+            and active_deliverable.retry_count < _MISSION_RETRY_BUDGET_PER_DELIVERABLE
+        ):
             return MissionVerificationDecision(
                 mission_status="active",
                 active_deliverable_id=active_deliverable_id,
@@ -926,10 +1133,17 @@ def _build_safe_verification_fallback(
             )
 
         # Structured recovery: collision_conflict is repairable via versioning
-        if active_deliverable is not None and active_deliverable.repair_count < _MISSION_REPAIR_BUDGET_PER_DELIVERABLE:
+        if (
+            active_deliverable is not None
+            and active_deliverable.repair_count < _MISSION_REPAIR_BUDGET_PER_DELIVERABLE
+        ):
             collision_result = _find_collision_conflict_result(latest_tool_results)
             if collision_result is not None:
-                payload = collision_result.payload if isinstance(collision_result.payload, dict) else {}
+                payload = (
+                    collision_result.payload
+                    if isinstance(collision_result.payload, dict)
+                    else {}
+                )
                 suggested_path = payload.get("suggested_version_path")
                 repair_note = "Retry write with collision_policy='version'"
                 if isinstance(suggested_path, str) and suggested_path:
@@ -948,7 +1162,11 @@ def _build_safe_verification_fallback(
                     notes_for_next_step=(
                         "The target file already exists. Retry with "
                         "collision_policy='version' to create a versioned copy."
-                        + (f" Suggested path: {suggested_path}" if isinstance(suggested_path, str) and suggested_path else "")
+                        + (
+                            f" Suggested path: {suggested_path}"
+                            if isinstance(suggested_path, str) and suggested_path
+                            else ""
+                        )
                     ),
                     assistant_reply=None,
                 )
@@ -969,7 +1187,7 @@ def _build_safe_verification_fallback(
             assistant_reply=None,
         )
 
-    if mission_state.status == "completed" and draft_reply:
+    if mission_completion_ready(mission_state):
         return MissionVerificationDecision(
             mission_status="completed",
             active_deliverable_id=None,
@@ -982,7 +1200,91 @@ def _build_safe_verification_fallback(
             next_action="final_reply",
             repair_strategy=None,
             notes_for_next_step=None,
-            assistant_reply=draft_reply,
+            assistant_reply=mission_state.final_verified_reply or draft_reply or None,
+        )
+
+    has_artifact_evidence = (
+        active_deliverable is not None
+        and _has_verified_artifact_evidence(
+            mission_state=mission_state,
+            current_deliverable=active_deliverable,
+            latest_tool_results=latest_tool_results,
+            artifact_paths=mission_state.last_verified_artifact_paths,
+            evidence=mission_state.last_successful_evidence,
+        )
+    )
+    has_reply_evidence = bool(draft_reply.strip())
+    pending_after_active = _remaining_deliverables_after_active(mission_state=mission_state)
+
+    if (
+        active_deliverable is not None
+        and active_deliverable.mode == "reply"
+        and has_reply_evidence
+    ):
+        return MissionVerificationDecision(
+            mission_status="completed" if not pending_after_active else "active",
+            active_deliverable_id=(
+                None if not pending_after_active else pending_after_active[0]
+            ),
+            current_deliverable_status="completed",
+            missing=None,
+            blocker=None,
+            artifact_paths=mission_state.last_verified_artifact_paths,
+            evidence=mission_state.last_successful_evidence,
+            final_deliverables_missing=pending_after_active,
+            next_action="final_reply" if not pending_after_active else "continue",
+            repair_strategy=None,
+            notes_for_next_step=None,
+            assistant_reply=draft_reply.strip(),
+        )
+
+    if (
+        active_deliverable is not None
+        and active_deliverable.mode == "mixed"
+        and has_reply_evidence
+        and has_artifact_evidence
+    ):
+        return MissionVerificationDecision(
+            mission_status="completed" if not pending_after_active else "active",
+            active_deliverable_id=(
+                None if not pending_after_active else pending_after_active[0]
+            ),
+            current_deliverable_status="completed",
+            missing=None,
+            blocker=None,
+            artifact_paths=mission_state.last_verified_artifact_paths,
+            evidence=mission_state.last_successful_evidence,
+            final_deliverables_missing=pending_after_active,
+            next_action="final_reply" if not pending_after_active else "continue",
+            repair_strategy=None,
+            notes_for_next_step=None,
+            assistant_reply=draft_reply.strip(),
+        )
+
+    precise_step = _build_precise_verification_step(
+        mission_state=mission_state,
+        active_deliverable=active_deliverable,
+        draft_reply=draft_reply,
+        has_artifact_evidence=has_artifact_evidence,
+    )
+    if _verification_step_already_attempted(
+        mission_state=mission_state,
+        precise_step=precise_step,
+    ):
+        blocker = "No new verification evidence was produced after the requested step."
+        return MissionVerificationDecision(
+            mission_status="blocked",
+            active_deliverable_id=active_deliverable_id,
+            current_deliverable_status="blocked",
+            missing=None,
+            blocker=blocker,
+            artifact_paths=mission_state.last_verified_artifact_paths,
+            evidence=mission_state.last_successful_evidence,
+            final_deliverables_missing=mission_state.final_deliverables_missing,
+            next_action="blocked_reply",
+            repair_strategy=None,
+            notes_for_next_step=None,
+            assistant_reply=None,
         )
 
     return MissionVerificationDecision(
@@ -1001,8 +1303,8 @@ def _build_safe_verification_fallback(
         evidence=mission_state.last_successful_evidence,
         final_deliverables_missing=mission_state.final_deliverables_missing,
         next_action="continue",
-        repair_strategy="continue mission",
-        notes_for_next_step="Continue the mission and verify the remaining deliverables.",
+        repair_strategy=None,
+        notes_for_next_step=precise_step,
         assistant_reply=None,
     )
 
@@ -1020,6 +1322,243 @@ def _find_collision_conflict_result(
     return None
 
 
+def _has_verified_artifact_evidence(
+    *,
+    mission_state: MissionState,
+    current_deliverable: MissionDeliverableState,
+    latest_tool_results: Sequence[ToolResult],
+    artifact_paths: Sequence[str],
+    evidence: Sequence[str],
+) -> bool:
+    if any(
+        tool_result.tool_name == "read_text_file" and tool_result.success is True
+        for tool_result in latest_tool_results
+    ):
+        return True
+    if current_deliverable.artifact_paths and current_deliverable.evidence:
+        return True
+    if artifact_paths and evidence:
+        return True
+    return bool(
+        mission_state.last_verified_artifact_paths
+        and mission_state.last_successful_evidence
+    )
+
+
+def _next_unresolved_deliverable_id(
+    *,
+    deliverables: Sequence[MissionDeliverableState],
+    execution_queue: Sequence[str],
+    preferred_deliverable_id: str | None,
+) -> str | None:
+    for deliverable_id in execution_queue:
+        deliverable = next(
+            (
+                item
+                for item in deliverables
+                if item.deliverable_id == deliverable_id
+            ),
+            None,
+        )
+        if deliverable is not None and deliverable.status in {"pending", "active"}:
+            return deliverable.deliverable_id
+    if preferred_deliverable_id is not None:
+        preferred = next(
+            (
+                deliverable
+                for deliverable in deliverables
+                if deliverable.deliverable_id == preferred_deliverable_id
+            ),
+            None,
+        )
+        if preferred is not None and preferred.status in {"pending", "active"}:
+            return preferred_deliverable_id
+    next_unresolved = next(
+        (
+            deliverable.deliverable_id
+            for deliverable in deliverables
+            if deliverable.status in {"pending", "active"}
+        ),
+        None,
+    )
+    return next_unresolved
+
+
+def _normalize_deliverable_activation(
+    *,
+    deliverable: MissionDeliverableState,
+    active_deliverable_id: str | None,
+    updated_at: str,
+) -> MissionDeliverableState:
+    if deliverable.deliverable_id == active_deliverable_id:
+        if deliverable.status == "pending":
+            return replace(
+                deliverable,
+                status="active",
+                execution_state=(
+                    "ready"
+                    if deliverable.execution_state == "pending"
+                    else deliverable.execution_state
+                ),
+                updated_at=updated_at,
+            )
+        return deliverable
+    if deliverable.status == "active":
+        return replace(
+            deliverable,
+            status="pending",
+            execution_state=(
+                "pending"
+                if deliverable.execution_state not in {"completed", "blocked"}
+                else deliverable.execution_state
+            ),
+            updated_at=updated_at,
+        )
+    return deliverable
+
+
+def _transition_mission_execution_state(
+    *,
+    mission_state: MissionState,
+    executor_state: str,
+    executor_reason: str,
+    waiting_for: str | None,
+    advance_condition: str | None,
+    deliverable_execution_state: str | None,
+    verifier_notes: str | None,
+    updated_at: str,
+) -> MissionState:
+    active_deliverable = mission_state.get_deliverable()
+    deliverables = list(mission_state.deliverables)
+    if active_deliverable is not None and deliverable_execution_state is not None:
+        updated_deliverable = replace(
+            active_deliverable,
+            status=(
+                "active"
+                if active_deliverable.status not in {"completed", "blocked"}
+                else active_deliverable.status
+            ),
+            execution_state=deliverable_execution_state,
+            waiting_for=waiting_for,
+            advance_condition=advance_condition,
+            verifier_notes=verifier_notes,
+            updated_at=updated_at,
+        )
+        deliverables = [
+            updated_deliverable
+            if deliverable.deliverable_id == updated_deliverable.deliverable_id
+            else deliverable
+            for deliverable in deliverables
+        ]
+    return synchronize_mission_working_memory(
+        replace(
+            mission_state,
+            deliverables=tuple(deliverables),
+            updated_at=updated_at,
+        ),
+        updated_at=updated_at,
+        executor_state=executor_state,
+        executor_reason=executor_reason,
+        waiting_for=waiting_for,
+        advance_condition=advance_condition,
+    )
+
+
+def _render_mission_transition(
+    *,
+    active_deliverable_id: str | None,
+    executor_state: str,
+) -> str:
+    if executor_state in {"planning", "completed", "blocked"}:
+        return (
+            "planning"
+            if executor_state == "planning"
+            else f"mission {executor_state}"
+        )
+    if active_deliverable_id is None:
+        return executor_state
+    if executor_state == "repairing":
+        return f"repairing {active_deliverable_id}"
+    return f"{active_deliverable_id} {executor_state}"
+
+
+def _remaining_deliverables_after_active(
+    *,
+    mission_state: MissionState,
+) -> tuple[str, ...]:
+    remaining: list[str] = []
+    for deliverable_id in mission_state.execution_queue:
+        if deliverable_id == mission_state.active_deliverable_id:
+            continue
+        deliverable = mission_state.get_deliverable(deliverable_id)
+        if deliverable is not None and deliverable.status != "completed":
+            remaining.append(deliverable.deliverable_id)
+    for deliverable in mission_state.deliverables:
+        if (
+            deliverable.deliverable_id != mission_state.active_deliverable_id
+            and deliverable.status != "completed"
+            and deliverable.deliverable_id not in remaining
+        ):
+            remaining.append(deliverable.deliverable_id)
+    return tuple(remaining)
+
+
+def _build_precise_verification_step(
+    *,
+    mission_state: MissionState,
+    active_deliverable: MissionDeliverableState | None,
+    draft_reply: str,
+    has_artifact_evidence: bool,
+) -> str:
+    if active_deliverable is None:
+        return "Verify the next unresolved deliverable from persisted mission facts."
+    if active_deliverable.mode == "artifact":
+        if not has_artifact_evidence:
+            return (
+                "Read the artifact back with read_text_file and confirm it matches "
+                "the active deliverable before advancing."
+            )
+        return (
+            "Verify that the persisted artifact evidence satisfies the active "
+            "deliverable before advancing."
+        )
+    if active_deliverable.mode == "reply":
+        if draft_reply.strip():
+            return (
+                "Verify whether the current draft reply satisfies the active "
+                "deliverable and then mark it completed or request one concrete repair."
+            )
+        return "Produce the reply needed for the active deliverable."
+    if not has_artifact_evidence:
+        return (
+            "Verify the artifact side first by reading it back before checking the reply."
+        )
+    if not draft_reply.strip():
+        return "Produce the reply side of the mixed deliverable from verified facts."
+    return (
+        "Verify both the artifact evidence and the current draft reply for the "
+        "active mixed deliverable."
+    )
+
+
+def _verification_step_already_attempted(
+    *,
+    mission_state: MissionState,
+    precise_step: str,
+) -> bool:
+    active_deliverable = mission_state.get_deliverable()
+    if active_deliverable is None:
+        return False
+    if precise_step in mission_state.verifier_outputs:
+        return True
+    if active_deliverable.verifier_notes == precise_step:
+        return True
+    return (
+        active_deliverable.attempt_count > 0
+        and active_deliverable.execution_state == "awaiting_verification"
+    )
+
+
 def _mark_blocked_mission(
     *,
     mission_state: MissionState,
@@ -1034,6 +1573,9 @@ def _mark_blocked_mission(
             status="blocked",
             blocker=blocker,
             updated_at=updated_at,
+            execution_state="blocked",
+            waiting_for=None,
+            verifier_notes=blocker,
         )
         next_deliverables = [
             blocked_deliverable
@@ -1052,6 +1594,12 @@ def _mark_blocked_mission(
         blocked_state,
         updated_at=updated_at,
         blockers=(blocker,),
+        pending_repairs=(),
+        executor_state="blocked",
+        executor_reason="mission blocked",
+        waiting_for=None,
+        advance_condition=None,
+        verifier_outputs=(blocker,),
     )
 
 

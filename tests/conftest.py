@@ -244,6 +244,11 @@ class ScriptedFakeOllamaProvider:
                         deliverables.append(
                             {
                                 "id": deliverable_id,
+                                "mode": (
+                                    raw_deliverable.get("mode")
+                                    if isinstance(raw_deliverable.get("mode"), str)
+                                    else "mixed"
+                                ),
                                 "task": task,
                                 "deliverable": deliverable,
                                 "verification": verification,
@@ -259,6 +264,7 @@ class ScriptedFakeOllamaProvider:
             deliverables.append(
                 {
                     "id": "d1",
+                    "mode": "mixed",
                     "task": "Complete the requested mission",
                     "deliverable": user_input,
                     "verification": "The requested outcome is verified from runtime facts.",

@@ -10,6 +10,31 @@ _MISSION_STATUS_VALUES = frozenset({"active", "blocked", "completed"})
 _DELIVERABLE_STATUS_VALUES = frozenset(
     {"pending", "active", "completed", "blocked"}
 )
+_EXECUTOR_STATE_VALUES = frozenset(
+    {
+        "planning",
+        "ready",
+        "executing",
+        "awaiting_tool_result",
+        "awaiting_verification",
+        "repairing",
+        "blocked",
+        "completed",
+    }
+)
+_DELIVERABLE_MODE_VALUES = frozenset({"artifact", "reply", "mixed"})
+_DELIVERABLE_EXECUTION_STATE_VALUES = frozenset(
+    {
+        "pending",
+        "ready",
+        "executing",
+        "awaiting_tool_result",
+        "awaiting_verification",
+        "repairing",
+        "completed",
+        "blocked",
+    }
+)
 _MAX_MISSION_ID_CHARS = 64
 _MAX_MISSION_GOAL_CHARS = 240
 _MAX_ACTIVE_TASK_CHARS = 120
@@ -24,6 +49,11 @@ _MAX_HISTORY_ITEM_CHARS = 160
 _MAX_WORKING_MEMORY_ITEM_CHARS = 200
 _MAX_PATH_CHARS = 240
 _MAX_EVIDENCE_CHARS = 200
+_MAX_EXECUTOR_REASON_CHARS = 200
+_MAX_WAITING_FOR_CHARS = 200
+_MAX_ADVANCE_CONDITION_CHARS = 200
+_MAX_VERIFIER_NOTE_CHARS = 240
+_MAX_VERIFIED_REPLY_CHARS = 4000
 _MAX_DELIVERABLES = 4
 _MAX_HISTORY_ENTRIES = 6
 _MAX_WORKING_MEMORY_ITEMS = 6
@@ -48,6 +78,11 @@ class MissionDeliverableState:
     artifact_paths: tuple[str, ...]
     evidence: tuple[str, ...]
     updated_at: str
+    mode: str = "mixed"
+    execution_state: str = "pending"
+    waiting_for: str | None = None
+    advance_condition: str | None = None
+    verifier_notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +112,12 @@ class MissionState:
     blockers: tuple[str, ...] = ()
     pending_repairs: tuple[str, ...] = ()
     final_deliverables_missing: tuple[str, ...] = ()
+    executor_state: str = "planning"
+    executor_reason: str | None = None
+    waiting_for: str | None = None
+    advance_condition: str | None = None
+    verifier_outputs: tuple[str, ...] = ()
+    final_verified_reply: str | None = None
 
     def get_deliverable(
         self,
@@ -192,7 +233,7 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
     if normalized_status == "blocked" and not blocked_deliverables:
         normalized_status = "active"
 
-    return MissionState(
+    normalized_state = MissionState(
         mission_id=_normalize_text(
             mission_state.mission_id,
             field_name="mission_id",
@@ -298,7 +339,67 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
             max_items=_MAX_DELIVERABLES,
             max_chars=_MAX_DELIVERABLE_ID_CHARS,
         ),
+        executor_state=_normalize_choice(
+            mission_state.executor_state,
+            field_name="executor_state",
+            allowed_values=_EXECUTOR_STATE_VALUES,
+        ),
+        executor_reason=_normalize_text(
+            mission_state.executor_reason,
+            field_name="executor_reason",
+            max_chars=_MAX_EXECUTOR_REASON_CHARS,
+        ),
+        waiting_for=_normalize_text(
+            mission_state.waiting_for,
+            field_name="waiting_for",
+            max_chars=_MAX_WAITING_FOR_CHARS,
+        ),
+        advance_condition=_normalize_text(
+            mission_state.advance_condition,
+            field_name="advance_condition",
+            max_chars=_MAX_ADVANCE_CONDITION_CHARS,
+        ),
+        verifier_outputs=_normalize_text_items(
+            mission_state.verifier_outputs,
+            max_items=_MAX_WORKING_MEMORY_ITEMS,
+            max_chars=_MAX_VERIFIER_NOTE_CHARS,
+        ),
+        final_verified_reply=_normalize_text(
+            mission_state.final_verified_reply,
+            field_name="final_verified_reply",
+            max_chars=_MAX_VERIFIED_REPLY_CHARS,
+        ),
     )
+    if (
+        normalized_state.status == "completed"
+        and normalized_state.executor_state == "planning"
+        and not normalized_state.active_deliverable_id
+        and not normalized_state.pending_repairs
+        and not normalized_state.final_deliverables_missing
+        and normalized_state.deliverables
+        and all(
+            deliverable.status == "completed"
+            for deliverable in normalized_state.deliverables
+        )
+    ):
+        normalized_state = replace(normalized_state, executor_state="completed")
+    if (
+        normalized_state.status == "blocked"
+        and normalized_state.executor_state == "planning"
+        and normalized_state.blocked_deliverables
+    ):
+        normalized_state = replace(normalized_state, executor_state="blocked")
+    if mission_completion_ready(normalized_state):
+        return replace(normalized_state, status="completed")
+    if normalized_state.status == "completed":
+        return replace(normalized_state, status="active")
+    if (
+        normalized_state.status == "blocked"
+        and normalized_state.executor_state != "blocked"
+        and not normalized_state.blocked_deliverables
+    ):
+        return replace(normalized_state, status="active")
+    return normalized_state
 
 
 def normalize_mission_deliverable(
@@ -369,6 +470,31 @@ def normalize_mission_deliverable(
             max_chars=_MAX_EVIDENCE_CHARS,
         ),
         updated_at=_normalize_timestamp(deliverable.updated_at),
+        mode=_normalize_choice(
+            deliverable.mode,
+            field_name="deliverable.mode",
+            allowed_values=_DELIVERABLE_MODE_VALUES,
+        ),
+        execution_state=_normalize_choice(
+            deliverable.execution_state,
+            field_name="deliverable.execution_state",
+            allowed_values=_DELIVERABLE_EXECUTION_STATE_VALUES,
+        ),
+        waiting_for=_normalize_text(
+            deliverable.waiting_for,
+            field_name="deliverable.waiting_for",
+            max_chars=_MAX_WAITING_FOR_CHARS,
+        ),
+        advance_condition=_normalize_text(
+            deliverable.advance_condition,
+            field_name="deliverable.advance_condition",
+            max_chars=_MAX_ADVANCE_CONDITION_CHARS,
+        ),
+        verifier_notes=_normalize_text(
+            deliverable.verifier_notes,
+            field_name="deliverable.verifier_notes",
+            max_chars=_MAX_VERIFIER_NOTE_CHARS,
+        ),
     )
 
 
@@ -400,6 +526,11 @@ def serialize_mission_state(mission_state: MissionState) -> str:
                     "artifact_paths": list(deliverable.artifact_paths),
                     "evidence": list(deliverable.evidence),
                     "updated_at": deliverable.updated_at,
+                    "mode": deliverable.mode,
+                    "execution_state": deliverable.execution_state,
+                    "waiting_for": deliverable.waiting_for,
+                    "advance_condition": deliverable.advance_condition,
+                    "verifier_notes": deliverable.verifier_notes,
                 }
                 for deliverable in normalized.deliverables
             ],
@@ -422,6 +553,12 @@ def serialize_mission_state(mission_state: MissionState) -> str:
             "final_deliverables_missing": list(
                 normalized.final_deliverables_missing
             ),
+            "executor_state": normalized.executor_state,
+            "executor_reason": normalized.executor_reason,
+            "waiting_for": normalized.waiting_for,
+            "advance_condition": normalized.advance_condition,
+            "verifier_outputs": list(normalized.verifier_outputs),
+            "final_verified_reply": normalized.final_verified_reply,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -489,6 +626,17 @@ def parse_mission_state(payload_json: str) -> MissionState | None:
                 final_deliverables_missing=_coerce_str_tuple(
                     parsed.get("final_deliverables_missing")
                 ),
+                executor_state=_coerce_optional_str(parsed.get("executor_state"))
+                or "planning",
+                executor_reason=_coerce_optional_str(parsed.get("executor_reason")),
+                waiting_for=_coerce_optional_str(parsed.get("waiting_for")),
+                advance_condition=_coerce_optional_str(
+                    parsed.get("advance_condition")
+                ),
+                verifier_outputs=_coerce_str_tuple(parsed.get("verifier_outputs")),
+                final_verified_reply=_coerce_optional_str(
+                    parsed.get("final_verified_reply")
+                ),
             )
         )
     except (TypeError, ValueError):
@@ -515,10 +663,44 @@ def _parse_mission_deliverable(payload: Any) -> MissionDeliverableState | None:
                 artifact_paths=_coerce_str_tuple(payload.get("artifact_paths")),
                 evidence=_coerce_str_tuple(payload.get("evidence")),
                 updated_at=_coerce_required_str(payload.get("updated_at")),
+                mode=_coerce_optional_str(payload.get("mode")) or "mixed",
+                execution_state=(
+                    _coerce_optional_str(payload.get("execution_state"))
+                    or "pending"
+                ),
+                waiting_for=_coerce_optional_str(payload.get("waiting_for")),
+                advance_condition=_coerce_optional_str(
+                    payload.get("advance_condition")
+                ),
+                verifier_notes=_coerce_optional_str(payload.get("verifier_notes")),
             )
         )
     except (TypeError, ValueError):
         return None
+
+
+def mission_completion_ready(mission_state: MissionState) -> bool:
+    """Return True when mission completion invariants are all satisfied."""
+
+    if mission_state.active_deliverable_id is not None:
+        return False
+    if mission_state.executor_state != "completed":
+        return False
+    if mission_state.execution_queue:
+        return False
+    if mission_state.pending_repairs:
+        return False
+    if mission_state.final_deliverables_missing:
+        return False
+    if any(deliverable.status != "completed" for deliverable in mission_state.deliverables):
+        return False
+    if any(
+        deliverable.execution_state not in {"completed", "blocked"}
+        and deliverable.status != "completed"
+        for deliverable in mission_state.deliverables
+    ):
+        return False
+    return True
 
 
 def _coerce_required_str(value: Any) -> str:

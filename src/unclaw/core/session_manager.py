@@ -12,7 +12,12 @@ from uuid import uuid4
 from unclaw.core.mission_state import (
     MissionState,
     parse_mission_state,
-    serialize_mission_state,
+)
+from unclaw.core.mission_workspace import (
+    MissionWorkspacePointer,
+    MissionWorkspaceStore,
+    parse_mission_workspace_pointer,
+    serialize_mission_workspace_pointer,
 )
 from unclaw.db.repositories import EventRepository, MessageRepository, SessionRepository
 from unclaw.db.sqlite import initialize_schema, open_connection
@@ -72,6 +77,7 @@ class SessionManager:
     event_repository: EventRepository
     current_session_id: str | None = None
     chat_store: ChatMemoryStore | None = None
+    mission_workspace_store: MissionWorkspaceStore | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -85,6 +91,9 @@ class SessionManager:
             event_repository=EventRepository(connection),
             chat_store=ChatMemoryStore(
                 settings.paths.data_dir / "memory" / "chats"
+            ),
+            mission_workspace_store=MissionWorkspaceStore(
+                settings.paths.data_dir / "runtime" / "missions"
             ),
         )
         manager.initialize()
@@ -239,11 +248,7 @@ class SessionManager:
             resolved_session_id,
             _SESSION_GOAL_STATE_EVENT_TYPE,
         )
-        mission_state: MissionState | None = None
-        if mission_row is not None:
-            payload_json = mission_row["payload_json"]
-            if isinstance(payload_json, str):
-                mission_state = parse_mission_state(payload_json)
+        mission_state = self.get_current_mission_state(resolved_session_id)
 
         if goal_row is not None and not _mission_projection_should_dominate(mission_state):
             payload_json = goal_row["payload_json"]
@@ -253,18 +258,17 @@ class SessionManager:
                     return goal_state
 
         if (
-            mission_row is not None
+            mission_state is not None
             and (
                 goal_row is None
                 or (
-                    isinstance(mission_row["created_at"], str)
+                    isinstance(mission_state.updated_at, str)
                     and isinstance(goal_row["created_at"], str)
-                    and mission_row["created_at"] > goal_row["created_at"]
+                    and mission_state.updated_at > goal_row["created_at"]
                 )
             )
         ):
-            if mission_state is not None:
-                return _project_session_goal_state_from_mission(mission_state)
+            return _project_session_goal_state_from_mission(mission_state)
 
         if goal_row is not None:
             payload_json = goal_row["payload_json"]
@@ -273,12 +277,6 @@ class SessionManager:
                 if goal_state is not None:
                     return goal_state
 
-        if mission_row is None:
-            return None
-        payload_json = mission_row["payload_json"]
-        if not isinstance(payload_json, str):
-            return None
-        mission_state = parse_mission_state(payload_json)
         if mission_state is None:
             return None
         return _project_session_goal_state_from_mission(mission_state)
@@ -344,11 +342,7 @@ class SessionManager:
             resolved_session_id,
             _SESSION_PROGRESS_LEDGER_EVENT_TYPE,
         )
-        mission_state: MissionState | None = None
-        if mission_row is not None:
-            payload_json = mission_row["payload_json"]
-            if isinstance(payload_json, str):
-                mission_state = parse_mission_state(payload_json)
+        mission_state = self.get_current_mission_state(resolved_session_id)
 
         if ledger_row is not None and not _mission_projection_should_dominate(mission_state):
             payload_json = ledger_row["payload_json"]
@@ -358,18 +352,17 @@ class SessionManager:
                     return ledger
 
         if (
-            mission_row is not None
+            mission_state is not None
             and (
                 ledger_row is None
                 or (
-                    isinstance(mission_row["created_at"], str)
+                    isinstance(mission_state.updated_at, str)
                     and isinstance(ledger_row["created_at"], str)
-                    and mission_row["created_at"] > ledger_row["created_at"]
+                    and mission_state.updated_at > ledger_row["created_at"]
                 )
             )
         ):
-            if mission_state is not None:
-                return _project_session_progress_ledger_from_mission(mission_state)
+            return _project_session_progress_ledger_from_mission(mission_state)
 
         if ledger_row is not None:
             payload_json = ledger_row["payload_json"]
@@ -378,12 +371,6 @@ class SessionManager:
                 if ledger:
                     return ledger
 
-        if mission_row is None:
-            return ()
-        payload_json = mission_row["payload_json"]
-        if not isinstance(payload_json, str):
-            return ()
-        mission_state = parse_mission_state(payload_json)
         if mission_state is None:
             return ()
         return _project_session_progress_ledger_from_mission(mission_state)
@@ -458,6 +445,15 @@ class SessionManager:
         payload_json = row["payload_json"]
         if not isinstance(payload_json, str):
             return None
+        pointer = parse_mission_workspace_pointer(payload_json)
+        if pointer is not None and self.mission_workspace_store is not None:
+            mission_state = self.mission_workspace_store.load_mission(
+                session_id=resolved_session_id,
+                mission_id=pointer.mission_id,
+                workspace_path=pointer.workspace_path,
+            )
+            if mission_state is not None:
+                return mission_state
         return parse_mission_state(payload_json)
 
     def persist_mission_state(
@@ -474,7 +470,23 @@ class SessionManager:
                 f"Session '{resolved_session_id}' is not available."
             )
 
-        serialized_payload = serialize_mission_state(mission_state)
+        if self.mission_workspace_store is None:
+            raise SessionManagerError("Mission workspace store is not available.")
+
+        workspace_path = self.mission_workspace_store.save_mission(
+            session_id=resolved_session_id,
+            mission_state=mission_state,
+        )
+        serialized_payload = serialize_mission_workspace_pointer(
+            MissionWorkspacePointer(
+                mission_id=mission_state.mission_id,
+                workspace_path=str(workspace_path),
+                updated_at=mission_state.updated_at,
+                status=mission_state.status,
+                executor_state=mission_state.executor_state,
+                active_deliverable_id=mission_state.active_deliverable_id,
+            )
+        )
         self.event_repository.add_event(
             session_id=resolved_session_id,
             event_type=_SESSION_MISSION_STATE_EVENT_TYPE,

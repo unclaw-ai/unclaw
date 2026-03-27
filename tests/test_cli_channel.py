@@ -1505,12 +1505,14 @@ def test_cli_shows_live_mission_progress_lines_for_kernel_turn(
                             "deliverables": [
                                 {
                                     "id": "d1",
+                                    "mode": "artifact",
                                     "task": "Write the local note",
                                     "deliverable": "Local note file",
                                     "verification": "The file is written and read back.",
                                 },
                                 {
                                     "id": "d2",
+                                    "mode": "reply",
                                     "task": "Tell the final joke",
                                     "deliverable": "Final joke reply",
                                     "verification": "The joke is present in the final reply.",
@@ -1665,10 +1667,11 @@ def test_cli_shows_live_mission_progress_lines_for_kernel_turn(
     output = capsys.readouterr().out
     assert exit_code == 0
     assert "[mission] planning" in output
-    assert "[mission] executing d1" in output
-    assert "[mission] verifying d1" in output
-    assert "[mission] completed d1" in output
-    assert "[mission] executing d2" in output
-    assert "[mission] finalizing" in output
+    assert "[mission] d1 executing" in output
+    assert "[mission] d1 awaiting_tool_result" in output
+    assert "[mission] d1 awaiting_verification" in output
+    assert "[mission] d1 completed" in output
+    assert "[mission] d2 awaiting_verification" in output
+    assert "[mission] mission completed" in output
     assert '[tool] write_text_file {"content": "cli kernel note", "path": ' in output
     assert "Unclaw> Note saved. Joke: The CLI found the live kernel." in output

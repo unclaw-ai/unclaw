@@ -21,6 +21,10 @@ _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
         "- Mission means the full user-requested outcome across one or more steps and turns.",
         "- Task means one concrete sub-objective inside that mission.",
         "- Deliverables must be concrete, compact, and verifiable.",
+        "- Every deliverable must declare mode=artifact|reply|mixed.",
+        "- artifact means completion requires verified artifact evidence.",
+        "- reply means completion can be verified from the emitted reply without pretending a file exists.",
+        "- mixed means both artifact and reply evidence may matter.",
         "- Keep the plan compact for local models: at most 4 deliverables.",
         "- Use the actual existing mission when the user is continuing, repairing, resuming, or asking mission status for the same outcome.",
         "- `compatibility_mission_state` is weak legacy context only. Do not continue it unless the user is clearly asking for that same old mission and no newer actual mission exists.",
@@ -36,7 +40,7 @@ _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
         (
             '{"mission_action":"start_new|continue_existing|direct_reply_only",'
             '"mission_goal":"...",'
-            '"deliverables":[{"id":"d1","task":"...","deliverable":"...",'
+            '"deliverables":[{"id":"d1","mode":"artifact|reply|mixed","task":"...","deliverable":"...",'
             '"verification":"...","depends_on":["d0"]}],'
             '"execution_queue":["d1"],'
             '"active_deliverable_id":"d1",'
@@ -52,6 +56,8 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
         "- Completion requires every mission deliverable to be verified completed.",
         "- Do not trust draft confidence. Verify from tool results, artifact facts, and persisted mission state.",
         "- If a file action did not happen, do not call that deliverable complete.",
+        "- If the active deliverable mode is artifact, do not mark it complete without verified read-back or equivalent concrete artifact evidence.",
+        "- If the active deliverable mode is reply, verify the reply itself instead of pretending a file is required.",
         "- If a timeout or failure can still be repaired within budget, keep the mission active and say what is missing.",
         "- If retry budget is exhausted or a blocker is unrecoverable from the given facts, mark the mission blocked.",
         "- If an existing file might already satisfy the active deliverable but it is not verified yet, keep the mission active and request a verification read in notes_for_next_step.",
@@ -177,6 +183,10 @@ def parse_mission_plan_response(
         if not isinstance(item, dict):
             return None
         deliverable_id = _read_optional_text(item.get("id")) or f"d{index + 1}"
+        deliverable_mode = _read_choice(
+            item.get("mode"),
+            allowed_values=frozenset({"artifact", "reply", "mixed"}),
+        ) or "mixed"
         task = _read_optional_text(item.get("task"))
         deliverable_text = _read_optional_text(item.get("deliverable"))
         verification = _read_optional_text(item.get("verification"))
@@ -197,6 +207,11 @@ def parse_mission_plan_response(
                 artifact_paths=(),
                 evidence=(),
                 updated_at=updated_at,
+                mode=deliverable_mode,
+                execution_state="pending",
+                waiting_for=None,
+                advance_condition=verification,
+                verifier_notes=None,
             )
         )
 
@@ -315,6 +330,8 @@ def build_mission_progress_note(
     progress_payload = {
         "mission_goal": mission_state.goal,
         "mission_status": verification_decision.mission_status,
+        "executor_state": mission_state.executor_state,
+        "executor_reason": mission_state.executor_reason,
         "active_deliverable_id": verification_decision.active_deliverable_id,
         "current_deliverable_status": verification_decision.current_deliverable_status,
         "missing": verification_decision.missing,
@@ -355,9 +372,11 @@ def build_mission_initialization_note(
         (
             "["
             f"id={json.dumps(deliverable.deliverable_id, ensure_ascii=False)}; "
+            f"mode={json.dumps(deliverable.mode, ensure_ascii=False)}; "
             f"task={json.dumps(deliverable.task, ensure_ascii=False)}; "
             f"deliverable={json.dumps(deliverable.deliverable, ensure_ascii=False)}; "
-            f"status={json.dumps(deliverable.status, ensure_ascii=False)}"
+            f"status={json.dumps(deliverable.status, ensure_ascii=False)}; "
+            f"execution_state={json.dumps(deliverable.execution_state, ensure_ascii=False)}"
             "]"
         )
         for deliverable in mission_state.deliverables
@@ -366,6 +385,7 @@ def build_mission_initialization_note(
         f"{_MISSION_PLAN_NOTE_PREFIX} "
         f"goal={json.dumps(mission_state.goal, ensure_ascii=False)}; "
         f"status={json.dumps(mission_state.status, ensure_ascii=False)}; "
+        f"executor_state={json.dumps(mission_state.executor_state, ensure_ascii=False)}; "
         f"active_deliverable_id={json.dumps(mission_state.active_deliverable_id, ensure_ascii=False)}; "
         f"active_task={json.dumps(mission_state.active_task, ensure_ascii=False)}; "
         f"deliverables={deliverable_lines or '[]'}."
@@ -392,13 +412,21 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "pending_repairs": mission_state.pending_repairs,
         "final_deliverables_missing": mission_state.final_deliverables_missing,
         "planner_summary": mission_state.planner_summary,
+        "executor_state": mission_state.executor_state,
+        "executor_reason": mission_state.executor_reason,
+        "waiting_for": mission_state.waiting_for,
+        "advance_condition": mission_state.advance_condition,
+        "verifier_outputs": mission_state.verifier_outputs,
+        "final_verified_reply": mission_state.final_verified_reply,
         "deliverables": tuple(
             {
                 "deliverable_id": deliverable.deliverable_id,
+                "mode": deliverable.mode,
                 "task": deliverable.task,
                 "deliverable": deliverable.deliverable,
                 "verification": deliverable.verification,
                 "status": deliverable.status,
+                "execution_state": deliverable.execution_state,
                 "missing": deliverable.missing,
                 "blocker": deliverable.blocker,
                 "attempt_count": deliverable.attempt_count,
@@ -407,6 +435,9 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "artifact_paths": deliverable.artifact_paths,
                 "evidence": deliverable.evidence,
                 "updated_at": deliverable.updated_at,
+                "waiting_for": deliverable.waiting_for,
+                "advance_condition": deliverable.advance_condition,
+                "verifier_notes": deliverable.verifier_notes,
             }
             for deliverable in mission_state.deliverables
         ),
