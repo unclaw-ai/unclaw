@@ -37,7 +37,9 @@ from unclaw.startup import (
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 
 _TOOL_CALL_ARGUMENT_CHAR_LIMIT = 200
-_HIDDEN_TOOL_ARGUMENT_NAMES = frozenset({"mission_id", "mission_deliverable_id"})
+_HIDDEN_TOOL_ARGUMENT_NAMES = frozenset(
+    {"mission_id", "mission_task_id", "mission_deliverable_id"}
+)
 
 
 @dataclass(slots=True)

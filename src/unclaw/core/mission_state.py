@@ -1,4 +1,4 @@
-"""Persisted mission-state model for durable multi-step execution."""
+"""Persisted mission-state model for the single-agent mission loop."""
 
 from __future__ import annotations
 
@@ -6,105 +6,106 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
+from unclaw.llm.base import utc_now_iso
+
 _MISSION_STATUS_VALUES = frozenset({"active", "blocked", "completed"})
-_DELIVERABLE_STATUS_VALUES = frozenset(
-    {"pending", "active", "completed", "blocked"}
+_TASK_STATUS_VALUES = frozenset(
+    {"pending", "active", "repairing", "completed", "blocked"}
+)
+_TASK_KIND_VALUES = frozenset(
+    {
+        "reply",
+        "web_grounding",
+        "web_research",
+        "file_write",
+        "file_read",
+        "file_delete",
+        "directory_list",
+        "calc",
+        "mixed",
+    }
 )
 _EXECUTOR_STATE_VALUES = frozenset(
-    {
-        "planning",
-        "ready",
-        "executing",
-        "awaiting_tool_result",
-        "awaiting_verification",
-        "repairing",
-        "blocked",
-        "completed",
-    }
+    {"active", "repairing", "blocked", "completed"}
 )
-_DELIVERABLE_MODE_VALUES = frozenset({"artifact", "reply", "mixed"})
-_MISSION_RELATION_VALUES = frozenset(
-    {
-        "same_active_mission",
-        "repair_same_mission",
-        "status_of_same_mission",
-        "new_mission",
-        "standalone_direct_reply",
-    }
-)
-_DELIVERABLE_EVIDENCE_KIND_VALUES = frozenset(
-    {
-        "fast_grounding",
-        "full_web_research",
-        "artifact_write",
-        "artifact_readback",
-        "reply_emitted",
-        "local_delete",
-        "directory_listing",
-        "calculation_result",
-    }
-)
-_DELIVERABLE_EXECUTION_STATE_VALUES = frozenset(
-    {
-        "pending",
-        "ready",
-        "executing",
-        "awaiting_tool_result",
-        "awaiting_verification",
-        "repairing",
-        "completed",
-        "blocked",
-    }
-)
-_MAX_MISSION_ID_CHARS = 64
-_MAX_MISSION_GOAL_CHARS = 240
-_MAX_ACTIVE_TASK_CHARS = 120
-_MAX_BLOCKER_CHARS = 200
-_MAX_PLANNER_SUMMARY_CHARS = 200
-_MAX_DELIVERABLE_ID_CHARS = 48
-_MAX_TASK_CHARS = 120
-_MAX_DELIVERABLE_CHARS = 160
-_MAX_VERIFICATION_CHARS = 160
-_MAX_MISSING_CHARS = 200
-_MAX_HISTORY_ITEM_CHARS = 160
-_MAX_WORKING_MEMORY_ITEM_CHARS = 200
-_MAX_PATH_CHARS = 240
-_MAX_EVIDENCE_CHARS = 200
-_MAX_EXECUTOR_REASON_CHARS = 200
-_MAX_WAITING_FOR_CHARS = 200
-_MAX_ADVANCE_CONDITION_CHARS = 200
-_MAX_VERIFIER_NOTE_CHARS = 240
-_MAX_VERIFIED_REPLY_CHARS = 4000
-_MAX_DELIVERABLES = 4
-_MAX_HISTORY_ENTRIES = 6
-_MAX_WORKING_MEMORY_ITEMS = 6
-_MAX_ARTIFACT_PATHS = 4
-_MAX_EVIDENCE_ITEMS = 4
+_DEFAULT_REQUIRED_EVIDENCE_BY_KIND: dict[str, tuple[str, ...]] = {
+    "reply": ("reply_emitted",),
+    "web_grounding": ("fast_grounding",),
+    "web_research": ("full_web_research",),
+    "file_write": ("artifact_write", "artifact_readback"),
+    "file_read": ("artifact_readback",),
+    "file_delete": ("local_delete",),
+    "directory_list": ("directory_listing",),
+    "calc": ("calculation_result",),
+    "mixed": (),
+}
+_MAX_TASKS = 8
+_MAX_EVIDENCE_ITEMS = 12
+_MAX_TOOL_HISTORY = 24
+_MAX_TEXT_ITEMS = 8
 
 
 @dataclass(frozen=True, slots=True)
-class MissionDeliverableState:
-    """Persisted state for one mission deliverable."""
+class MissionTaskState:
+    """Persisted proof-tracked task inside one mission."""
 
-    deliverable_id: str
-    task: str
-    deliverable: str
-    verification: str
+    id: str
+    title: str
+    kind: str
     status: str
-    missing: str | None
-    blocker: str | None
-    attempt_count: int
-    repair_count: int
-    retry_count: int
-    artifact_paths: tuple[str, ...]
-    evidence: tuple[str, ...]
-    updated_at: str
-    mode: str = "mixed"
+    depends_on: tuple[str, ...] = ()
     required_evidence: tuple[str, ...] = ()
-    execution_state: str = "pending"
-    waiting_for: str | None = None
-    advance_condition: str | None = None
-    verifier_notes: str | None = None
+    satisfied_evidence: tuple[str, ...] = ()
+    artifact_paths: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+    latest_error: str | None = None
+    repair_count: int = 0
+    updated_at: str = ""
+
+    @property
+    def deliverable_id(self) -> str:
+        return self.id
+
+    @property
+    def task(self) -> str:
+        return self.title
+
+    @property
+    def blocker(self) -> str | None:
+        return self.latest_error
+
+    @property
+    def missing(self) -> str | None:
+        return None if self.status == "completed" else self.latest_error
+
+
+MissionDeliverableState = MissionTaskState
+
+
+@dataclass(frozen=True, slots=True)
+class MissionEvidenceRecord:
+    """One structured evidence record appended by the runtime."""
+
+    kind: str
+    task_id: str | None
+    summary: str
+    created_at: str
+    tool_name: str | None = None
+    artifact_paths: tuple[str, ...] = ()
+    success: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class MissionToolCallRecord:
+    """One executed or rejected tool call recorded in mission history."""
+
+    tool_name: str
+    task_id: str | None
+    arguments: dict[str, Any]
+    created_at: str
+    executed: bool = True
+    success: bool | None = None
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,489 +113,431 @@ class MissionState:
     """Persisted mission snapshot for one session."""
 
     mission_id: str
-    goal: str
+    mission_goal: str
     status: str
-    active_deliverable_id: str | None
-    active_task: str | None
-    completed_deliverables: tuple[str, ...]
-    blocked_deliverables: tuple[str, ...]
-    deliverables: tuple[MissionDeliverableState, ...]
-    retry_history: tuple[str, ...]
-    repair_history: tuple[str, ...]
-    last_verified_artifact_paths: tuple[str, ...]
-    last_successful_evidence: tuple[str, ...]
-    last_blocker: str | None
+    tasks: tuple[MissionTaskState, ...]
+    active_task_id: str | None
     updated_at: str
-    planner_summary: str | None = None
-    execution_queue: tuple[str, ...] = ()
-    completed_steps: tuple[str, ...] = ()
-    failed_steps: tuple[str, ...] = ()
-    observed_facts: tuple[str, ...] = ()
-    artifact_facts: tuple[str, ...] = ()
-    blockers: tuple[str, ...] = ()
-    pending_repairs: tuple[str, ...] = ()
-    final_deliverables_missing: tuple[str, ...] = ()
-    executor_state: str = "planning"
-    executor_reason: str | None = None
-    waiting_for: str | None = None
-    advance_condition: str | None = None
-    verifier_outputs: tuple[str, ...] = ()
-    final_verified_reply: str | None = None
-    last_turn_relation: str | None = None
+    reasoning_summary: str | None = None
+    reply_to_user: str | None = None
+    completion_claim: bool = False
+    blocker: str | None = None
+    next_expected_evidence: str | None = None
+    evidence_log: tuple[MissionEvidenceRecord, ...] = ()
+    tool_history: tuple[MissionToolCallRecord, ...] = ()
+    final_reply: str | None = None
+    last_user_input: str | None = None
+    loop_count: int = 0
+    executor_state: str = "active"
+    retry_history: tuple[str, ...] = ()
+    repair_history: tuple[str, ...] = ()
+    last_verified_artifact_paths: tuple[str, ...] = ()
+    last_successful_evidence: tuple[str, ...] = ()
+    last_blocker: str | None = None
+
+    def get_task(
+        self,
+        task_id: str | None = None,
+    ) -> MissionTaskState | None:
+        resolved_id = task_id or self.active_task_id
+        if resolved_id is None:
+            return None
+        return next((task for task in self.tasks if task.id == resolved_id), None)
 
     def get_deliverable(
         self,
         deliverable_id: str | None = None,
-    ) -> MissionDeliverableState | None:
-        resolved_id = deliverable_id or self.active_deliverable_id
-        if resolved_id is None:
-            return None
-        return next(
-            (
-                deliverable
-                for deliverable in self.deliverables
-                if deliverable.deliverable_id == resolved_id
-            ),
-            None,
+    ) -> MissionTaskState | None:
+        return self.get_task(deliverable_id)
+
+    def replace_task(
+        self,
+        task: MissionTaskState,
+        *,
+        updated_at: str,
+    ) -> MissionState:
+        next_tasks = tuple(
+            task if current.id == task.id else current for current in self.tasks
+        )
+        return normalize_mission_state(
+            replace(
+                self,
+                tasks=next_tasks,
+                updated_at=updated_at,
+            )
         )
 
     def replace_deliverable(
         self,
-        deliverable: MissionDeliverableState,
+        deliverable: MissionTaskState,
         *,
         updated_at: str,
     ) -> MissionState:
-        next_deliverables = tuple(
-            deliverable
-            if current.deliverable_id == deliverable.deliverable_id
-            else current
-            for current in self.deliverables
+        return self.replace_task(deliverable, updated_at=updated_at)
+
+    @property
+    def goal(self) -> str:
+        return self.mission_goal
+
+    @property
+    def deliverables(self) -> tuple[MissionTaskState, ...]:
+        return self.tasks
+
+    @property
+    def active_deliverable_id(self) -> str | None:
+        return self.active_task_id
+
+    @property
+    def active_task(self) -> str | None:
+        active_task = self.get_task()
+        return active_task.title if active_task is not None else None
+
+    @property
+    def completed_deliverables(self) -> tuple[str, ...]:
+        return tuple(task.id for task in self.tasks if task.status == "completed")
+
+    @property
+    def blocked_deliverables(self) -> tuple[str, ...]:
+        return tuple(task.id for task in self.tasks if task.status == "blocked")
+
+    @property
+    def planner_summary(self) -> str | None:
+        return self.reasoning_summary
+
+    @property
+    def execution_queue(self) -> tuple[str, ...]:
+        return tuple(task.id for task in self.tasks)
+
+    @property
+    def completed_steps(self) -> tuple[str, ...]:
+        return self.completed_deliverables
+
+    @property
+    def failed_steps(self) -> tuple[str, ...]:
+        return self.blocked_deliverables
+
+    @property
+    def observed_facts(self) -> tuple[str, ...]:
+        return tuple(record.summary for record in self.evidence_log if record.success)[
+            -_MAX_TEXT_ITEMS:
+        ]
+
+    @property
+    def artifact_facts(self) -> tuple[str, ...]:
+        facts: list[str] = []
+        for record in self.evidence_log:
+            for path in record.artifact_paths:
+                if path not in facts:
+                    facts.append(path)
+        return tuple(facts[-_MAX_TEXT_ITEMS:])
+
+    @property
+    def blockers(self) -> tuple[str, ...]:
+        if self.last_blocker:
+            return (self.last_blocker,)
+        if self.blocker:
+            return (self.blocker,)
+        return ()
+
+    @property
+    def pending_repairs(self) -> tuple[str, ...]:
+        return tuple(
+            task.id
+            for task in self.tasks
+            if task.status == "repairing" or (task.latest_error and task.status == "active")
         )
-        completed_ids = tuple(
-            item.deliverable_id
-            for item in next_deliverables
-            if item.status == "completed"
+
+    @property
+    def final_deliverables_missing(self) -> tuple[str, ...]:
+        return tuple(
+            task.id for task in self.tasks if task.status not in {"completed", "blocked"}
         )
-        blocked_ids = tuple(
-            item.deliverable_id
-            for item in next_deliverables
-            if item.status == "blocked"
+
+    @property
+    def waiting_for(self) -> str | None:
+        return self.next_expected_evidence
+
+    @property
+    def advance_condition(self) -> str | None:
+        return self.next_expected_evidence
+
+    @property
+    def verifier_outputs(self) -> tuple[str, ...]:
+        return self.last_successful_evidence
+
+    @property
+    def final_verified_reply(self) -> str | None:
+        return self.final_reply
+
+    @property
+    def last_turn_relation(self) -> str | None:
+        return None
+
+
+def normalize_mission_task(task: MissionTaskState) -> MissionTaskState:
+    """Return a normalized task safe for persistence."""
+
+    normalized_id = _normalize_text(task.id, fallback="task")
+    normalized_title = _normalize_text(task.title, fallback=normalized_id)
+    normalized_kind = _normalize_choice(
+        task.kind or "mixed",
+        allowed_values=_TASK_KIND_VALUES,
+        fallback="mixed",
+    )
+    default_required = _DEFAULT_REQUIRED_EVIDENCE_BY_KIND.get(normalized_kind, ())
+    normalized_required = _normalize_text_items(
+        task.required_evidence or default_required
+    )
+    normalized_satisfied = tuple(
+        item
+        for item in _normalize_text_items(task.satisfied_evidence)
+        if item in normalized_required or item.startswith("tool:")
+    )
+    normalized_status = _normalize_choice(
+        task.status,
+        allowed_values=_TASK_STATUS_VALUES,
+        fallback="pending",
+    )
+    if normalized_required and all(
+        evidence in normalized_satisfied for evidence in normalized_required
+    ):
+        normalized_status = "completed"
+    if normalized_status == "completed":
+        normalized_satisfied = tuple(
+            item
+            for item in dict.fromkeys(normalized_required + normalized_satisfied)
         )
-        active_deliverable = next(
-            (
-                item
-                for item in next_deliverables
-                if item.status in {"active", "pending"}
-            ),
-            None,
-        )
-        return replace(
-            self,
-            deliverables=next_deliverables,
-            completed_deliverables=completed_ids,
-            blocked_deliverables=blocked_ids,
-            active_deliverable_id=(
-                active_deliverable.deliverable_id
-                if active_deliverable is not None
-                else None
-            ),
-            active_task=(
-                active_deliverable.task if active_deliverable is not None else None
-            ),
-            updated_at=updated_at,
-            last_blocker=(
-                deliverable.blocker
-                if deliverable.status == "blocked"
-                else self.last_blocker
-            ),
-        )
+    return MissionTaskState(
+        id=normalized_id,
+        title=normalized_title,
+        kind=normalized_kind,
+        status=normalized_status,
+        depends_on=_normalize_text_items(task.depends_on),
+        required_evidence=normalized_required,
+        satisfied_evidence=normalized_satisfied,
+        artifact_paths=_normalize_text_items(task.artifact_paths),
+        evidence=_normalize_text_items(task.evidence),
+        latest_error=_normalize_optional_text(task.latest_error),
+        repair_count=max(task.repair_count, 0),
+        updated_at=_normalize_timestamp(task.updated_at),
+    )
+
+
+normalize_mission_deliverable = normalize_mission_task
 
 
 def normalize_mission_state(mission_state: MissionState) -> MissionState:
     """Return a normalized copy safe for persistence."""
 
-    normalized_deliverables = tuple(
-        normalize_mission_deliverable(deliverable)
-        for deliverable in mission_state.deliverables[:_MAX_DELIVERABLES]
+    normalized_tasks = _normalize_tasks(mission_state.tasks)
+    completed_task_ids = tuple(
+        task.id for task in normalized_tasks if task.status == "completed"
     )
-    active_deliverable = next(
-        (
-            deliverable
-            for deliverable in normalized_deliverables
-            if deliverable.deliverable_id == mission_state.active_deliverable_id
-        ),
-        None,
+    blocked_task_ids = tuple(
+        task.id for task in normalized_tasks if task.status == "blocked"
     )
-    if active_deliverable is None:
-        active_deliverable = next(
-            (
-                deliverable
-                for deliverable in normalized_deliverables
-                if deliverable.status in {"active", "pending"}
-            ),
+
+    active_task_id = _normalize_optional_text(mission_state.active_task_id)
+    if active_task_id is not None and not any(
+        task.id == active_task_id for task in normalized_tasks
+    ):
+        active_task_id = None
+    if active_task_id is not None:
+        current_active_task = next(
+            (task for task in normalized_tasks if task.id == active_task_id),
             None,
         )
-    completed_deliverables = tuple(
-        deliverable.deliverable_id
-        for deliverable in normalized_deliverables
-        if deliverable.status == "completed"
+        if current_active_task is not None and current_active_task.status in {
+            "completed",
+            "blocked",
+        }:
+            active_task_id = None
+    if active_task_id is None:
+        active_task_id = _first_runnable_incomplete_task_id(normalized_tasks)
+    active_task = next(
+        (task for task in normalized_tasks if task.id == active_task_id),
+        None,
     )
-    blocked_deliverables = tuple(
-        deliverable.deliverable_id
-        for deliverable in normalized_deliverables
-        if deliverable.status == "blocked"
-    )
+
     normalized_status = _normalize_choice(
         mission_state.status,
-        field_name="status",
         allowed_values=_MISSION_STATUS_VALUES,
+        fallback="active",
     )
-    if normalized_status == "completed" and any(
-        deliverable.status != "completed" for deliverable in normalized_deliverables
+    if normalized_tasks and all(task.status == "completed" for task in normalized_tasks):
+        normalized_status = "completed"
+        active_task_id = None
+    elif blocked_task_ids and active_task is None and not any(
+        task.status in {"pending", "active", "repairing"} for task in normalized_tasks
     ):
-        normalized_status = "active"
-    if normalized_status == "blocked" and not blocked_deliverables:
+        normalized_status = "blocked"
+    else:
         normalized_status = "active"
 
-    normalized_state = MissionState(
-        mission_id=_normalize_text(
-            mission_state.mission_id,
-            field_name="mission_id",
-            max_chars=_MAX_MISSION_ID_CHARS,
-            required=True,
+    normalized_blocker = _normalize_optional_text(
+        mission_state.blocker or mission_state.last_blocker
+    )
+    if normalized_status == "completed":
+        normalized_blocker = None
+
+    normalized_executor_state = _normalize_choice(
+        mission_state.executor_state,
+        allowed_values=_EXECUTOR_STATE_VALUES,
+        fallback=(
+            "completed"
+            if normalized_status == "completed"
+            else "blocked"
+            if normalized_status == "blocked"
+            else "repairing"
+            if any(task.status == "repairing" for task in normalized_tasks)
+            else "active"
         ),
-        goal=_normalize_text(
-            mission_state.goal,
-            field_name="goal",
-            max_chars=_MAX_MISSION_GOAL_CHARS,
-            required=True,
+    )
+    if normalized_status == "completed":
+        normalized_executor_state = "completed"
+    elif normalized_status == "blocked":
+        normalized_executor_state = "blocked"
+    elif any(task.status == "repairing" for task in normalized_tasks):
+        normalized_executor_state = "repairing"
+    else:
+        normalized_executor_state = "active"
+
+    evidence_log = tuple(
+        _normalize_evidence_record(record)
+        for record in mission_state.evidence_log[-_MAX_EVIDENCE_ITEMS:]
+    )
+    tool_history = tuple(
+        _normalize_tool_call_record(record)
+        for record in mission_state.tool_history[-_MAX_TOOL_HISTORY:]
+    )
+
+    last_artifact_paths: list[str] = []
+    for task in normalized_tasks:
+        for path in task.artifact_paths:
+            if path not in last_artifact_paths:
+                last_artifact_paths.append(path)
+    for record in evidence_log:
+        for path in record.artifact_paths:
+            if path not in last_artifact_paths:
+                last_artifact_paths.append(path)
+
+    last_successful_evidence: list[str] = []
+    for task in normalized_tasks:
+        for item in task.evidence:
+            if item not in last_successful_evidence:
+                last_successful_evidence.append(item)
+    for record in evidence_log:
+        if record.summary and record.summary not in last_successful_evidence and record.success:
+            last_successful_evidence.append(record.summary)
+
+    next_expected_evidence = _normalize_optional_text(mission_state.next_expected_evidence)
+    if normalized_status == "completed":
+        next_expected_evidence = None
+    elif next_expected_evidence is None and active_task is not None:
+        missing = [
+            evidence
+            for evidence in active_task.required_evidence
+            if evidence not in active_task.satisfied_evidence
+        ]
+        if missing:
+            next_expected_evidence = ", ".join(missing)
+
+    return MissionState(
+        mission_id=_normalize_text(mission_state.mission_id, fallback="mission"),
+        mission_goal=_normalize_text(
+            mission_state.mission_goal,
+            fallback=mission_state.last_user_input or "mission",
         ),
         status=normalized_status,
-        active_deliverable_id=(
-            active_deliverable.deliverable_id
-            if active_deliverable is not None
-            else _normalize_text(
-                mission_state.active_deliverable_id,
-                field_name="active_deliverable_id",
-                max_chars=_MAX_DELIVERABLE_ID_CHARS,
-            )
-        ),
-        active_task=(
-            active_deliverable.task
-            if active_deliverable is not None
-            else _normalize_text(
-                mission_state.active_task,
-                field_name="active_task",
-                max_chars=_MAX_ACTIVE_TASK_CHARS,
-            )
-        ),
-        completed_deliverables=completed_deliverables,
-        blocked_deliverables=blocked_deliverables,
-        deliverables=normalized_deliverables,
-        retry_history=_normalize_text_items(
-            mission_state.retry_history,
-            max_items=_MAX_HISTORY_ENTRIES,
-            max_chars=_MAX_HISTORY_ITEM_CHARS,
-        ),
-        repair_history=_normalize_text_items(
-            mission_state.repair_history,
-            max_items=_MAX_HISTORY_ENTRIES,
-            max_chars=_MAX_HISTORY_ITEM_CHARS,
-        ),
-        last_verified_artifact_paths=_normalize_text_items(
-            mission_state.last_verified_artifact_paths,
-            max_items=_MAX_ARTIFACT_PATHS,
-            max_chars=_MAX_PATH_CHARS,
-        ),
-        last_successful_evidence=_normalize_text_items(
-            mission_state.last_successful_evidence,
-            max_items=_MAX_EVIDENCE_ITEMS,
-            max_chars=_MAX_EVIDENCE_CHARS,
-        ),
-        last_blocker=_normalize_text(
-            mission_state.last_blocker,
-            field_name="last_blocker",
-            max_chars=_MAX_BLOCKER_CHARS,
-        ),
+        tasks=normalized_tasks,
+        active_task_id=active_task_id,
         updated_at=_normalize_timestamp(mission_state.updated_at),
-        planner_summary=_normalize_text(
-            mission_state.planner_summary,
-            field_name="planner_summary",
-            max_chars=_MAX_PLANNER_SUMMARY_CHARS,
-        ),
-        execution_queue=_normalize_text_items(
-            mission_state.execution_queue,
-            max_items=_MAX_DELIVERABLES,
-            max_chars=_MAX_DELIVERABLE_ID_CHARS,
-        ),
-        completed_steps=_normalize_text_items(
-            mission_state.completed_steps,
-            max_items=_MAX_DELIVERABLES,
-            max_chars=_MAX_DELIVERABLE_ID_CHARS,
-        ),
-        failed_steps=_normalize_text_items(
-            mission_state.failed_steps,
-            max_items=_MAX_DELIVERABLES,
-            max_chars=_MAX_DELIVERABLE_ID_CHARS,
-        ),
-        observed_facts=_normalize_text_items(
-            mission_state.observed_facts,
-            max_items=_MAX_WORKING_MEMORY_ITEMS,
-            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
-        ),
-        artifact_facts=_normalize_text_items(
-            mission_state.artifact_facts,
-            max_items=_MAX_WORKING_MEMORY_ITEMS,
-            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
-        ),
-        blockers=_normalize_text_items(
-            mission_state.blockers,
-            max_items=_MAX_WORKING_MEMORY_ITEMS,
-            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
-        ),
-        pending_repairs=_normalize_text_items(
-            mission_state.pending_repairs,
-            max_items=_MAX_WORKING_MEMORY_ITEMS,
-            max_chars=_MAX_WORKING_MEMORY_ITEM_CHARS,
-        ),
-        final_deliverables_missing=_normalize_text_items(
-            mission_state.final_deliverables_missing,
-            max_items=_MAX_DELIVERABLES,
-            max_chars=_MAX_DELIVERABLE_ID_CHARS,
-        ),
-        executor_state=_normalize_choice(
-            mission_state.executor_state,
-            field_name="executor_state",
-            allowed_values=_EXECUTOR_STATE_VALUES,
-        ),
-        executor_reason=_normalize_text(
-            mission_state.executor_reason,
-            field_name="executor_reason",
-            max_chars=_MAX_EXECUTOR_REASON_CHARS,
-        ),
-        waiting_for=_normalize_text(
-            mission_state.waiting_for,
-            field_name="waiting_for",
-            max_chars=_MAX_WAITING_FOR_CHARS,
-        ),
-        advance_condition=_normalize_text(
-            mission_state.advance_condition,
-            field_name="advance_condition",
-            max_chars=_MAX_ADVANCE_CONDITION_CHARS,
-        ),
-        verifier_outputs=_normalize_text_items(
-            mission_state.verifier_outputs,
-            max_items=_MAX_WORKING_MEMORY_ITEMS,
-            max_chars=_MAX_VERIFIER_NOTE_CHARS,
-        ),
-        final_verified_reply=_normalize_text(
-            mission_state.final_verified_reply,
-            field_name="final_verified_reply",
-            max_chars=_MAX_VERIFIED_REPLY_CHARS,
-        ),
-        last_turn_relation=_normalize_optional_choice(
-            mission_state.last_turn_relation,
-            field_name="last_turn_relation",
-            allowed_values=_MISSION_RELATION_VALUES,
-        ),
-    )
-    if (
-        normalized_state.status == "completed"
-        and normalized_state.executor_state == "planning"
-        and not normalized_state.active_deliverable_id
-        and not normalized_state.pending_repairs
-        and not normalized_state.final_deliverables_missing
-        and normalized_state.deliverables
-        and all(
-            deliverable.status == "completed"
-            for deliverable in normalized_state.deliverables
-        )
-    ):
-        normalized_state = replace(normalized_state, executor_state="completed")
-    if (
-        normalized_state.status == "blocked"
-        and normalized_state.executor_state == "planning"
-        and normalized_state.blocked_deliverables
-    ):
-        normalized_state = replace(normalized_state, executor_state="blocked")
-    if mission_completion_ready(normalized_state):
-        return replace(normalized_state, status="completed")
-    if normalized_state.status == "completed":
-        return replace(normalized_state, status="active")
-    if (
-        normalized_state.status == "blocked"
-        and normalized_state.executor_state != "blocked"
-        and not normalized_state.blocked_deliverables
-    ):
-        return replace(normalized_state, status="active")
-    return normalized_state
-
-
-def normalize_mission_deliverable(
-    deliverable: MissionDeliverableState,
-) -> MissionDeliverableState:
-    """Return a normalized deliverable snapshot safe for persistence."""
-
-    return MissionDeliverableState(
-        deliverable_id=_normalize_text(
-            deliverable.deliverable_id,
-            field_name="deliverable_id",
-            max_chars=_MAX_DELIVERABLE_ID_CHARS,
-            required=True,
-        ),
-        task=_normalize_text(
-            deliverable.task,
-            field_name="task",
-            max_chars=_MAX_TASK_CHARS,
-            required=True,
-        ),
-        deliverable=_normalize_text(
-            deliverable.deliverable,
-            field_name="deliverable",
-            max_chars=_MAX_DELIVERABLE_CHARS,
-            required=True,
-        ),
-        verification=_normalize_text(
-            deliverable.verification,
-            field_name="verification",
-            max_chars=_MAX_VERIFICATION_CHARS,
-            required=True,
-        ),
-        status=_normalize_choice(
-            deliverable.status,
-            field_name="deliverable.status",
-            allowed_values=_DELIVERABLE_STATUS_VALUES,
-        ),
-        missing=_normalize_text(
-            deliverable.missing,
-            field_name="missing",
-            max_chars=_MAX_MISSING_CHARS,
-        ),
-        blocker=_normalize_text(
-            deliverable.blocker,
-            field_name="blocker",
-            max_chars=_MAX_BLOCKER_CHARS,
-        ),
-        attempt_count=_normalize_non_negative_int(
-            deliverable.attempt_count,
-            field_name="attempt_count",
-        ),
-        repair_count=_normalize_non_negative_int(
-            deliverable.repair_count,
-            field_name="repair_count",
-        ),
-        retry_count=_normalize_non_negative_int(
-            deliverable.retry_count,
-            field_name="retry_count",
-        ),
-        artifact_paths=_normalize_text_items(
-            deliverable.artifact_paths,
-            max_items=_MAX_ARTIFACT_PATHS,
-            max_chars=_MAX_PATH_CHARS,
-        ),
-        evidence=_normalize_text_items(
-            deliverable.evidence,
-            max_items=_MAX_EVIDENCE_ITEMS,
-            max_chars=_MAX_EVIDENCE_CHARS,
-        ),
-        updated_at=_normalize_timestamp(deliverable.updated_at),
-        mode=_normalize_choice(
-            deliverable.mode,
-            field_name="deliverable.mode",
-            allowed_values=_DELIVERABLE_MODE_VALUES,
-        ),
-        required_evidence=_normalize_choice_items(
-            deliverable.required_evidence,
-            field_name="deliverable.required_evidence",
-            allowed_values=_DELIVERABLE_EVIDENCE_KIND_VALUES,
-            max_items=_MAX_EVIDENCE_ITEMS,
-        ),
-        execution_state=_normalize_choice(
-            deliverable.execution_state,
-            field_name="deliverable.execution_state",
-            allowed_values=_DELIVERABLE_EXECUTION_STATE_VALUES,
-        ),
-        waiting_for=_normalize_text(
-            deliverable.waiting_for,
-            field_name="deliverable.waiting_for",
-            max_chars=_MAX_WAITING_FOR_CHARS,
-        ),
-        advance_condition=_normalize_text(
-            deliverable.advance_condition,
-            field_name="deliverable.advance_condition",
-            max_chars=_MAX_ADVANCE_CONDITION_CHARS,
-        ),
-        verifier_notes=_normalize_text(
-            deliverable.verifier_notes,
-            field_name="deliverable.verifier_notes",
-            max_chars=_MAX_VERIFIER_NOTE_CHARS,
-        ),
+        reasoning_summary=_normalize_optional_text(mission_state.reasoning_summary),
+        reply_to_user=_normalize_optional_text(mission_state.reply_to_user),
+        completion_claim=bool(mission_state.completion_claim),
+        blocker=normalized_blocker,
+        next_expected_evidence=next_expected_evidence,
+        evidence_log=evidence_log,
+        tool_history=tool_history,
+        final_reply=_normalize_optional_text(mission_state.final_reply),
+        last_user_input=_normalize_optional_text(mission_state.last_user_input),
+        loop_count=max(mission_state.loop_count, 0),
+        executor_state=normalized_executor_state,
+        retry_history=_normalize_text_items(mission_state.retry_history),
+        repair_history=_normalize_text_items(mission_state.repair_history),
+        last_verified_artifact_paths=tuple(last_artifact_paths[-_MAX_TEXT_ITEMS:]),
+        last_successful_evidence=tuple(last_successful_evidence[-_MAX_TEXT_ITEMS:]),
+        last_blocker=normalized_blocker,
     )
 
 
 def serialize_mission_state(mission_state: MissionState) -> str:
-    """Serialize a mission-state snapshot to compact JSON."""
+    """Serialize one mission snapshot to compact JSON."""
 
     normalized = normalize_mission_state(mission_state)
     return json.dumps(
         {
+            "schema": "mission_state.v2",
             "mission_id": normalized.mission_id,
-            "goal": normalized.goal,
+            "mission_goal": normalized.mission_goal,
             "status": normalized.status,
-            "active_deliverable_id": normalized.active_deliverable_id,
-            "active_task": normalized.active_task,
-            "completed_deliverables": list(normalized.completed_deliverables),
-            "blocked_deliverables": list(normalized.blocked_deliverables),
-            "deliverables": [
+            "tasks": [
                 {
-                    "deliverable_id": deliverable.deliverable_id,
-                    "task": deliverable.task,
-                    "deliverable": deliverable.deliverable,
-                    "verification": deliverable.verification,
-                    "status": deliverable.status,
-                    "missing": deliverable.missing,
-                    "blocker": deliverable.blocker,
-                    "attempt_count": deliverable.attempt_count,
-                    "repair_count": deliverable.repair_count,
-                    "retry_count": deliverable.retry_count,
-                    "artifact_paths": list(deliverable.artifact_paths),
-                    "evidence": list(deliverable.evidence),
-                    "updated_at": deliverable.updated_at,
-                    "mode": deliverable.mode,
-                    "required_evidence": list(deliverable.required_evidence),
-                    "execution_state": deliverable.execution_state,
-                    "waiting_for": deliverable.waiting_for,
-                    "advance_condition": deliverable.advance_condition,
-                    "verifier_notes": deliverable.verifier_notes,
+                    "id": task.id,
+                    "title": task.title,
+                    "kind": task.kind,
+                    "status": task.status,
+                    "depends_on": list(task.depends_on),
+                    "required_evidence": list(task.required_evidence),
+                    "satisfied_evidence": list(task.satisfied_evidence),
+                    "artifact_paths": list(task.artifact_paths),
+                    "evidence": list(task.evidence),
+                    "latest_error": task.latest_error,
+                    "repair_count": task.repair_count,
+                    "updated_at": task.updated_at,
                 }
-                for deliverable in normalized.deliverables
+                for task in normalized.tasks
             ],
+            "active_task_id": normalized.active_task_id,
+            "updated_at": normalized.updated_at,
+            "reasoning_summary": normalized.reasoning_summary,
+            "reply_to_user": normalized.reply_to_user,
+            "completion_claim": normalized.completion_claim,
+            "blocker": normalized.blocker,
+            "next_expected_evidence": normalized.next_expected_evidence,
+            "evidence_log": [
+                {
+                    "kind": record.kind,
+                    "task_id": record.task_id,
+                    "summary": record.summary,
+                    "created_at": record.created_at,
+                    "tool_name": record.tool_name,
+                    "artifact_paths": list(record.artifact_paths),
+                    "success": record.success,
+                }
+                for record in normalized.evidence_log
+            ],
+            "tool_history": [
+                {
+                    "tool_name": record.tool_name,
+                    "task_id": record.task_id,
+                    "arguments": record.arguments,
+                    "created_at": record.created_at,
+                    "executed": record.executed,
+                    "success": record.success,
+                    "reason": record.reason,
+                }
+                for record in normalized.tool_history
+            ],
+            "final_reply": normalized.final_reply,
+            "last_user_input": normalized.last_user_input,
+            "loop_count": normalized.loop_count,
+            "executor_state": normalized.executor_state,
             "retry_history": list(normalized.retry_history),
             "repair_history": list(normalized.repair_history),
-            "last_verified_artifact_paths": list(
-                normalized.last_verified_artifact_paths
-            ),
+            "last_verified_artifact_paths": list(normalized.last_verified_artifact_paths),
             "last_successful_evidence": list(normalized.last_successful_evidence),
             "last_blocker": normalized.last_blocker,
-            "updated_at": normalized.updated_at,
-            "planner_summary": normalized.planner_summary,
-            "execution_queue": list(normalized.execution_queue),
-            "completed_steps": list(normalized.completed_steps),
-            "failed_steps": list(normalized.failed_steps),
-            "observed_facts": list(normalized.observed_facts),
-            "artifact_facts": list(normalized.artifact_facts),
-            "blockers": list(normalized.blockers),
-            "pending_repairs": list(normalized.pending_repairs),
-            "final_deliverables_missing": list(
-                normalized.final_deliverables_missing
-            ),
-            "executor_state": normalized.executor_state,
-            "executor_reason": normalized.executor_reason,
-            "waiting_for": normalized.waiting_for,
-            "advance_condition": normalized.advance_condition,
-            "verifier_outputs": list(normalized.verifier_outputs),
-            "final_verified_reply": normalized.final_verified_reply,
-            "last_turn_relation": normalized.last_turn_relation,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -603,279 +546,394 @@ def serialize_mission_state(mission_state: MissionState) -> str:
 
 
 def parse_mission_state(payload_json: str) -> MissionState | None:
-    """Parse one mission-state snapshot from JSON."""
+    """Parse one mission snapshot from JSON."""
 
     try:
-        parsed = json.loads(payload_json)
+        payload = json.loads(payload_json)
     except json.JSONDecodeError:
         return None
-
-    if not isinstance(parsed, dict):
+    if not isinstance(payload, dict):
         return None
+    if payload.get("schema") == "mission_state.v2" or "tasks" in payload:
+        return _parse_v2_mission_state(payload)
+    if "deliverables" in payload:
+        return _parse_legacy_mission_state(payload)
+    return None
 
-    raw_deliverables = parsed.get("deliverables")
-    if not isinstance(raw_deliverables, list):
+
+def mission_completion_ready(mission_state: MissionState) -> bool:
+    """Return True when every task is proven complete."""
+
+    normalized = normalize_mission_state(mission_state)
+    if not normalized.tasks:
+        return False
+    return all(task.status == "completed" for task in normalized.tasks)
+
+
+def _parse_v2_mission_state(payload: dict[str, Any]) -> MissionState | None:
+    raw_tasks = payload.get("tasks")
+    if not isinstance(raw_tasks, list):
         return None
-
-    deliverables: list[MissionDeliverableState] = []
-    for raw_deliverable in raw_deliverables:
-        deliverable = _parse_mission_deliverable(raw_deliverable)
-        if deliverable is None:
+    tasks: list[MissionTaskState] = []
+    for raw_task in raw_tasks[:_MAX_TASKS]:
+        if not isinstance(raw_task, dict):
             return None
-        deliverables.append(deliverable)
+        task = MissionTaskState(
+            id=_coerce_required_str(raw_task.get("id")),
+            title=_coerce_required_str(raw_task.get("title")),
+            kind=_coerce_required_str(raw_task.get("kind")),
+            status=_coerce_required_str(raw_task.get("status")),
+            depends_on=_coerce_str_tuple(raw_task.get("depends_on")),
+            required_evidence=_coerce_str_tuple(raw_task.get("required_evidence")),
+            satisfied_evidence=_coerce_str_tuple(raw_task.get("satisfied_evidence")),
+            artifact_paths=_coerce_str_tuple(raw_task.get("artifact_paths")),
+            evidence=_coerce_str_tuple(raw_task.get("evidence")),
+            latest_error=_coerce_optional_str(raw_task.get("latest_error")),
+            repair_count=_coerce_non_negative_int(raw_task.get("repair_count")),
+            updated_at=_coerce_optional_str(raw_task.get("updated_at")) or utc_now_iso(),
+        )
+        tasks.append(task)
 
     try:
         return normalize_mission_state(
             MissionState(
-                mission_id=_coerce_required_str(parsed.get("mission_id")),
-                goal=_coerce_required_str(parsed.get("goal")),
-                status=_coerce_required_str(parsed.get("status")),
-                active_deliverable_id=_coerce_optional_str(
-                    parsed.get("active_deliverable_id")
+                mission_id=_coerce_required_str(payload.get("mission_id")),
+                mission_goal=(
+                    _coerce_optional_str(payload.get("mission_goal"))
+                    or _coerce_optional_str(payload.get("goal"))
+                    or "mission"
                 ),
-                active_task=_coerce_optional_str(parsed.get("active_task")),
-                completed_deliverables=_coerce_str_tuple(
-                    parsed.get("completed_deliverables")
+                status=_coerce_optional_str(payload.get("status")) or "active",
+                tasks=tuple(tasks),
+                active_task_id=_coerce_optional_str(payload.get("active_task_id")),
+                updated_at=_coerce_optional_str(payload.get("updated_at")) or utc_now_iso(),
+                reasoning_summary=_coerce_optional_str(payload.get("reasoning_summary")),
+                reply_to_user=_coerce_optional_str(payload.get("reply_to_user")),
+                completion_claim=payload.get("completion_claim") is True,
+                blocker=_coerce_optional_str(payload.get("blocker")),
+                next_expected_evidence=_coerce_optional_str(
+                    payload.get("next_expected_evidence")
                 ),
-                blocked_deliverables=_coerce_str_tuple(
-                    parsed.get("blocked_deliverables")
+                evidence_log=tuple(
+                    _parse_evidence_record(item)
+                    for item in _coerce_dict_list(payload.get("evidence_log"))
+                    if _parse_evidence_record(item) is not None
                 ),
-                deliverables=tuple(deliverables),
-                retry_history=_coerce_str_tuple(parsed.get("retry_history")),
-                repair_history=_coerce_str_tuple(parsed.get("repair_history")),
+                tool_history=tuple(
+                    _parse_tool_call_record(item)
+                    for item in _coerce_dict_list(payload.get("tool_history"))
+                    if _parse_tool_call_record(item) is not None
+                ),
+                final_reply=_coerce_optional_str(payload.get("final_reply")),
+                last_user_input=_coerce_optional_str(payload.get("last_user_input")),
+                loop_count=_coerce_non_negative_int(payload.get("loop_count")),
+                executor_state=_coerce_optional_str(payload.get("executor_state"))
+                or "active",
+                retry_history=_coerce_str_tuple(payload.get("retry_history")),
+                repair_history=_coerce_str_tuple(payload.get("repair_history")),
                 last_verified_artifact_paths=_coerce_str_tuple(
-                    parsed.get("last_verified_artifact_paths")
+                    payload.get("last_verified_artifact_paths")
                 ),
                 last_successful_evidence=_coerce_str_tuple(
-                    parsed.get("last_successful_evidence")
+                    payload.get("last_successful_evidence")
                 ),
-                last_blocker=_coerce_optional_str(parsed.get("last_blocker")),
-                updated_at=_coerce_required_str(parsed.get("updated_at")),
-                planner_summary=_coerce_optional_str(parsed.get("planner_summary")),
-                execution_queue=_coerce_str_tuple(parsed.get("execution_queue")),
-                completed_steps=_coerce_str_tuple(parsed.get("completed_steps")),
-                failed_steps=_coerce_str_tuple(parsed.get("failed_steps")),
-                observed_facts=_coerce_str_tuple(parsed.get("observed_facts")),
-                artifact_facts=_coerce_str_tuple(parsed.get("artifact_facts")),
-                blockers=_coerce_str_tuple(parsed.get("blockers")),
-                pending_repairs=_coerce_str_tuple(parsed.get("pending_repairs")),
-                final_deliverables_missing=_coerce_str_tuple(
-                    parsed.get("final_deliverables_missing")
-                ),
-                executor_state=_coerce_optional_str(parsed.get("executor_state"))
-                or "planning",
-                executor_reason=_coerce_optional_str(parsed.get("executor_reason")),
-                waiting_for=_coerce_optional_str(parsed.get("waiting_for")),
-                advance_condition=_coerce_optional_str(
-                    parsed.get("advance_condition")
-                ),
-                verifier_outputs=_coerce_str_tuple(parsed.get("verifier_outputs")),
-                final_verified_reply=_coerce_optional_str(
-                    parsed.get("final_verified_reply")
-                ),
-                last_turn_relation=_coerce_optional_str(
-                    parsed.get("last_turn_relation")
-                ),
+                last_blocker=_coerce_optional_str(payload.get("last_blocker")),
             )
         )
-    except (TypeError, ValueError):
+    except ValueError:
         return None
 
 
-def _parse_mission_deliverable(payload: Any) -> MissionDeliverableState | None:
-    if not isinstance(payload, dict):
+def _parse_legacy_mission_state(payload: dict[str, Any]) -> MissionState | None:
+    raw_deliverables = payload.get("deliverables")
+    if not isinstance(raw_deliverables, list):
         return None
+    tasks: list[MissionTaskState] = []
+    for raw_deliverable in raw_deliverables[:_MAX_TASKS]:
+        if not isinstance(raw_deliverable, dict):
+            return None
+        task = MissionTaskState(
+            id=_coerce_optional_str(raw_deliverable.get("deliverable_id"))
+            or _coerce_optional_str(raw_deliverable.get("id"))
+            or f"d{len(tasks) + 1}",
+            title=_coerce_optional_str(raw_deliverable.get("task"))
+            or _coerce_optional_str(raw_deliverable.get("title"))
+            or f"Task {len(tasks) + 1}",
+            kind=_infer_legacy_kind(raw_deliverable),
+            status=_coerce_optional_str(raw_deliverable.get("status")) or "pending",
+            depends_on=_coerce_str_tuple(raw_deliverable.get("depends_on")),
+            required_evidence=_coerce_str_tuple(
+                raw_deliverable.get("required_evidence")
+            ),
+            satisfied_evidence=(
+                _coerce_str_tuple(raw_deliverable.get("required_evidence"))
+                if _coerce_optional_str(raw_deliverable.get("status")) == "completed"
+                else ()
+            ),
+            artifact_paths=_coerce_str_tuple(raw_deliverable.get("artifact_paths")),
+            evidence=_coerce_str_tuple(raw_deliverable.get("evidence")),
+            latest_error=(
+                _coerce_optional_str(raw_deliverable.get("blocker"))
+                or _coerce_optional_str(raw_deliverable.get("missing"))
+            ),
+            repair_count=_coerce_non_negative_int(raw_deliverable.get("repair_count")),
+            updated_at=_coerce_optional_str(raw_deliverable.get("updated_at")) or utc_now_iso(),
+        )
+        tasks.append(task)
 
     try:
-        return normalize_mission_deliverable(
-            MissionDeliverableState(
-                deliverable_id=_coerce_required_str(payload.get("deliverable_id")),
-                task=_coerce_required_str(payload.get("task")),
-                deliverable=_coerce_required_str(payload.get("deliverable")),
-                verification=_coerce_required_str(payload.get("verification")),
-                status=_coerce_required_str(payload.get("status")),
-                missing=_coerce_optional_str(payload.get("missing")),
-                blocker=_coerce_optional_str(payload.get("blocker")),
-                attempt_count=_coerce_non_negative_int(payload.get("attempt_count")),
-                repair_count=_coerce_non_negative_int(payload.get("repair_count")),
-                retry_count=_coerce_non_negative_int(payload.get("retry_count")),
-                artifact_paths=_coerce_str_tuple(payload.get("artifact_paths")),
-                evidence=_coerce_str_tuple(payload.get("evidence")),
-                updated_at=_coerce_required_str(payload.get("updated_at")),
-                mode=_coerce_optional_str(payload.get("mode")) or "mixed",
-                required_evidence=_coerce_str_tuple(
-                    payload.get("required_evidence")
+        return normalize_mission_state(
+            MissionState(
+                mission_id=_coerce_required_str(payload.get("mission_id")),
+                mission_goal=(
+                    _coerce_optional_str(payload.get("goal"))
+                    or _coerce_optional_str(payload.get("mission_goal"))
+                    or "mission"
                 ),
-                execution_state=(
-                    _coerce_optional_str(payload.get("execution_state"))
-                    or "pending"
+                status=_coerce_optional_str(payload.get("status")) or "active",
+                tasks=tuple(tasks),
+                active_task_id=(
+                    _coerce_optional_str(payload.get("active_task_id"))
+                    or _coerce_optional_str(payload.get("active_deliverable_id"))
                 ),
-                waiting_for=_coerce_optional_str(payload.get("waiting_for")),
-                advance_condition=_coerce_optional_str(
-                    payload.get("advance_condition")
+                updated_at=_coerce_optional_str(payload.get("updated_at")) or utc_now_iso(),
+                reasoning_summary=_coerce_optional_str(payload.get("planner_summary")),
+                reply_to_user=_coerce_optional_str(payload.get("final_verified_reply")),
+                completion_claim=payload.get("status") == "completed",
+                blocker=_coerce_optional_str(payload.get("last_blocker")),
+                next_expected_evidence=(
+                    _coerce_optional_str(payload.get("waiting_for"))
+                    or _coerce_optional_str(payload.get("advance_condition"))
                 ),
-                verifier_notes=_coerce_optional_str(payload.get("verifier_notes")),
+                final_reply=_coerce_optional_str(payload.get("final_verified_reply")),
+                last_user_input=None,
+                loop_count=0,
+                executor_state=_coerce_optional_str(payload.get("executor_state"))
+                or "active",
+                retry_history=_coerce_str_tuple(payload.get("retry_history")),
+                repair_history=_coerce_str_tuple(payload.get("repair_history")),
+                last_verified_artifact_paths=_coerce_str_tuple(
+                    payload.get("last_verified_artifact_paths")
+                ),
+                last_successful_evidence=_coerce_str_tuple(
+                    payload.get("last_successful_evidence")
+                ),
+                last_blocker=_coerce_optional_str(payload.get("last_blocker")),
             )
         )
-    except (TypeError, ValueError):
+    except ValueError:
         return None
 
 
-def mission_completion_ready(mission_state: MissionState) -> bool:
-    """Return True when mission completion invariants are all satisfied."""
+def _infer_legacy_kind(raw_deliverable: dict[str, Any]) -> str:
+    required_evidence = set(_coerce_str_tuple(raw_deliverable.get("required_evidence")))
+    if "full_web_research" in required_evidence:
+        return "web_research"
+    if "fast_grounding" in required_evidence:
+        return "web_grounding"
+    if {
+        "artifact_write",
+        "artifact_readback",
+    }.issubset(required_evidence):
+        return "file_write"
+    if "artifact_readback" in required_evidence:
+        return "file_read"
+    if "local_delete" in required_evidence:
+        return "file_delete"
+    if "directory_listing" in required_evidence:
+        return "directory_list"
+    if "calculation_result" in required_evidence:
+        return "calc"
+    mode = _coerce_optional_str(raw_deliverable.get("mode"))
+    if mode == "reply":
+        return "reply"
+    return "mixed"
 
-    if mission_state.active_deliverable_id is not None:
-        return False
-    if mission_state.executor_state != "completed":
-        return False
-    if mission_state.execution_queue:
-        return False
-    if mission_state.pending_repairs:
-        return False
-    if mission_state.final_deliverables_missing:
-        return False
-    if any(deliverable.status != "completed" for deliverable in mission_state.deliverables):
-        return False
-    if any(
-        deliverable.execution_state not in {"completed", "blocked"}
-        and deliverable.status != "completed"
-        for deliverable in mission_state.deliverables
-    ):
-        return False
-    return True
+
+def _normalize_tasks(tasks: tuple[MissionTaskState, ...]) -> tuple[MissionTaskState, ...]:
+    normalized: list[MissionTaskState] = []
+    seen_ids: set[str] = set()
+    for raw_task in tasks[:_MAX_TASKS]:
+        task = normalize_mission_task(raw_task)
+        task_id = task.id
+        if task_id in seen_ids:
+            suffix = 2
+            while f"{task_id}-{suffix}" in seen_ids:
+                suffix += 1
+            task = replace(task, id=f"{task_id}-{suffix}")
+        seen_ids.add(task.id)
+        normalized.append(task)
+    return tuple(normalized)
+
+
+def _first_runnable_incomplete_task_id(
+    tasks: tuple[MissionTaskState, ...],
+) -> str | None:
+    completed_ids = {task.id for task in tasks if task.status == "completed"}
+    for task in tasks:
+        if task.status in {"completed", "blocked"}:
+            continue
+        if all(dependency in completed_ids for dependency in task.depends_on):
+            return task.id
+    return None
+
+
+def _normalize_evidence_record(
+    record: MissionEvidenceRecord,
+) -> MissionEvidenceRecord:
+    return MissionEvidenceRecord(
+        kind=_normalize_text(record.kind, fallback="evidence"),
+        task_id=_normalize_optional_text(record.task_id),
+        summary=_normalize_text(record.summary, fallback="evidence"),
+        created_at=_normalize_timestamp(record.created_at),
+        tool_name=_normalize_optional_text(record.tool_name),
+        artifact_paths=_normalize_text_items(record.artifact_paths),
+        success=bool(record.success),
+    )
+
+
+def _normalize_tool_call_record(
+    record: MissionToolCallRecord,
+) -> MissionToolCallRecord:
+    return MissionToolCallRecord(
+        tool_name=_normalize_text(record.tool_name, fallback="tool"),
+        task_id=_normalize_optional_text(record.task_id),
+        arguments=dict(record.arguments),
+        created_at=_normalize_timestamp(record.created_at),
+        executed=bool(record.executed),
+        success=record.success if isinstance(record.success, bool) or record.success is None else None,
+        reason=_normalize_optional_text(record.reason),
+    )
+
+
+def _parse_evidence_record(payload: dict[str, Any]) -> MissionEvidenceRecord | None:
+    try:
+        return MissionEvidenceRecord(
+            kind=_coerce_required_str(payload.get("kind")),
+            task_id=_coerce_optional_str(payload.get("task_id")),
+            summary=_coerce_required_str(payload.get("summary")),
+            created_at=_coerce_optional_str(payload.get("created_at")) or utc_now_iso(),
+            tool_name=_coerce_optional_str(payload.get("tool_name")),
+            artifact_paths=_coerce_str_tuple(payload.get("artifact_paths")),
+            success=payload.get("success") is not False,
+        )
+    except ValueError:
+        return None
+
+
+def _parse_tool_call_record(payload: dict[str, Any]) -> MissionToolCallRecord | None:
+    arguments = payload.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return None
+    try:
+        success = payload.get("success")
+        return MissionToolCallRecord(
+            tool_name=_coerce_required_str(payload.get("tool_name")),
+            task_id=_coerce_optional_str(payload.get("task_id")),
+            arguments=dict(arguments),
+            created_at=_coerce_optional_str(payload.get("created_at")) or utc_now_iso(),
+            executed=payload.get("executed") is not False,
+            success=success if isinstance(success, bool) or success is None else None,
+            reason=_coerce_optional_str(payload.get("reason")),
+        )
+    except ValueError:
+        return None
 
 
 def _coerce_required_str(value: Any) -> str:
-    if not isinstance(value, str):
-        raise TypeError("expected string")
-    return value
+    normalized = _coerce_optional_str(value)
+    if normalized is None:
+        raise ValueError("Expected a non-empty string.")
+    return normalized
 
 
 def _coerce_optional_str(value: Any) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise TypeError("expected optional string")
-    return value
-
-
-def _coerce_non_negative_int(value: Any) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise TypeError("expected non-negative integer")
-    return value
+        return None
+    normalized = " ".join(value.split()).strip()
+    return normalized or None
 
 
 def _coerce_str_tuple(value: Any) -> tuple[str, ...]:
-    if value is None:
-        return ()
     if not isinstance(value, list):
-        raise TypeError("expected string list")
-    result: list[str] = []
+        return ()
+    items: list[str] = []
     for item in value:
-        if not isinstance(item, str):
-            raise TypeError("expected string list")
-        result.append(item)
-    return tuple(result)
+        normalized = _coerce_optional_str(item)
+        if normalized is not None and normalized not in items:
+            items.append(normalized)
+    return tuple(items)
 
 
-def _normalize_choice(
-    value: str,
-    *,
-    field_name: str,
-    allowed_values: frozenset[str],
-) -> str:
-    normalized = " ".join(value.split()).strip().lower()
-    if normalized not in allowed_values:
-        raise ValueError(
-            f"Field '{field_name}' must be one of {sorted(allowed_values)!r}."
-    )
-    return normalized
+def _coerce_non_negative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    return 0
 
 
-def _normalize_optional_choice(
-    value: str | None,
-    *,
-    field_name: str,
-    allowed_values: frozenset[str],
-) -> str | None:
+def _coerce_dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _normalize_text(value: str | None, *, fallback: str) -> str:
+    normalized = _normalize_optional_text(value)
+    return normalized or fallback
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
     if value is None:
-        return None
-    return _normalize_choice(
-        value,
-        field_name=field_name,
-        allowed_values=allowed_values,
-    )
-
-
-def _normalize_text(
-    value: str | None,
-    *,
-    field_name: str,
-    max_chars: int,
-    required: bool = False,
-) -> str | None:
-    if value is None:
-        if required:
-            raise ValueError(f"Field '{field_name}' is required.")
         return None
     normalized = " ".join(value.split()).strip()
-    if not normalized:
-        if required:
-            raise ValueError(f"Field '{field_name}' is required.")
-        return None
-    return normalized[:max_chars]
+    return normalized or None
 
 
-def _normalize_text_items(
-    values: tuple[str, ...] | list[str] | None,
-    *,
-    max_items: int,
-    max_chars: int,
-) -> tuple[str, ...]:
-    if not values:
-        return ()
-    normalized: list[str] = []
-    for value in values[:max_items]:
-        item = _normalize_text(
-            value,
-            field_name="text_item",
-            max_chars=max_chars,
-            required=True,
-        )
-        if item is not None:
-            normalized.append(item)
-    return tuple(normalized)
-
-
-def _normalize_choice_items(
-    values: tuple[str, ...] | list[str] | None,
-    *,
-    field_name: str,
-    allowed_values: frozenset[str],
-    max_items: int,
-) -> tuple[str, ...]:
-    if not values:
+def _normalize_text_items(items: tuple[str, ...] | list[str] | None) -> tuple[str, ...]:
+    if not items:
         return ()
     normalized_items: list[str] = []
-    for value in values[:max_items]:
-        normalized = _normalize_choice(
-            value,
-            field_name=field_name,
-            allowed_values=allowed_values,
-        )
-        if normalized not in normalized_items:
+    for item in items:
+        normalized = _normalize_optional_text(item)
+        if normalized is not None and normalized not in normalized_items:
             normalized_items.append(normalized)
     return tuple(normalized_items)
 
 
-def _normalize_non_negative_int(value: int, *, field_name: str) -> int:
-    if value < 0:
-        raise ValueError(f"Field '{field_name}' must be non-negative.")
-    return value
+def _normalize_choice(
+    value: str | None,
+    *,
+    allowed_values: frozenset[str],
+    fallback: str,
+) -> str:
+    normalized = _normalize_optional_text(value)
+    if normalized is None:
+        return fallback
+    lowered = normalized.casefold()
+    return lowered if lowered in allowed_values else fallback
 
 
-def _normalize_timestamp(value: str) -> str:
-    normalized = " ".join(value.split()).strip()
-    if not normalized:
-        raise ValueError("updated_at is required.")
-    return normalized
+def _normalize_timestamp(value: str | None) -> str:
+    normalized = _normalize_optional_text(value)
+    return normalized or utc_now_iso()
+
+
+__all__ = [
+    "MissionDeliverableState",
+    "MissionEvidenceRecord",
+    "MissionState",
+    "MissionTaskState",
+    "MissionToolCallRecord",
+    "mission_completion_ready",
+    "normalize_mission_deliverable",
+    "normalize_mission_state",
+    "normalize_mission_task",
+    "parse_mission_state",
+    "serialize_mission_state",
+]

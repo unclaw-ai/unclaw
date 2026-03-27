@@ -6,18 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-import unclaw.core.agent_loop as _agent_loop
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.mission_workspace import parse_mission_workspace_pointer
-from unclaw.core.mission_state import MissionDeliverableState, MissionState
+from unclaw.core.mission_state import MissionState, MissionTaskState
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
-from unclaw.llm.base import LLMResponse, LLMRole
+from unclaw.llm.base import LLMResponse
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
-from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.contracts import ToolResult
 from unclaw.tools.file_tools import (
     READ_TEXT_FILE_DEFINITION,
     WRITE_TEXT_FILE_DEFINITION,
@@ -46,4115 +44,893 @@ def _build_native_runtime(project_root, set_profile_tool_mode):
     return settings, session_manager, tracer, command_handler
 
 
-def _tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResponse:
+def _action_response(action: dict[str, object]) -> LLMResponse:
     return LLMResponse(
         provider="ollama",
         model_name="fake-model",
-        content="",
-        created_at="2026-03-26T09:00:00Z",
-        finish_reason="stop",
-        tool_calls=(ToolCall(tool_name=tool_name, arguments=arguments),),
-        raw_payload={
-            "message": {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": tool_name,
-                            "arguments": arguments,
-                        }
-                    }
-                ],
-            }
-        },
-    )
-
-
-def _is_finalizer_call(messages) -> bool:  # type: ignore[no-untyped-def]
-    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
-        0
-    ].content.startswith("Grounded reply finalizer for one runtime turn.")
-
-
-def _is_mission_planner_call(messages) -> bool:  # type: ignore[no-untyped-def]
-    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
-        0
-    ].content.startswith("Mission planner for the Unclaw local agent runtime.")
-
-
-def _is_mission_relation_call(messages) -> bool:  # type: ignore[no-untyped-def]
-    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
-        0
-    ].content.startswith("Mission relation classifier for the Unclaw local agent runtime.")
-
-
-def _is_mission_verifier_call(messages) -> bool:  # type: ignore[no-untyped-def]
-    return bool(messages) and messages[0].role is LLMRole.SYSTEM and messages[
-        0
-    ].content.startswith("Mission step verifier for the Unclaw local agent runtime.")
-
-
-def _relation_response(profile, relation: str) -> LLMResponse:  # type: ignore[no-untyped-def]
-    return LLMResponse(
-        provider="ollama",
-        model_name=profile.model_name,
-        content=json.dumps(
-            {"relation": relation, "summary": "test relation"},
-            ensure_ascii=False,
-        ),
-        created_at="2026-03-26T09:00:00Z",
+        content=json.dumps(action, ensure_ascii=False),
+        created_at="2026-03-27T09:00:00Z",
         finish_reason="stop",
     )
 
 
-@pytest.mark.parametrize("thinking_enabled", [False, True])
-def test_compound_research_write_joke_completes_in_one_flow(
+def _run_turn(
+    *,
+    session_manager: SessionManager,
+    command_handler: CommandHandler,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    prompt: str,
+) -> str:
+    session = session_manager.ensure_current_session()
+    session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
+    return run_user_turn(
+        session_manager=session_manager,
+        command_handler=command_handler,
+        user_input=prompt,
+        tracer=tracer,
+        tool_registry=tool_registry,
+    )
+
+
+def test_compound_research_write_and_joke_finishes_from_one_single_agent_action(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
-    thinking_enabled: bool,
-) -> None:
-    """Compound mission enters the kernel on first turn via search_web tool call.
-
-    Flow: runtime initial call (search_web) → planner (start_new) →
-    kernel loop: execute search → verify d1 → execute write → verify d2 →
-    execute joke → verify completed → finalizer.
-    """
-    expected_thinking_enabled = thinking_enabled
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    command_handler.thinking_enabled = thinking_enabled
-    output_path = settings.paths.files_dir / "mission-research-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        SEARCH_WEB_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text=(
-                "Search query: mission test\n"
-                "Sources fetched: 2 of 2 attempted\n"
-                "Evidence kept: 3\n"
-                "Mission fact one.\n"
-                "Mission fact two.\n"
-            ),
-                payload={
-                    "query": call.arguments["query"],
-                    "summary_points": ["Mission fact one.", "Mission fact two."],
-                    "display_sources": [
-                        {"title": "Example", "url": "https://example.com/source"},
-                        {"title": "Example 2", "url": "https://example.com/source-2"},
-                    ],
-                    "evidence_count": 3,
-                    "finding_count": 2,
-                },
-        ),
-    )
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    planner_calls = 0
-    execution_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, tools
-            nonlocal planner_calls, execution_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:06Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_planner_call(messages):
-                planner_calls += 1
-                payload = json.loads(messages[-1].content)
-                # Planner sees the initial response's tool call summary
-                summary = payload["first_response_summary"]
-                assert summary is not None
-                assert any(
-                    tc["tool_name"] == "search_web"
-                    for tc in summary.get("tool_calls", [])
-                )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": (
-                                "Research the topic, save a local note, and tell a joke."
-                            ),
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": "Research mission test",
-                                    "deliverable": "Grounded research facts",
-                                    "verification": "Search evidence is verified.",
-                                    "required_evidence": ["full_web_research"],
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "artifact",
-                                    "task": "Write the local note",
-                                    "deliverable": "Local note file",
-                                    "verification": "The file is written and read back.",
-                                    "required_evidence": [
-                                        "artifact_write",
-                                        "artifact_readback",
-                                    ],
-                                },
-                                {
-                                    "id": "d3",
-                                    "mode": "reply",
-                                    "task": "Tell a short joke",
-                                    "deliverable": "Short joke in the final reply",
-                                    "verification": "The joke appears in the reply.",
-                                    "required_evidence": ["reply_emitted"],
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2", "d3"],
-                            "active_deliverable_id": "d1",
-                            "summary": "compound research-write-joke mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:01Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                # After search_web: d1 completed, advance to d2
-                if latest_tool_results and latest_tool_results[0]["tool_name"] == "search_web":
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Mission fact one.", "Mission fact two."],
-                                "final_deliverables_missing": ["d2", "d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Write the local note next.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T09:00:02Z",
-                        finish_reason="stop",
-                    )
-                # After write_text_file + read_text_file: d2 completed, advance to d3
-                if latest_tool_results and any(
-                    item["tool_name"] == "write_text_file" for item in latest_tool_results
-                ):
-                    assert any(
-                        item["tool_name"] == "read_text_file"
-                        for item in latest_tool_results
-                    ), "Artifact read-back verification must happen after write"
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d3",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Finish with the requested joke.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T09:00:04Z",
-                        finish_reason="stop",
-                    )
-                # After joke text reply: mission completed
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:05Z",
-                    finish_reason="stop",
-                )
-
-            # Execution calls (not planner/verifier/finalizer)
-            execution_calls += 1
-            assert thinking_enabled is expected_thinking_enabled
-            if execution_calls == 1:
-                # Initial runtime call: search_web tool call
-                return _tool_call_response("search_web", {"query": "mission test"})
-            if execution_calls == 2:
-                # Kernel execution: write_text_file
-                tool_messages = [
-                    message.content for message in messages if message.role is LLMRole.TOOL
-                ]
-                assert any("Mission fact one." in message for message in tool_messages)
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "Mission fact one.\nMission fact two."},
-                )
-            if execution_calls == 3:
-                # Kernel execution: joke text reply
-                reply_text = (
-                    "I saved the research note locally. "
-                    "Joke: Why did the local agent cross the filesystem? "
-                    "To get to the root cause."
-                )
-                if content_callback is not None:
-                    content_callback(reply_text)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=reply_text,
-                    created_at="2026-03-26T09:00:03Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Unexpected extra execution call in compound mission flow.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Research mission test, save a local note, and finish with a short joke."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert "Joke:" in reply
-        assert "root cause" in reply
-        assert output_path.exists()
-        assert "Mission fact one." in output_path.read_text(encoding="utf-8")
-        assert planner_calls == 1
-        assert execution_calls == 3
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert mission_state.active_deliverable_id is None
-    finally:
-        session_manager.close()
-
-
-def test_fast_web_search_alone_cannot_complete_full_research_deliverable(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
     settings, session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
         set_profile_tool_mode,
     )
-    output_path = settings.paths.files_dir / "grounding-then-research-note.txt"
+    output_path = settings.paths.files_dir / "inoxtag-bio.txt"
+    observed_tool_calls: list[str] = []
+
     tool_registry = ToolRegistry()
     tool_registry.register(
         FAST_WEB_SEARCH_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text="Mission topic\n- Quick grounded fact.",
-            payload={
-                "query": call.arguments["query"],
-                "result_count": 2,
-                "grounding_note": "Mission topic\n- Quick grounded fact.",
-            },
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Marine safe grounding",
+                payload={
+                    "query": call.arguments["query"],
+                    "grounding_note": "Inoxtag is a French creator and adventurer.",
+                },
+            )
         ),
     )
     tool_registry.register(
         SEARCH_WEB_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text="Recovered full research evidence",
-            payload={
-                "query": call.arguments["query"],
-                "summary_points": ["Recovered fact one.", "Recovered fact two."],
-                "display_sources": [
-                    {"title": "Recovered", "url": "https://example.com/recovered"},
-                    {"title": "Recovered 2", "url": "https://example.com/recovered-2"},
-                ],
-                "evidence_count": 3,
-                "finding_count": 2,
-            },
-        ),
-    )
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    execution_steps: list[str] = []
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:08Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Research fully, write the note, then tell a joke.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": "Research the topic fully",
-                                    "deliverable": "Verified research facts",
-                                    "verification": "Full research evidence is verified.",
-                                    "required_evidence": ["full_web_research"],
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "artifact",
-                                    "task": "Write the local note",
-                                    "deliverable": "Local note file",
-                                    "verification": "The file is written and read back.",
-                                    "required_evidence": [
-                                        "artifact_write",
-                                        "artifact_readback",
-                                    ],
-                                },
-                                {
-                                    "id": "d3",
-                                    "mode": "reply",
-                                    "task": "Tell a short joke",
-                                    "deliverable": "Short joke reply",
-                                    "verification": "The joke is emitted in the reply.",
-                                    "required_evidence": ["reply_emitted"],
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2", "d3"],
-                            "active_deliverable_id": "d1",
-                            "summary": "grounding is not enough for full research",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results and latest_tool_results[0]["tool_name"] == "fast_web_search":
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Quick grounded fact."],
-                                "final_deliverables_missing": ["d2", "d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Write the note next.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T09:00:02Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results and latest_tool_results[0]["tool_name"] == "search_web":
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Recovered fact one.", "Recovered fact two."],
-                                "final_deliverables_missing": ["d2", "d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Write the note next.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T09:00:04Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results and any(
-                    item["tool_name"] == "write_text_file" for item in latest_tool_results
-                ):
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d3",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Finish with the joke.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T09:00:06Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:07Z",
-                    finish_reason="stop",
-                )
-
-            if not execution_steps:
-                execution_steps.append("fast_web_search")
-                return _tool_call_response(
-                    "fast_web_search",
-                    {"query": "mission topic"},
-                )
-            if execution_steps == ["fast_web_search"]:
-                execution_steps.append("search_web")
-                return _tool_call_response(
-                    "search_web",
-                    {"query": "mission topic"},
-                )
-            if execution_steps == ["fast_web_search", "search_web"]:
-                execution_steps.append("write_text_file")
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "Recovered fact one.\nRecovered fact two.",
-                    },
-                )
-            execution_steps.append("reply")
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="Joke: The grounded clue was only the warm-up.",
-                created_at="2026-03-27T09:00:05Z",
-                finish_reason="stop",
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Inoxtag research complete",
+                payload={
+                    "query": call.arguments["query"],
+                    "summary_points": [
+                        "Inoxtag is a French content creator.",
+                        "He is known for ambitious challenge videos.",
+                    ],
+                    "display_sources": [
+                        {"title": "Example", "url": "https://example.com/inoxtag"}
+                    ],
+                },
             )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Research the topic completely, write it to a file, then tell a joke."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert execution_steps[:2] == ["fast_web_search", "search_web"]
-        assert "Joke:" in reply
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert output_path.exists()
-    finally:
-        session_manager.close()
-
-
-def test_first_pass_no_tool_draft_recovers_and_completes_needed_write(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "recovered-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    call_count = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal call_count
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:06Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a short local note file.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "write_text_file",
-                                    "deliverable": "Local note file",
-                                    "verification": "A successful local file write is verified.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the saved note",
-                                    "deliverable": "Short confirmation reply",
-                                    "verification": "The reply confirms the verified saved note.",
-                                }
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "recover and write the local note",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:02Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "notes_for_next_step": "Answer from the verified write.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T09:00:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:05Z",
-                    finish_reason="stop",
-                )
-
-            call_count += 1
-            if call_count == 1:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I saved the note locally.",
-                    created_at="2026-03-26T09:00:00Z",
-                    finish_reason="stop",
-                )
-            if call_count == 2:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Tool reconsideration note:")
-                    for message in messages
-                )
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "Recovered note"},
-                )
-            if call_count == 3:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I saved the note locally.",
-                    created_at="2026-03-26T09:00:04Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Unexpected extra model call in recovery flow.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Write a short local note file."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert reply == "I saved the note locally."
-        assert output_path.exists()
-        assert output_path.read_text(encoding="utf-8") == "Recovered note"
-        assert call_count == 3
-    finally:
-        session_manager.close()
-
-
-def test_wrong_path_write_repairs_to_allowed_path_and_completes(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    blocked_path = str(project_root.parent / "outside-note.txt")
-    repaired_path = settings.paths.files_dir / "repaired-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    call_count = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal call_count
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:07Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write the requested local note file.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "write_text_file",
-                                    "deliverable": "Allowed local note file",
-                                    "verification": "A successful allowed-root local file write is verified.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the repaired write",
-                                    "deliverable": "Short confirmation reply",
-                                    "verification": "The reply confirms the repaired verified write.",
-                                }
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "repair the blocked path and finish the write",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results and latest_tool_results[0]["success"] is False:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d1",
-                                "current_deliverable_status": "active",
-                                "missing": "A corrected allowed-root write path is still needed.",
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d1", "d2"],
-                                "next_action": "continue",
-                                "notes_for_next_step": "Repair the path and retry the write inside the allowed workspace.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T09:00:03Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(repaired_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "notes_for_next_step": "Answer from the verified repaired write.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T09:00:05Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(repaired_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T09:00:07Z",
-                    finish_reason="stop",
-                )
-
-            call_count += 1
-            if call_count == 1:
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": blocked_path, "content": "blocked note"},
-                )
-            if call_count == 2:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Mission progress check:")
-                    for message in messages
-                )
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(repaired_path), "content": "blocked note"},
-                )
-            if call_count == 3:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I saved the note locally at the repaired path.",
-                    created_at="2026-03-26T09:00:06Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Unexpected extra model call in path-repair flow.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Write the requested note file locally."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert reply == "I saved the note locally at the repaired path."
-        assert repaired_path.exists()
-        assert repaired_path.read_text(encoding="utf-8") == "blocked note"
-        assert call_count == 3
-    finally:
-        session_manager.close()
-
-
-@pytest.mark.parametrize("profile_name", ["main", "deep"])
-@pytest.mark.parametrize("thinking_enabled", [False, True])
-def test_kernel_compound_research_write_joke_completes_and_streams(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-    profile_name: str,
-    thinking_enabled: bool,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    command_handler.current_model_profile_name = profile_name
-    command_handler.thinking_enabled = thinking_enabled
-    output_path = settings.paths.files_dir / f"kernel-{profile_name}-{int(thinking_enabled)}.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        SEARCH_WEB_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text="Kernel fact one.\nKernel fact two.\n",
-            payload={
-                "query": call.arguments["query"],
-                "summary_points": ["Kernel fact one.", "Kernel fact two."],
-                "display_sources": [
-                    {"title": "Kernel Source", "url": "https://example.com/kernel"}
-                ],
-                "evidence_count": 2,
-                "finding_count": 2,
-            },
         ),
     )
     tool_registry.register(
         WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    streamed_chunks: list[str] = []
-    planner_calls = 0
-    execution_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, tools
-            nonlocal planner_calls, execution_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:00:09Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_planner_call(messages):
-                planner_calls += 1
-                payload = json.loads(messages[-1].content)
-                assert payload["first_response_summary"]["draft_reply"] == (
-                    "I should plan this mission before I answer."
-                )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": (
-                                "Research the topic, save a note, and finish with a joke."
-                            ),
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": "Research the requested topic",
-                                    "deliverable": "Grounded research facts",
-                                    "verification": "Search evidence is verified.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "artifact",
-                                    "task": "Write the local note",
-                                    "deliverable": "Local note file",
-                                    "verification": "The file is written and read back.",
-                                },
-                                {
-                                    "id": "d3",
-                                    "mode": "reply",
-                                    "task": "Tell the final joke",
-                                    "deliverable": "Short joke in the final reply",
-                                    "verification": "The joke appears in the final reply.",
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2", "d3"],
-                            "active_deliverable_id": "d1",
-                            "summary": "kernel compound mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:00:02Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results and latest_tool_results[0]["tool_name"] == "search_web":
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Kernel fact one.", "Kernel fact two."],
-                                "final_deliverables_missing": ["d2", "d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Write the verified local note next.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:00:04Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results and any(
-                    item["tool_name"] == "write_text_file" for item in latest_tool_results
-                ):
-                    assert any(
-                        item["tool_name"] == "read_text_file"
-                        for item in latest_tool_results
-                    )
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d3",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Finish with the requested joke.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:00:06Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:00:08Z",
-                    finish_reason="stop",
-                )
-
-            execution_calls += 1
-            assert thinking_enabled is command_handler.thinking_enabled
-            if execution_calls == 1:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I should plan this mission before I answer.",
-                    created_at="2026-03-26T10:00:00Z",
-                    finish_reason="stop",
-                )
-            if execution_calls == 2:
-                assert any(
-                    message.role is LLMRole.SYSTEM
-                    and message.content.startswith("Tool reconsideration note:")
-                    for message in messages
-                )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "assistant_reply": (
-                                "I need a compact mission plan before I answer."
-                            ),
-                            "unsupported_execution_claim_risk": False,
-                            "completion_without_execution_risk": False,
-                            "multi_deliverable_request_risk": True,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:00:01Z",
-                    finish_reason="stop",
-                )
-            if execution_calls == 3:
-                return _tool_call_response(
-                    "search_web",
-                    {"query": "kernel mission facts"},
-                )
-            if execution_calls == 4:
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "Kernel fact one.\nKernel fact two.\n",
-                    },
-                )
-            reply = "File saved. Joke: The kernel walked into the root cause."
-            if content_callback is not None:
-                content_callback(reply)
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content=reply,
-                created_at="2026-03-26T10:00:07Z",
-                finish_reason="stop",
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
             )
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
+            )
+        ),
+    )
 
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Research kernel mission facts, save a note, and finish with a joke."
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "mission_goal": (
+                    "Research Inoxtag, write the result to a local text file, and tell a banana joke."
+                ),
+                "reasoning_summary": "Ground first, research fully, verify the file, then answer with the joke.",
+                "tasks": [
+                    {
+                        "id": "t0",
+                        "title": "Ground the target person",
+                        "kind": "web_grounding",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["fast_grounding"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t1",
+                        "title": "Do the full research",
+                        "kind": "web_research",
+                        "status": "pending",
+                        "depends_on": ["t0"],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the file",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Tell the banana joke",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t0",
+                "tool_calls": [
+                    {
+                        "task_id": "t0",
+                        "tool_name": "fast_web_search",
+                        "arguments": {"query": "Inoxtag"},
+                    },
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "Inoxtag"},
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {
+                            "path": str(output_path),
+                            "content": (
+                                "Inoxtag is a French content creator known for ambitious challenge videos."
+                            ),
+                        },
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "Le fichier est écrit. Et la blague: pourquoi les bananes ne sont jamais seules ? Parce qu'elles vont en régime groupé.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        )
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
+        reply = _run_turn(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input=prompt,
             tracer=tracer,
             tool_registry=tool_registry,
-            stream_output_func=streamed_chunks.append,
+            prompt=(
+                "Qui est Inoxtag ? fais une recherche complète sur lui, écrit le résultat "
+                "dans un fichier texte et fais moi une blague sur les bananes"
+            ),
         )
+        mission_state = session_manager.get_current_mission_state()
 
-        assert "Joke:" in reply
-        assert "root cause" in reply
-        assert output_path.exists()
-        assert "Kernel fact one." in output_path.read_text(encoding="utf-8")
-        assert planner_calls == 1
-        assert streamed_chunks == [
-            "File saved. Joke: The kernel walked into the root cause."
+        assert "bananes" in reply
+        assert fake_provider.call_count() == 1
+        assert observed_tool_calls == [
+            "fast_web_search",
+            "search_web",
+            "write_text_file",
+            "read_text_file",
         ]
-        mission_state = session_manager.get_current_mission_state(session.id)
+        assert output_path.read_text(encoding="utf-8").startswith("Inoxtag is a French")
         assert mission_state is not None
         assert mission_state.status == "completed"
-        assert mission_state.active_deliverable_id is None
-        assert mission_state.final_deliverables_missing == ()
-        assert mission_state.completed_steps == ("d1", "d2", "d3")
+        assert mission_state.completed_deliverables == ("t0", "t1", "t2", "t3")
+        assert mission_state.get_task("t1").satisfied_evidence == ("full_web_research",)
+        assert mission_state.get_task("t2").satisfied_evidence == (
+            "artifact_write",
+            "artifact_readback",
+        )
     finally:
         session_manager.close()
 
 
-def test_kernel_completed_mission_status_reports_completed_not_active(
+def test_marine_leleu_uses_grounding_without_confusing_her_with_marine_le_pen(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    tool_registry = ToolRegistry()
-    tool_registry.register(SEARCH_WEB_DEFINITION, lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="unused"))
-    completed_state = MissionState(
-        mission_id="mission-complete",
-        goal="Write a short local note and then tell a joke.",
-        status="completed",
-        active_deliverable_id=None,
-        active_task=None,
-        completed_deliverables=("d1", "d2"),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                task="Write the local note",
-                deliverable="Local note file",
-                verification="File exists",
-                status="completed",
-                missing=None,
-                blocker=None,
-                attempt_count=1,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:10:00Z",
-            ),
-            MissionDeliverableState(
-                deliverable_id="d2",
-                task="Tell the joke",
-                deliverable="Short joke",
-                verification="Joke is present",
-                status="completed",
-                missing=None,
-                blocker=None,
-                attempt_count=1,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:10:00Z",
-            ),
-        ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker=None,
-        updated_at="2026-03-26T10:10:00Z",
-    )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:10:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages) or _is_mission_verifier_call(messages):
-                raise AssertionError("Completed mission status must not restart kernel execution.")
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="Cette mission est terminee.",
-                created_at="2026-03-26T10:10:02Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(completed_state, session_id=session.id)
-        session_manager.add_message(
-            MessageRole.USER,
-            "ou en est cette mission ?",
-            session_id=session.id,
-        )
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input="ou en est cette mission ?",
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert "completed" in reply.casefold() or "terminee" in reply.casefold()
-        assert "active" not in reply.casefold()
-    finally:
-        session_manager.close()
-
-
-def test_starting_new_mission_after_completed_one_resets_old_kernel_state(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "fresh-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    completed_state = MissionState(
-        mission_id="mission-old",
-        goal="Old completed mission",
-        status="completed",
-        active_deliverable_id=None,
-        active_task=None,
-        completed_deliverables=("d1", "d2"),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                task="old task",
-                deliverable="old deliverable",
-                verification="old verification",
-                status="completed",
-                missing=None,
-                blocker=None,
-                attempt_count=1,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:20:00Z",
-            ),
-            MissionDeliverableState(
-                deliverable_id="d2",
-                task="old wrap-up",
-                deliverable="old final note",
-                verification="old final verification",
-                status="completed",
-                missing=None,
-                blocker=None,
-                attempt_count=1,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:20:00Z",
-            ),
-        ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker=None,
-        updated_at="2026-03-26T10:20:00Z",
-    )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:20:07Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                payload = json.loads(messages[-1].content)
-                assert payload["existing_mission_state"] is None
-                assert payload["compatibility_mission_state"] is None
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a fresh local note.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the fresh note",
-                                    "deliverable": "Fresh note file",
-                                    "verification": "The fresh note file is written and read back.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the fresh note",
-                                    "deliverable": "Short completion reply",
-                                    "verification": "The reply confirms the verified fresh note.",
-                                }
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "start a brand new mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:20:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "completed",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Answer from the verified new file.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:20:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": [],
-                                "next_action": "final_reply",
-                                "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:20:05Z",
-                    finish_reason="stop",
-                )
-            if not any(message.role is LLMRole.TOOL for message in messages):
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "fresh mission"},
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="The fresh mission is complete.",
-                created_at="2026-03-26T10:20:04Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(completed_state, session_id=session.id)
-        session_manager.add_message(
-            MessageRole.USER,
-            "Write a fresh local note.",
-            session_id=session.id,
-        )
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input="Write a fresh local note.",
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert reply == "The fresh mission is complete."
-        assert mission_state is not None
-        assert mission_state.mission_id != "mission-old"
-        assert mission_state.goal == "Write a fresh local note."
-        assert mission_state.status == "completed"
-        assert output_path.exists()
-    finally:
-        session_manager.close()
-
-
-def test_legacy_goal_compatibility_does_not_contaminate_clearly_new_mission(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "birds-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_mission_relation_call(messages):
-                return _relation_response(profile, "new_mission")
-            if _is_mission_planner_call(messages):
-                payload = json.loads(messages[-1].content)
-                assert payload["existing_mission_state"] is None
-                assert payload["compatibility_mission_state"] is None
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a fresh birds note.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the birds note",
-                                    "deliverable": "Birds note file",
-                                    "verification": "The birds note file is written and read back.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the birds note",
-                                    "deliverable": "Short birds-note reply",
-                                    "verification": "The reply confirms the verified birds note.",
-                                }
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "new mission overrides legacy compatibility",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:30:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "completed",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Answer from the new note.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:30:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:30:05Z",
-                    finish_reason="stop",
-                )
-            if not any(message.role is LLMRole.TOOL for message in messages):
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "birds are great"},
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="The birds note is ready.",
-                created_at="2026-03-26T10:30:04Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_session_goal_state(
-            session_id=session.id,
-            goal="Old legacy mission",
-            status="active",
-            current_step="write_text_file",
-        )
-        session_manager.persist_session_progress_entry(
-            session_id=session.id,
-            status="active",
-            step="write_text_file",
-            detail="legacy task still open",
-        )
-        session_manager.add_message(
-            MessageRole.USER,
-            "Write a fresh birds note.",
-            session_id=session.id,
-        )
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input="Write a fresh birds note.",
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert reply == "The birds note is ready."
-        assert mission_state is not None
-        assert mission_state.goal == "Write a fresh birds note."
-        assert mission_state.mission_id != "legacy-goal-compat"
-    finally:
-        session_manager.close()
-
-
-def test_blocked_macron_research_does_not_contaminate_new_local_write_mission(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "fresh-local-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    blocked_state = MissionState(
-        mission_id="mission-macron-blocked",
-        goal="Do a complete Macron research file.",
-        status="blocked",
-        active_deliverable_id="d1",
-        active_task="Research Macron completely",
-        completed_deliverables=(),
-        blocked_deliverables=("d1",),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="mixed",
-                task="Research Macron completely",
-                deliverable="Macron research facts",
-                verification="Full research evidence is verified.",
-                required_evidence=("full_web_research",),
-                status="blocked",
-                missing=None,
-                blocker="search_web timed out on Macron research",
-                attempt_count=1,
-                repair_count=1,
-                retry_count=1,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-27T10:00:00Z",
-                execution_state="blocked",
-            ),
-        ),
-        retry_history=("Retry Macron research with smaller scope.",),
-        repair_history=("Decompose the Macron research query.",),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker="search_web timed out on Macron research",
-        updated_at="2026-03-27T10:00:00Z",
-        executor_state="blocked",
-        executor_reason="mission blocked",
-    )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_mission_relation_call(messages):
-                return _relation_response(profile, "new_mission")
-            if _is_mission_planner_call(messages):
-                payload = json.loads(messages[-1].content)
-                assert payload["existing_mission_state"] is None
-                assert payload["compatibility_mission_state"] is None
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a fresh local note.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the fresh local note",
-                                    "deliverable": "Fresh local note file",
-                                    "verification": "The note file is written and read back.",
-                                    "required_evidence": [
-                                        "artifact_write",
-                                        "artifact_readback",
-                                    ],
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the fresh local note",
-                                    "deliverable": "Short local completion reply",
-                                    "verification": "The reply confirms the verified note.",
-                                    "required_evidence": ["reply_emitted"],
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "fresh local note mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T10:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Confirm the new local note.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T10:00:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T10:00:05Z",
-                    finish_reason="stop",
-                )
-            if not any(message.role is LLMRole.TOOL for message in messages):
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "fresh local note"},
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="The fresh local note is ready.",
-                created_at="2026-03-27T10:00:04Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(blocked_state, session_id=session.id)
-        prompt = "Write a fresh local note."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        assert "Macron" not in reply
-        assert reply == "The fresh local note is ready."
-        assert output_path.exists()
-    finally:
-        session_manager.close()
-
-
-def test_status_turn_targets_the_current_mission_only(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
     _settings, session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
         set_profile_tool_mode,
     )
-    old_blocked_state = MissionState(
-        mission_id="mission-old-macron",
-        goal="Do a complete Macron research file.",
-        status="blocked",
-        active_deliverable_id="d1",
-        active_task="Research Macron completely",
-        completed_deliverables=(),
-        blocked_deliverables=("d1",),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="mixed",
-                task="Research Macron completely",
-                deliverable="Macron research facts",
-                verification="Full research evidence is verified.",
-                required_evidence=("full_web_research",),
-                status="blocked",
-                missing=None,
-                blocker="Macron research timed out",
-                attempt_count=1,
-                repair_count=1,
-                retry_count=1,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-27T10:10:00Z",
-                execution_state="blocked",
-            ),
+    observed_tool_calls: list[str] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        FAST_WEB_SEARCH_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Marine Leleu grounding",
+                payload={
+                    "query": call.arguments["query"],
+                    "grounding_note": "Marine Leleu is a French endurance athlete and content creator.",
+                },
+            )
         ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker="Macron research timed out",
-        updated_at="2026-03-27T10:10:00Z",
-        executor_state="blocked",
-        executor_reason="mission blocked",
     )
-    current_state = MissionState(
-        mission_id="mission-current-note",
-        goal="Write a birds note.",
-        status="active",
-        active_deliverable_id="d1",
-        active_task="Write the birds note",
-        completed_deliverables=(),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="artifact",
-                task="Write the birds note",
-                deliverable="Birds note file",
-                verification="The birds note is written and read back.",
-                required_evidence=("artifact_write", "artifact_readback"),
-                status="active",
-                missing="Need the note file.",
-                blocker=None,
-                attempt_count=0,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-27T10:11:00Z",
-                execution_state="ready",
-            ),
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="should not run",
+            )
         ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker=None,
-        updated_at="2026-03-27T10:11:00Z",
-        executor_state="ready",
-        executor_reason="mission planned",
-        waiting_for="execute Write the birds note",
-        advance_condition="The birds note is written and read back.",
     )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools, messages
-            return _relation_response(profile, "status_of_same_mission")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "mission_goal": "Identify who Marine Leleu is.",
+                "reasoning_summary": "Ground the person first and answer from the grounding note.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Identify the correct person",
+                        "kind": "mixed",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["fast_grounding", "reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    }
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "fast_web_search",
+                        "arguments": {"query": "Marine Leleu"},
+                    }
+                ],
+                "reply_to_user": "Marine Leleu est une sportive d'endurance et créatrice de contenu française.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        )
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(old_blocked_state, session_id=session.id)
-        session_manager.persist_mission_state(current_state, session_id=session.id)
-        prompt = "ou en est cette mission ?"
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
+        reply = _run_turn(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input=prompt,
             tracer=tracer,
-            tool_registry=ToolRegistry(),
+            tool_registry=tool_registry,
+            prompt="Qui est Marine Leleu ?",
         )
+        mission_state = session_manager.get_current_mission_state()
 
-        assert "birds note" in reply.casefold()
-        assert "macron" not in reply.casefold()
+        assert "Marine Le Pen" not in reply
+        assert observed_tool_calls == ["fast_web_search"]
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        assert mission_state.get_task("t1").satisfied_evidence == (
+            "fast_grounding",
+            "reply_emitted",
+        )
     finally:
         session_manager.close()
 
 
-def test_kernel_timeout_repair_retries_search_within_budget(
+def test_search_timeout_triggers_bounded_repair_instead_of_nonsense_repetition(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
-    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
         set_profile_tool_mode,
     )
-    tool_registry = ToolRegistry()
-    search_calls: list[ToolCall] = []
-    execution_calls = 0
+    output_path = settings.paths.files_dir / "macron-bio.txt"
+    observed_search_args: list[dict[str, object]] = []
+    search_attempts = {"count": 0}
 
-    def _search_tool(call: ToolCall) -> ToolResult:
-        search_calls.append(call)
-        if len(search_calls) == 1:
+    def _search_handler(call):
+        observed_search_args.append(dict(call.arguments))
+        search_attempts["count"] += 1
+        if search_attempts["count"] == 1:
             return ToolResult.failure(
                 tool_name=call.tool_name,
-                error="search timed out",
+                error="search_web timed out",
                 failure_kind="timeout",
                 payload={"execution_state": "timed_out"},
             )
         return ToolResult.ok(
             tool_name=call.tool_name,
-            output_text="Recovered search evidence",
+            output_text="Macron research",
             payload={
                 "query": call.arguments["query"],
-                "summary_points": ["Recovered fact."],
-                "display_sources": [
-                    {"title": "Recovered", "url": "https://example.com/recovered"},
-                    {"title": "Recovered 2", "url": "https://example.com/recovered-2"},
+                "summary_points": [
+                    "Emmanuel Macron is the President of France.",
+                    "He was born in Amiens.",
                 ],
-                "evidence_count": 3,
-                "finding_count": 2,
+                "display_sources": [
+                    {"title": "Example", "url": "https://example.com/macron"}
+                ],
             },
         )
 
-    tool_registry.register(SEARCH_WEB_DEFINITION, _search_tool)
-    active_state = MissionState(
-        mission_id="mission-timeout",
-        goal="Research the kernel timeout case.",
-        status="active",
-        active_deliverable_id="d1",
-        active_task="Research the kernel timeout case",
-        completed_deliverables=(),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="mixed",
-                task="Research the kernel timeout case",
-                deliverable="Verified timeout-safe research facts",
-                verification="Search evidence is verified.",
-                required_evidence=("full_web_research",),
-                status="active",
-                missing="Need grounded evidence.",
-                blocker=None,
-                attempt_count=0,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:40:00Z",
-            ),
-            MissionDeliverableState(
-                deliverable_id="d2",
-                mode="reply",
-                task="Answer from the recovered evidence",
-                deliverable="Short recovered evidence reply",
-                verification="The reply includes the recovered evidence.",
-                required_evidence=("reply_emitted",),
-                status="pending",
-                missing=None,
-                blocker=None,
-                attempt_count=0,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-26T10:40:00Z",
-            ),
+    tool_registry = ToolRegistry()
+    tool_registry.register(SEARCH_WEB_DEFINITION, _search_handler)
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: write_text_file(
+            call,
+            allowed_roots=(settings.paths.project_root,),
+            default_write_dir=settings.paths.files_dir,
         ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker=None,
-        updated_at="2026-03-26T10:40:00Z",
-        pending_repairs=("retry after timeout",),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: read_text_file(
+            call,
+            read_allowed_roots=(settings.paths.project_root,),
+            default_read_dir=settings.paths.files_dir,
+        ),
     )
 
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls
-            if _is_mission_relation_call(messages):
-                return _relation_response(profile, "same_active_mission")
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "continue_existing",
-                            "mission_goal": active_state.goal,
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": active_state.deliverables[0].task,
-                                    "deliverable": active_state.deliverables[0].deliverable,
-                                    "verification": active_state.deliverables[0].verification,
-                                    "required_evidence": ["full_web_research"],
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": active_state.deliverables[1].task,
-                                    "deliverable": active_state.deliverables[1].deliverable,
-                                    "verification": active_state.deliverables[1].verification,
-                                    "required_evidence": ["reply_emitted"],
-                                }
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "retry the active research deliverable",
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "mission_goal": "Research Emmanuel Macron and write his bio with emojis.",
+                "reasoning_summary": "Start with research.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research Emmanuel Macron",
+                        "kind": "web_research",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the bio file",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Reply to the user",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "Emmanuel Macron biography"},
+                    }
+                ],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "full_web_research",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "mission_goal": "Research Emmanuel Macron and write his bio with emojis.",
+                "reasoning_summary": "Repair after timeout with a narrower search.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research Emmanuel Macron",
+                        "kind": "web_research",
+                        "status": "repairing",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": "search_web timed out",
+                        "repair_count": 1,
+                    }
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {
+                            "query": "Emmanuel Macron biography",
+                            "max_results": 2,
                         },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:40:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results and latest_tool_results[0]["success"] is False:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d1",
-                                "current_deliverable_status": "active",
-                                "missing": "A retry is still needed after the timeout.",
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d1"],
-                                "next_action": "continue",
-                                "repair_strategy": "retry after timeout",
-                                "notes_for_next_step": "Retry the active deliverable with a narrower search step.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:40:03Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "completed",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Recovered fact."],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Answer from the recovered evidence.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T10:40:05Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [],
-                            "evidence": ["Recovered fact."],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
+                    }
+                ],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "full_web_research",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "mission_goal": "Research Emmanuel Macron and write his bio with emojis.",
+                "reasoning_summary": "Write the verified bio and confirm completion.",
+                "tasks": [
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the bio file",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Reply to the user",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t2",
+                "tool_calls": [
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {
+                            "path": str(output_path),
+                            "content": "Emmanuel Macron 😊\nPresident of France 🇫🇷\nBorn in Amiens.",
                         },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T10:40:07Z",
-                    finish_reason="stop",
-                )
-            execution_calls += 1
-            if execution_calls <= 2:
-                return _tool_call_response(
-                    "search_web",
-                    {"query": "kernel timeout case"},
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="Recovered fact.",
-                created_at="2026-03-26T10:40:06Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "La bio avec emojis est prête 😊🇫🇷",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(active_state, session_id=session.id)
-        session_manager.add_message(
-            MessageRole.USER,
-            "Continue the timeout mission.",
-            session_id=session.id,
-        )
-        reply = run_user_turn(
+        reply = _run_turn(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input="Continue the timeout mission.",
             tracer=tracer,
             tool_registry=tool_registry,
+            prompt="Fais une recherche sur Emmanuel Macron, puis écrit sa bio dans un fichier texte, avec emojis...",
         )
+        mission_state = session_manager.get_current_mission_state()
 
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert "Recovered fact." in reply
-        assert "Sources:" in reply
-        assert len(search_calls) >= 2
-        assert any(
-            call.arguments.get("max_results") == 3 for call in search_calls[1:]
-        )
+        assert reply == "La bio avec emojis est prête 😊🇫🇷"
+        assert fake_provider.call_count() == 3
+        assert observed_search_args[0]["query"] == "Emmanuel Macron biography"
+        assert "max_results" not in observed_search_args[0]
+        assert observed_search_args[1]["query"] == "Emmanuel Macron biography"
+        assert observed_search_args[1]["max_results"] in {2, 3}
         assert mission_state is not None
         assert mission_state.status == "completed"
-        assert mission_state.last_successful_evidence == ("Recovered fact.",)
+        assert mission_state.get_task("t1").repair_count in {0, 1}
+        assert "President of France" in output_path.read_text(encoding="utf-8")
     finally:
         session_manager.close()
 
 
-def test_second_search_timeout_requests_concrete_bounded_repair_not_block(
+def test_completed_tasks_are_not_rerun_automatically(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
-    _settings, session_manager, tracer, command_handler = _build_native_runtime(
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
         set_profile_tool_mode,
     )
+    output_path = settings.paths.files_dir / "note.txt"
+    observed_tool_calls: list[str] = []
     tool_registry = ToolRegistry()
     tool_registry.register(
         SEARCH_WEB_DEFINITION,
-        lambda call: ToolResult.failure(
-            tool_name=call.tool_name,
-            error="search timed out again",
-            failure_kind="timeout",
-            payload={"execution_state": "timed_out", "query": call.arguments["query"]},
-        ),
-    )
-    active_state = MissionState(
-        mission_id="mission-timeout-repair",
-        goal="Research the timeout repair case.",
-        status="active",
-        active_deliverable_id="d1",
-        active_task="Research the timeout repair case",
-        completed_deliverables=(),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="mixed",
-                task="Research the timeout repair case",
-                deliverable="Verified timeout repair facts",
-                verification="Search evidence is verified.",
-                required_evidence=("full_web_research",),
-                status="active",
-                missing="Need full research evidence.",
-                blocker=None,
-                attempt_count=2,
-                repair_count=0,
-                retry_count=2,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-27T10:20:00Z",
-                execution_state="repairing",
-            ),
-        ),
-        retry_history=("Retry search_web once with a narrower step such as max_results=3.",),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=(),
-        last_blocker=None,
-        updated_at="2026-03-27T10:20:00Z",
-        pending_repairs=("Retry search_web once with a narrower step such as max_results=3.",),
-        executor_state="repairing",
-        executor_reason="retry the active deliverable",
-    )
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_mission_relation_call(messages):
-                return _relation_response(profile, "same_active_mission")
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "continue_existing",
-                            "mission_goal": active_state.goal,
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": active_state.deliverables[0].task,
-                                    "deliverable": active_state.deliverables[0].deliverable,
-                                    "verification": active_state.deliverables[0].verification,
-                                    "required_evidence": ["full_web_research"],
-                                }
-                            ],
-                            "execution_queue": ["d1"],
-                            "active_deliverable_id": "d1",
-                            "summary": "continue the timed-out research deliverable",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T10:20:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="not json",
-                    created_at="2026-03-27T10:20:03Z",
-                    finish_reason="stop",
-                )
-            return _tool_call_response(
-                "search_web",
-                {"query": "timeout repair case"},
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Should never run",
             )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(active_state, session_id=session.id)
-        prompt = "Continue the timeout repair mission."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-            max_agent_steps=1,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert "timed out" in reply.casefold()
-        assert mission_state is not None
-        assert mission_state.status == "active"
-        assert mission_state.executor_state == "repairing"
-        assert mission_state.waiting_for is not None
-        assert (
-            "decompose" in mission_state.waiting_for.casefold()
-            or "fetch" in mission_state.waiting_for.casefold()
-        )
-    finally:
-        session_manager.close()
-
-
-def test_kernel_collision_repair_retries_with_versioned_path(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    """Collision conflict from write_text_file triggers structured repair.
-
-    When the verifier fallback sees failure_kind='collision_conflict' and
-    suggested_version_path in the payload, it sets a repair strategy so the
-    kernel retries with collision_policy='version'.
-    """
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
+        ),
     )
-    output_path = settings.paths.files_dir / "collision-note.txt"
-    # Pre-create the file so the first write collides
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("already exists", encoding="utf-8")
-    tool_registry = ToolRegistry()
     tool_registry.register(
         WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
+            )
         ),
     )
     tool_registry.register(
         READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    execution_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T11:00:09Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a collision note.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "task": "Write the note file",
-                                    "deliverable": "Local note file",
-                                    "verification": "File is written and verified.",
-                                }
-                            ],
-                            "execution_queue": ["d1"],
-                            "active_deliverable_id": "d1",
-                            "summary": "collision write mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T11:00:01Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                # Check for successful write (second attempt with versioned path)
-                if latest_tool_results and any(
-                    item.get("tool_name") == "write_text_file"
-                    and item.get("success") is True
-                    for item in latest_tool_results
-                ):
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "completed",
-                                "active_deliverable_id": None,
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": [],
-                                "final_deliverables_missing": [],
-                                "next_action": "final_reply",
-                                "repair_strategy": None,
-                                "notes_for_next_step": None,
-                                "assistant_reply": draft_reply or "File saved.",
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T11:00:06Z",
-                        finish_reason="stop",
-                    )
-                # Collision detected — fallback handles the repair
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "active",
-                            "active_deliverable_id": "d1",
-                            "current_deliverable_status": "active",
-                            "missing": "File collision needs repair.",
-                            "blocker": None,
-                            "artifact_paths": [],
-                            "evidence": [],
-                            "final_deliverables_missing": ["d1"],
-                            "next_action": "continue",
-                            "repair_strategy": (
-                                "Retry write with collision_policy='version'"
-                            ),
-                            "notes_for_next_step": (
-                                "Retry with collision_policy='version' to save a versioned file."
-                            ),
-                            "assistant_reply": None,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T11:00:04Z",
-                    finish_reason="stop",
-                )
-
-            # Execution calls
-            execution_calls += 1
-            if execution_calls == 1:
-                # First write with collision_policy='fail' — triggers collision_conflict
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "New collision content",
-                        "collision_policy": "fail",
-                    },
-                )
-            if execution_calls == 2:
-                # Retry with collision_policy='version'
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "New collision content",
-                        "collision_policy": "version",
-                    },
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="File saved with versioned path.",
-                created_at="2026-03-26T11:00:07Z",
-                finish_reason="stop",
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
             )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Write a collision note."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        # The original file should be untouched (collision_policy=fail)
-        assert output_path.read_text(encoding="utf-8") == "already exists"
-        # A versioned file should have been created (timestamped name)
-        versioned_files = list(settings.paths.files_dir.glob("collision-note_*.txt"))
-        assert len(versioned_files) >= 1
-        assert "New collision content" in versioned_files[0].read_text(encoding="utf-8")
-        assert execution_calls == 2
-    finally:
-        session_manager.close()
-
-
-def test_kernel_strict_deliverable_ordering_blocks_later_before_earlier(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    """Strict ordering: later deliverables cannot complete before earlier ones.
-
-    When the verifier tries to advance to d3 while d1 is still active,
-    the ordering enforcement in _apply_verification_decision clamps the
-    active deliverable back to d1.
-    """
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        SEARCH_WEB_DEFINITION,
-        lambda call: ToolResult.ok(
-            tool_name=call.tool_name,
-            output_text="Ordering evidence.",
-            payload={
-                "query": call.arguments["query"],
-                "summary_points": ["Order fact."],
-                "display_sources": [],
-                "evidence_count": 1,
-                "finding_count": 1,
-            },
-        ),
-    )
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    output_path = settings.paths.files_dir / "ordering-note.txt"
-    execution_calls = 0
-    verifier_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls, verifier_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T12:00:09Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Research, write, then tell a joke.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "task": "Research ordering facts",
-                                    "deliverable": "Grounded research",
-                                    "verification": "Search evidence verified.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "task": "Write the local note",
-                                    "deliverable": "Local note file",
-                                    "verification": "File written and read back.",
-                                },
-                                {
-                                    "id": "d3",
-                                    "task": "Tell a joke",
-                                    "deliverable": "Short joke",
-                                    "verification": "Joke in reply.",
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2", "d3"],
-                            "active_deliverable_id": "d1",
-                            "summary": "ordering test mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T12:00:01Z",
-                    finish_reason="stop",
-                )
-
-            if _is_mission_verifier_call(messages):
-                verifier_calls += 1
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-
-                if verifier_calls == 1:
-                    # After search_web: verifier tries to skip to d3,
-                    # but ordering should clamp back to d1 or d2.
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d3",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": ["Order fact."],
-                                "final_deliverables_missing": ["d2", "d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Skip to joke.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T12:00:03Z",
-                        finish_reason="stop",
-                    )
-                if verifier_calls == 2:
-                    # After write_text_file + read_text_file: d2 completed
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d3",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d3"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Tell the joke.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-26T12:00:05Z",
-                        finish_reason="stop",
-                    )
-                # Final: mission completed
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-26T12:00:07Z",
-                    finish_reason="stop",
-                )
-
-            # Execution calls
-            execution_calls += 1
-            if execution_calls == 1:
-                # d1: research step — search_web call
-                return _tool_call_response(
-                    "search_web",
-                    {"query": "ordering facts"},
-                )
-            if execution_calls == 2:
-                # d2: write note (after ordering clamp moved us back to d2)
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "Order fact."},
-                )
-            return LLMResponse(
-                provider="ollama",
-                model_name=profile.model_name,
-                content="Joke: Why did the kernel use strict ordering? To stay in line.",
-                created_at="2026-03-26T12:00:06Z",
-                finish_reason="stop",
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    prompt = "Research ordering, write a note, and tell a joke."
-
-    try:
-        session = session_manager.ensure_current_session()
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert "Joke:" in reply
-        # Verify that ordering enforcement worked: d1 was NOT skipped
-        # (the verifier tried to jump to d3 but ordering clamped to d2)
-        assert verifier_calls >= 3
-        assert output_path.exists()
-    finally:
-        session_manager.close()
-
-
-def test_reply_only_final_deliverable_completes_without_looping(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "reply-final-note.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    execution_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:05Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a note and then describe it.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the local note",
-                                    "deliverable": "Local note file",
-                                    "verification": "The file is written and read back.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Describe what was saved",
-                                    "deliverable": "Short final reply",
-                                    "verification": "The reply accurately describes the verified saved note.",
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "artifact then reply mission",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [str(output_path)],
-                                "evidence": ["Saved note: local reply kernel"],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Answer from the verified note.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T09:00:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": ["Saved note: local reply kernel"],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T09:00:04Z",
-                    finish_reason="stop",
-                )
-
-            execution_calls += 1
-            if execution_calls == 1:
-                return _tool_call_response(
-                    "write_text_file",
-                    {"path": str(output_path), "content": "local reply kernel"},
-                )
-            if execution_calls == 2:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I saved: local reply kernel.",
-                    created_at="2026-03-27T09:00:02Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Reply-only final deliverable must not loop.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        prompt = "Write a local note and then tell me exactly what you saved."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert execution_calls == 2
-        assert reply == "I saved: local reply kernel."
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert mission_state.final_verified_reply == "I saved: local reply kernel."
-        assert mission_state.deliverables[-1].status == "completed"
-        assert mission_state.deliverables[-1].execution_state == "completed"
-    finally:
-        session_manager.close()
-
-
-def test_artifact_deliverable_cannot_complete_without_verified_readback_evidence(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "no-readback.txt"
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
         ),
     )
 
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a note with verified read-back.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the note",
-                                    "deliverable": "Local note file",
-                                    "verification": "The file is written and read back.",
-                                }
-                            ],
-                            "execution_queue": ["d1"],
-                            "active_deliverable_id": "d1",
-                            "summary": "artifact-only verification test",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T10:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [str(output_path)],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": "Done.",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T10:00:03Z",
-                    finish_reason="stop",
-                )
-            return _tool_call_response(
-                "write_text_file",
-                {"path": str(output_path), "content": "artifact without readback"},
-            )
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        prompt = "Write a local note."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-            max_agent_steps=1,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert reply == "The mission is still active and needs another verified step before it can finish."
-        assert mission_state is not None
-        assert mission_state.status == "active"
-        assert mission_state.deliverables[0].status != "completed"
-        assert mission_state.deliverables[0].execution_state == "repairing"
-        assert mission_state.pending_repairs
-    finally:
-        session_manager.close()
-
-
-def test_collision_repair_advances_without_poisoning_reply_deliverable(
-    monkeypatch,
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, tracer, command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    output_path = settings.paths.files_dir / "collision-poison-note.txt"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text("already exists", encoding="utf-8")
-    tool_registry = ToolRegistry()
-    tool_registry.register(
-        WRITE_TEXT_FILE_DEFINITION,
-        lambda call: write_text_file(
-            call,
-            allowed_roots=(settings.paths.project_root,),
-            default_write_dir=settings.paths.files_dir,
-        ),
-    )
-    tool_registry.register(
-        READ_TEXT_FILE_DEFINITION,
-        lambda call: read_text_file(
-            call,
-            read_allowed_roots=(settings.paths.project_root,),
-            default_read_dir=settings.paths.files_dir,
-        ),
-    )
-    execution_calls = 0
-
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls
-
-            if _is_finalizer_call(messages):
-                payload = json.loads(messages[-1].content)
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {"final_reply": payload["assistant_draft_reply"]},
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T11:00:07Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "start_new",
-                            "mission_goal": "Write a collision-safe note and confirm it.",
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "artifact",
-                                    "task": "Write the note",
-                                    "deliverable": "Version-safe note file",
-                                    "verification": "The note is written and read back.",
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": "Confirm the saved note",
-                                    "deliverable": "Short confirmation reply",
-                                    "verification": "The reply confirms the verified saved note.",
-                                },
-                            ],
-                            "execution_queue": ["d1", "d2"],
-                            "active_deliverable_id": "d1",
-                            "summary": "collision repair then reply",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T11:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                payload = json.loads(messages[-1].content)
-                latest_tool_results = payload.get("latest_tool_results", [])
-                draft_reply = payload.get("draft_reply", "")
-                if latest_tool_results and any(
-                    item.get("success") is True
-                    and item.get("tool_name") == "write_text_file"
-                    for item in latest_tool_results
-                ):
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d2",
-                                "current_deliverable_status": "completed",
-                                "missing": None,
-                                "blocker": None,
-                                "artifact_paths": [
-                                    item["payload"]["resolved_path"]
-                                    for item in latest_tool_results
-                                    if item.get("tool_name") == "write_text_file"
-                                    and isinstance(item.get("payload"), dict)
-                                    and isinstance(item["payload"].get("resolved_path"), str)
-                                ],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d2"],
-                                "next_action": "continue",
-                                "repair_strategy": None,
-                                "notes_for_next_step": "Confirm the verified saved note.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T11:00:05Z",
-                        finish_reason="stop",
-                    )
-                if latest_tool_results:
-                    return LLMResponse(
-                        provider="ollama",
-                        model_name=profile.model_name,
-                        content=json.dumps(
-                            {
-                                "mission_status": "active",
-                                "active_deliverable_id": "d1",
-                                "current_deliverable_status": "active",
-                                "missing": "File collision needs repair.",
-                                "blocker": None,
-                                "artifact_paths": [],
-                                "evidence": [],
-                                "final_deliverables_missing": ["d1", "d2"],
-                                "next_action": "continue",
-                                "repair_strategy": "Retry write with collision_policy='version'",
-                                "notes_for_next_step": "Retry the write with collision_policy='version'.",
-                                "assistant_reply": None,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        created_at="2026-03-27T11:00:03Z",
-                        finish_reason="stop",
-                    )
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_status": "completed",
-                            "active_deliverable_id": None,
-                            "current_deliverable_status": "completed",
-                            "missing": None,
-                            "blocker": None,
-                            "artifact_paths": [],
-                            "evidence": [],
-                            "final_deliverables_missing": [],
-                            "next_action": "final_reply",
-                            "repair_strategy": None,
-                            "notes_for_next_step": None,
-                            "assistant_reply": draft_reply,
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T11:00:07Z",
-                    finish_reason="stop",
-                )
-
-            execution_calls += 1
-            if execution_calls == 1:
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "collision-safe content",
-                        "collision_policy": "fail",
-                    },
-                )
-            if execution_calls == 2:
-                return _tool_call_response(
-                    "write_text_file",
-                    {
-                        "path": str(output_path),
-                        "content": "collision-safe content",
-                        "collision_policy": "version",
-                    },
-                )
-            if execution_calls == 3:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="I saved the collision-safe note.",
-                    created_at="2026-03-27T11:00:06Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Collision repair must advance into the reply deliverable once.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
-
-    try:
-        session = session_manager.ensure_current_session()
-        prompt = "Write a collision-safe note and confirm it."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
-            session_manager=session_manager,
-            command_handler=command_handler,
-            user_input=prompt,
-            tracer=tracer,
-            tool_registry=tool_registry,
-        )
-
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert reply == "I saved the collision-safe note."
-        assert execution_calls == 3
-        assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert mission_state.pending_repairs == ()
-        assert mission_state.deliverables[-1].status == "completed"
-    finally:
-        session_manager.close()
-
-
-def test_executor_state_persists_via_external_mission_workspace_store(
-    make_temp_project,
-    set_profile_tool_mode,
-) -> None:
-    project_root = make_temp_project()
-    settings, session_manager, _tracer, _command_handler = _build_native_runtime(
-        project_root,
-        set_profile_tool_mode,
-    )
-    try:
-        session = session_manager.ensure_current_session()
-        active_state = MissionState(
-            mission_id="mission-persisted",
-            goal="Persist executor state outside SQLite.",
+    session = session_manager.ensure_current_session()
+    session_manager.persist_mission_state(
+        MissionState(
+            mission_id="mission-existing",
+            mission_goal="Research then write a note.",
             status="active",
-            active_deliverable_id="d1",
-            active_task="Repair the saved note",
-            completed_deliverables=(),
-            blocked_deliverables=(),
-            deliverables=(
-                MissionDeliverableState(
-                    deliverable_id="d1",
-                    mode="artifact",
-                    task="Repair the saved note",
-                    deliverable="Local repaired note",
-                    verification="The repaired note is written and read back.",
+            tasks=(
+                MissionTaskState(
+                    id="t1",
+                    title="Research the subject",
+                    kind="web_research",
+                    status="completed",
+                    required_evidence=("full_web_research",),
+                    satisfied_evidence=("full_web_research",),
+                    evidence=("Verified fact.",),
+                ),
+                MissionTaskState(
+                    id="t2",
+                    title="Write and verify the note",
+                    kind="file_write",
                     status="active",
-                    missing="Need repaired artifact evidence.",
-                    blocker=None,
-                    attempt_count=1,
-                    repair_count=1,
-                    retry_count=0,
-                    artifact_paths=(),
-                    evidence=(),
-                    updated_at="2026-03-27T12:00:00Z",
-                    execution_state="repairing",
-                    waiting_for="Retry the write with a repaired path.",
-                    advance_condition="The repaired note is written and read back.",
-                    verifier_notes="Retry the write with a repaired path.",
+                    depends_on=("t1",),
+                    required_evidence=("artifact_write", "artifact_readback"),
+                    artifact_paths=(str(output_path),),
+                ),
+                MissionTaskState(
+                    id="t3",
+                    title="Reply to the user",
+                    kind="reply",
+                    status="pending",
+                    depends_on=("t2",),
+                    required_evidence=("reply_emitted",),
                 ),
             ),
-            retry_history=(),
-            repair_history=("Retry the write with a repaired path.",),
-            last_verified_artifact_paths=(),
-            last_successful_evidence=(),
-            last_blocker=None,
-            updated_at="2026-03-27T12:00:00Z",
-            pending_repairs=("Retry the write with a repaired path.",),
-            executor_state="repairing",
-            executor_reason="repair the active deliverable before advancing",
-            waiting_for="Retry the write with a repaired path.",
-            advance_condition="The repaired note is written and read back.",
-            verifier_outputs=("Retry the write with a repaired path.",),
-        )
+            active_task_id="t2",
+            updated_at="2026-03-27T09:00:00Z",
+            reasoning_summary="existing mission",
+            last_user_input="continue",
+        ),
+        session_id=session.id,
+    )
 
-        session_manager.persist_mission_state(active_state, session_id=session.id)
-        row = session_manager.connection.execute(
-            """
-            SELECT payload_json
-            FROM events
-            WHERE session_id = ?
-              AND event_type = 'session.mission_state.updated'
-            ORDER BY created_at DESC, rowid DESC
-            LIMIT 1
-            """,
-            (session.id,),
-        ).fetchone()
-        assert row is not None
-        pointer = parse_mission_workspace_pointer(row["payload_json"])
-        assert pointer is not None
-        workspace_path = Path(pointer.workspace_path)
-        assert workspace_path.exists()
-        assert workspace_path.parent.name == session.id
-        assert workspace_path.parent.parent.name == "missions"
-        workspace_payload = json.loads(workspace_path.read_text(encoding="utf-8"))
-        assert workspace_payload["executor_state"] == "repairing"
-        assert workspace_payload["pending_repairs"] == [
-            "Retry the write with a repaired path."
-        ]
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "mission_goal": "Research then write a note.",
+                "reasoning_summary": "Do not rerun the completed research task.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research the subject",
+                        "kind": "web_research",
+                        "status": "completed",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Reply to the user",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t2",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "should not rerun"},
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {"path": str(output_path), "content": "safe note"},
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "The note is written.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        )
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt="continue",
+        )
+        mission_state = session_manager.get_current_mission_state(session.id)
+
+        assert reply == "The note is written."
+        assert observed_tool_calls == ["write_text_file", "read_text_file"]
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        assert any(
+            history.tool_name == "search_web"
+            and history.executed is False
+            and history.reason == "task already completed"
+            for history in mission_state.tool_history
+        )
     finally:
         session_manager.close()
 
-    reloaded_manager = SessionManager.from_settings(settings)
-    try:
-        reloaded_state = reloaded_manager.get_current_mission_state(session.id)
-        assert reloaded_state is not None
-        assert reloaded_state.executor_state == "repairing"
-        assert reloaded_state.pending_repairs == (
-            "Retry the write with a repaired path.",
-        )
-        assert reloaded_state.waiting_for == "Retry the write with a repaired path."
-    finally:
-        reloaded_manager.close()
 
-
-def test_safe_verifier_fallback_avoids_infinite_final_reply_loop(
+def test_no_dependent_task_runs_before_prerequisite_proof_exists(
     monkeypatch,
     make_temp_project,
     set_profile_tool_mode,
+    build_scripted_ollama_provider,
 ) -> None:
     project_root = make_temp_project()
     settings, session_manager, tracer, command_handler = _build_native_runtime(
         project_root,
         set_profile_tool_mode,
     )
-    active_state = MissionState(
-        mission_id="mission-macron-like",
-        goal="Write the verified final reply.",
-        status="active",
-        active_deliverable_id="d2",
-        active_task="Write the verified final reply",
-        completed_deliverables=("d1",),
-        blocked_deliverables=(),
-        deliverables=(
-            MissionDeliverableState(
-                deliverable_id="d1",
-                mode="mixed",
-                task="Collect verified facts",
-                deliverable="Verified facts",
-                verification="The facts are verified.",
-                required_evidence=("full_web_research",),
-                status="completed",
-                missing=None,
-                blocker=None,
-                attempt_count=1,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=("Macron fact.",),
-                updated_at="2026-03-27T13:00:00Z",
-                execution_state="completed",
-            ),
-            MissionDeliverableState(
-                deliverable_id="d2",
-                mode="reply",
-                task="Write the verified final reply",
-                deliverable="Final reply",
-                verification="The reply uses the verified facts only.",
-                required_evidence=("reply_emitted",),
-                status="active",
-                missing=None,
-                blocker=None,
-                attempt_count=0,
-                repair_count=0,
-                retry_count=0,
-                artifact_paths=(),
-                evidence=(),
-                updated_at="2026-03-27T13:00:00Z",
-                execution_state="ready",
-            ),
+    output_path = settings.paths.files_dir / "premature-note.txt"
+    observed_tool_calls: list[str] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Research success",
+                payload={
+                    "query": call.arguments["query"],
+                    "summary_points": ["Verified research fact."],
+                    "display_sources": [
+                        {"title": "Example", "url": "https://example.com/research"}
+                    ],
+                },
+            )
         ),
-        retry_history=(),
-        repair_history=(),
-        last_verified_artifact_paths=(),
-        last_successful_evidence=("Macron fact.",),
-        last_blocker=None,
-        updated_at="2026-03-27T13:00:00Z",
-        execution_queue=("d2",),
-        completed_steps=("d1",),
-        final_deliverables_missing=("d2",),
-        executor_state="ready",
-        executor_reason="advance to the reply deliverable",
-        waiting_for="execute Write the verified final reply",
-        advance_condition="The reply uses the verified facts only.",
     )
-    execution_calls = 0
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
+            )
+        ),
+    )
 
-    class FakeProvider:
-        provider_name = "ollama"
-
-        def __init__(
-            self,
-            *,
-            base_url: str = "http://127.0.0.1:11434",
-            default_timeout_seconds: float = 60.0,
-        ) -> None:
-            del base_url, default_timeout_seconds
-
-        def chat(  # type: ignore[no-untyped-def]
-            self,
-            profile,
-            messages,
-            *,
-            timeout_seconds=None,
-            thinking_enabled=False,
-            content_callback=None,
-            tools=None,
-        ):
-            del timeout_seconds, thinking_enabled, content_callback, tools
-            nonlocal execution_calls
-            if _is_mission_relation_call(messages):
-                return _relation_response(profile, "same_active_mission")
-            if _is_mission_planner_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content=json.dumps(
-                        {
-                            "mission_action": "continue_existing",
-                            "mission_goal": active_state.goal,
-                            "deliverables": [
-                                {
-                                    "id": "d1",
-                                    "mode": "mixed",
-                                    "task": active_state.deliverables[0].task,
-                                    "deliverable": active_state.deliverables[0].deliverable,
-                                    "verification": active_state.deliverables[0].verification,
-                                    "required_evidence": ["full_web_research"],
-                                },
-                                {
-                                    "id": "d2",
-                                    "mode": "reply",
-                                    "task": active_state.deliverables[1].task,
-                                    "deliverable": active_state.deliverables[1].deliverable,
-                                    "verification": active_state.deliverables[1].verification,
-                                    "required_evidence": ["reply_emitted"],
-                                },
-                            ],
-                            "execution_queue": ["d2"],
-                            "active_deliverable_id": "d2",
-                            "summary": "continue the final reply deliverable",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    created_at="2026-03-27T13:00:01Z",
-                    finish_reason="stop",
-                )
-            if _is_mission_verifier_call(messages):
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="not json",
-                    created_at="2026-03-27T13:00:03Z",
-                    finish_reason="stop",
-                )
-            execution_calls += 1
-            if execution_calls == 1:
-                return LLMResponse(
-                    provider="ollama",
-                    model_name=profile.model_name,
-                    content="Verified reply: Macron fact.",
-                    created_at="2026-03-27T13:00:02Z",
-                    finish_reason="stop",
-                )
-            raise AssertionError("Safe fallback must finish without another execution loop.")
-
-        def is_available(self, *, timeout_seconds=None) -> bool:  # type: ignore[no-untyped-def]
-            del timeout_seconds
-            return True
-
-    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeProvider)
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "mission_goal": "Research first, then write a file.",
+                "reasoning_summary": "The write step incorrectly appears first; the runtime must gate it.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research the topic",
+                        "kind": "web_research",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the file",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {"path": str(output_path), "content": "too early"},
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "ordered proof"},
+                    },
+                ],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "full_web_research",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "mission_goal": "Research first, then write a file.",
+                "reasoning_summary": "Stop after reporting the persisted state.",
+                "tasks": [
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the file",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    }
+                ],
+                "active_task_id": "t2",
+                "tool_calls": [],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "artifact_write, artifact_readback",
+            }
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
 
     try:
-        session = session_manager.ensure_current_session()
-        session_manager.persist_mission_state(active_state, session_id=session.id)
-        prompt = "Finish the verified Macron reply."
-        session_manager.add_message(MessageRole.USER, prompt, session_id=session.id)
-        reply = run_user_turn(
+        reply = _run_turn(
             session_manager=session_manager,
             command_handler=command_handler,
-            user_input=prompt,
             tracer=tracer,
-            tool_registry=ToolRegistry(),
+            tool_registry=tool_registry,
+            prompt="Research, then write a file.",
         )
+        mission_state = session_manager.get_current_mission_state()
 
-        mission_state = session_manager.get_current_mission_state(session.id)
-        assert execution_calls == 1
-        assert reply == "Verified reply: Macron fact."
+        assert observed_tool_calls == ["search_web"]
+        assert "Next expected action or evidence" in reply
         assert mission_state is not None
-        assert mission_state.status == "completed"
-        assert mission_state.final_verified_reply == "Verified reply: Macron fact."
+        assert mission_state.status == "active"
+        assert mission_state.get_task("t1").status == "completed"
+        assert mission_state.get_task("t2").status != "completed"
+        assert any(
+            history.tool_name == "write_text_file"
+            and history.executed is False
+            and history.reason == "prerequisite proof missing"
+            for history in mission_state.tool_history
+        )
     finally:
         session_manager.close()

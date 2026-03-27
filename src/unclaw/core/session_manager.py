@@ -484,7 +484,7 @@ class SessionManager:
                 updated_at=mission_state.updated_at,
                 status=mission_state.status,
                 executor_state=mission_state.executor_state,
-                active_deliverable_id=mission_state.active_deliverable_id,
+                active_task_id=mission_state.active_task_id,
             )
         )
         self.event_repository.add_event(
@@ -723,6 +723,17 @@ def _project_session_goal_state_from_mission(
 ) -> SessionGoalState:
     active_deliverable = mission_state.get_deliverable()
     current_step = mission_state.active_task
+    if current_step is None and mission_state.status == "blocked":
+        blocked_deliverable = next(
+            (
+                deliverable
+                for deliverable in reversed(mission_state.deliverables)
+                if deliverable.status == "blocked"
+            ),
+            None,
+        )
+        if blocked_deliverable is not None:
+            current_step = blocked_deliverable.task
     if current_step is None:
         latest_completed_deliverable = next(
             (
@@ -771,6 +782,17 @@ def _project_session_progress_ledger_from_mission(
 ) -> tuple[SessionProgressEntry, ...]:
     entries: list[SessionProgressEntry] = []
     projected_step = mission_state.active_task
+    if projected_step is None and mission_state.status == "blocked":
+        blocked_deliverable = next(
+            (
+                deliverable
+                for deliverable in reversed(mission_state.deliverables)
+                if deliverable.status == "blocked"
+            ),
+            None,
+        )
+        if blocked_deliverable is not None:
+            projected_step = blocked_deliverable.task
     if projected_step is None:
         latest_completed_deliverable = next(
             (

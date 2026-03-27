@@ -1,24 +1,20 @@
-"""Minimal runtime entrypoint for one non-command chat turn."""
+"""Runtime entrypoint for the single-agent mission loop."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
 from time import perf_counter
 
-import unclaw.core.agent_loop as _agent_loop
 import unclaw.core.agent_kernel as _agent_kernel
-from unclaw.core.capabilities import build_runtime_capability_summary
+import unclaw.core.agent_loop as _agent_loop
+import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import create_default_tool_registry
-from unclaw.core.mission_workspace import build_compatibility_mission_state
 from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
     OrchestratorError,
-    OrchestratorTurnResult,
 )
-import unclaw.core.runtime_support as _runtime_support
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.core.timing import elapsed_ms
 from unclaw.constants import (
@@ -27,11 +23,11 @@ from unclaw.constants import (
     RUNTIME_ERROR_REPLY,
 )
 from unclaw.errors import ConfigurationError, UnclawError
-from unclaw.llm.base import LLMContentCallback, LLMError, LLMMessage, LLMRole
+from unclaw.llm.base import LLMContentCallback, LLMError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
-from unclaw.tools.contracts import ToolCall, ToolResult
+from unclaw.tools.contracts import ToolCall
 from unclaw.tools.registry import ToolRegistry
 
 
@@ -51,7 +47,8 @@ def run_user_turn(
     max_agent_steps: int = DEFAULT_RUNTIME_AGENT_STEP_LIMIT,
     turn_cancellation: _agent_loop.RuntimeTurnCancellation | None = None,
 ) -> str:
-    """Run the minimal runtime path and persist the assistant reply."""
+    """Run one user turn through the single-agent mission loop."""
+
     session = session_manager.ensure_current_session()
     active_tracer = tracer or Tracer(
         event_bus=event_bus or EventBus(),
@@ -66,17 +63,17 @@ def run_user_turn(
         else None
     )
 
-    selected_model_profile_name = command_handler.current_model_profile.name
     selected_model = command_handler.current_model_profile
+    selected_model_profile_name = selected_model.name
     thinking_enabled = command_handler.thinking_enabled is True
     active_tool_registry = tool_registry or create_default_tool_registry(
         session_manager.settings,
         session_manager=session_manager,
     )
-    capability_tool_registry = (
-        ToolRegistry()
+    tool_definitions = (
+        ()
         if _runtime_support._is_tool_mode_none_profile(selected_model)
-        else active_tool_registry
+        else tuple(active_tool_registry.list_tools())
     )
     tool_guard_state = _agent_loop._RuntimeToolGuardState(
         tool_timeout_seconds=(
@@ -86,17 +83,6 @@ def run_user_turn(
             session_manager.settings.app.runtime.max_tool_calls_per_turn
         ),
         cancellation=turn_cancellation,
-    )
-
-    legacy_tool_definitions = _runtime_support._resolve_tool_definitions(
-        tool_registry=active_tool_registry,
-        model_profile=selected_model,
-    )
-    legacy_can_call_tools = legacy_tool_definitions is not None
-    capability_summary = build_runtime_capability_summary(
-        tool_registry=capability_tool_registry,
-        memory_summary_available=command_handler.memory_manager is not None,
-        model_can_call_tools=legacy_can_call_tools,
     )
     turn_started_at = perf_counter()
 
@@ -109,164 +95,25 @@ def run_user_turn(
         input_length=len(user_input),
     )
 
-    active_assistant_reply_transform = assistant_reply_transform
-    system_context_notes: tuple[str, ...] = ()
-    runtime_explicit_tool_call = explicit_tool_call
     assistant_reply: str | None = None
-    turn_tool_results: list[ToolResult] = []
-    turn_start_message_count = len(session_manager.list_messages(session.id))
-    pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
-    pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
-    pre_turn_mission_state = session_manager.get_current_mission_state(session.id)
-    resume_kernel_mission = False
-    compatibility_mission_state = None
-    if (
-        pre_turn_mission_state is None
-        and pre_turn_goal_state is not None
-        and pre_turn_goal_state.status in {"active", "blocked"}
-    ):
-        compatibility_mission_state = build_compatibility_mission_state(
-            legacy_goal_state=pre_turn_goal_state,
-            legacy_progress_ledger=pre_turn_progress_ledger,
-        )
-    relation_decision = None
-    relation_checked = False
-    orchestrator: Orchestrator | None = None
-    grounded_finalization_used = False
-    no_tool_execution_claim_risk_assessment = None
-    mission_execution_used = False
-    mission_execution_persisted = False
-
-    buffered_stream_chunks: list[str] | None
-    _effective_stream_func: LLMContentCallback | None
-    # Stream directly to the caller during the agent loop so that output
-    # appears progressively instead of being held until the whole turn ends.
-    # Only the initial model call is separately buffered (below) so we can
-    # discard its text if the model decides to call tools instead.
-    live_streamed = False
-    if stream_output_func is not None:
-        buffered_stream_chunks = []
-
-        def _live_stream_func(text: str) -> None:
-            nonlocal live_streamed
-            live_streamed = True
-            stream_output_func(text)
-
-        _effective_stream_func = _live_stream_func
-    else:
-        buffered_stream_chunks = None
-        _effective_stream_func = None
-
-    if runtime_explicit_tool_call is None and legacy_tool_definitions is not None:
-        active_assistant_reply_transform = _runtime_support._compose_reply_transforms(
-            _runtime_support._build_default_search_grounding_transform(
-                session_manager=session_manager,
-                session_id=session.id,
-                query=user_input,
-                turn_start_message_count=turn_start_message_count,
-                model_profile_name=selected_model_profile_name,
-            ),
-            active_assistant_reply_transform,
-        )
 
     try:
-        def _ensure_relation_decision():
-            nonlocal orchestrator, relation_checked, relation_decision
-            if relation_checked:
-                return relation_decision
-            relation_checked = True
-            if (
-                pre_turn_mission_state is None
-                and compatibility_mission_state is None
-            ):
-                return None
-            if (
-                pre_turn_mission_state is not None
-                and pre_turn_mission_state.status not in {"active", "blocked"}
-                and compatibility_mission_state is None
-            ):
-                return None
-            if orchestrator is None:
-                orchestrator = Orchestrator(
-                    settings=session_manager.settings,
-                    session_manager=session_manager,
-                    tracer=active_tracer,
-                )
-            relation_decision = _agent_kernel.classify_turn_mission_relation(
-                session_id=session.id,
-                user_input=user_input,
-                orchestrator=orchestrator,
-                tracer=active_tracer,
-                model_profile_name=selected_model_profile_name,
-                thinking_enabled=thinking_enabled,
-                existing_mission_state=pre_turn_mission_state,
-                compatibility_mission_state=compatibility_mission_state,
-            )
-            return relation_decision
-
-        relation_decision = _ensure_relation_decision()
-        relation_type = (
-            relation_decision.relation if relation_decision is not None else None
-        )
-        resume_kernel_mission = (
-            pre_turn_mission_state is not None
-            and _agent_kernel.should_resume_mission_in_kernel(pre_turn_mission_state)
-            and relation_type in {"same_active_mission", "repair_same_mission"}
-        )
-        if (
-            assistant_reply is None
-            and relation_type == "status_of_same_mission"
-            and pre_turn_mission_state is not None
-        ):
-            assistant_reply = (
-                _agent_kernel._build_mission_status_reply(pre_turn_mission_state)
-                or EMPTY_RESPONSE_REPLY
-            )
-
-        memory_context_note = _runtime_support._build_session_memory_context_note(
-            command_handler=command_handler,
-            session_id=session.id,
-        )
-        task_continuity_note = None
-        if (
-            assistant_reply is None
-            and not resume_kernel_mission
-            and relation_type
-            not in {"new_mission", "standalone_direct_reply"}
-        ):
-            task_continuity_note = _runtime_support._build_session_task_continuity_note(
+        if explicit_tool_call is not None:
+            assistant_reply = _run_explicit_tool_call(
                 session_manager=session_manager,
                 session_id=session.id,
+                tracer=active_tracer,
+                tool_registry=active_tool_registry,
+                tool_call=explicit_tool_call,
+                tool_guard_state=tool_guard_state,
+                tool_call_callback=tool_call_callback,
             )
-        local_access_note = _runtime_support._build_local_access_control_note(
-            command_handler=command_handler,
-        )
-
-        system_context_notes = tuple(
-            note
-            for note in (
-                memory_context_note,
-                task_continuity_note,
-                local_access_note,
+        else:
+            orchestrator = Orchestrator(
+                settings=session_manager.settings,
+                session_manager=session_manager,
+                tracer=active_tracer,
             )
-            if note is not None
-        )
-
-        responder_tool_definitions = legacy_tool_definitions
-        responder_capability_summary = capability_summary
-
-        if (
-            assistant_reply is None
-            and resume_kernel_mission
-            and pre_turn_mission_state is not None
-            and max_agent_steps > 0
-        ):
-            if orchestrator is None:
-                orchestrator = Orchestrator(
-                    settings=session_manager.settings,
-                    session_manager=session_manager,
-                    tracer=active_tracer,
-                )
             mission_result = _agent_kernel.run_agent_kernel_turn(
                 session_manager=session_manager,
                 session_id=session.id,
@@ -274,388 +121,26 @@ def run_user_turn(
                 orchestrator=orchestrator,
                 tracer=active_tracer,
                 tool_registry=active_tool_registry,
-                tool_definitions=tuple(responder_tool_definitions or ()),
+                tool_definitions=tool_definitions,
                 model_profile_name=selected_model_profile_name,
                 thinking_enabled=thinking_enabled,
-                capability_summary=responder_capability_summary,
-                system_context_notes=system_context_notes,
+                capability_summary=None,
+                system_context_notes=(),
                 max_steps=max_agent_steps,
                 tool_guard_state=tool_guard_state,
                 tool_call_callback=tool_call_callback,
                 mission_event_callback=mission_event_callback,
-                content_callback=_effective_stream_func,
-                first_response=None,
-                relation_decision=relation_decision,
-                existing_mission_state=pre_turn_mission_state,
-                compatibility_mission_state=None,
+                content_callback=None,
+                existing_mission_state=session_manager.get_current_mission_state(
+                    session.id
+                ),
             )
-            turn_tool_results = list(mission_result.tool_results)
-            assistant_reply = mission_result.assistant_reply
-            mission_execution_used = True
-            mission_execution_persisted = mission_result.persisted
-
-        if runtime_explicit_tool_call is not None and responder_tool_definitions is None:
-            assistant_reply = _agent_loop._preflight_runtime_tool_batch(
-                tool_calls=(runtime_explicit_tool_call,),
-                tool_guard_state=tool_guard_state,
-            )
-            if assistant_reply is None:
-                turn_tool_results.extend(
-                    _agent_loop._execute_runtime_tool_calls(
-                        session_manager=session_manager,
-                        session_id=session.id,
-                        tracer=active_tracer,
-                        tool_registry=active_tool_registry,
-                        tool_calls=(runtime_explicit_tool_call,),
-                        tool_guard_state=tool_guard_state,
-                    )
-                )
-                if tool_guard_state.is_cancelled():
-                    assistant_reply = _agent_loop._TURN_CANCELLED_REPLY
-
-        if assistant_reply is None and tool_guard_state.is_cancelled():
-            assistant_reply = _agent_loop._TURN_CANCELLED_REPLY
-
-        if assistant_reply is None:
-            if orchestrator is None:
-                orchestrator = Orchestrator(
-                    settings=session_manager.settings,
-                    session_manager=session_manager,
-                    tracer=active_tracer,
-                )
-
-            def _finalize_responder_turn(
-                turn_result: OrchestratorTurnResult,
-                *,
-                parse_no_tool_execution_claim_risk: bool = False,
-            ) -> tuple[
-                OrchestratorTurnResult,
-                str | None,
-                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
-            ]:
-                active_tracer.trace_model_succeeded(
+            assistant_reply = mission_result.assistant_reply or EMPTY_RESPONSE_REPLY
+            if mission_result.persisted and mission_result.mission_state is not None:
+                session_manager.persist_legacy_mission_projection(
+                    mission_state=mission_result.mission_state,
                     session_id=session.id,
-                    provider=turn_result.response.provider,
-                    model_name=turn_result.response.model_name,
-                    finish_reason=turn_result.response.finish_reason,
-                    output_length=len(turn_result.response.content),
-                    model_duration_ms=turn_result.model_duration_ms,
-                    reasoning=turn_result.response.reasoning,
                 )
-
-                inline_tool_reply: str | None = None
-                no_tool_execution_claim_risk = None
-                if not turn_result.response.tool_calls:
-                    inline_tool_response, inline_tool_reply = (
-                        _agent_loop._recover_inline_native_tool_response(
-                            turn_result.response,
-                            tool_definitions=responder_tool_definitions or (),
-                            max_agent_steps=max_agent_steps,
-                        )
-                    )
-                    if inline_tool_response is not None:
-                        turn_result = replace(
-                            turn_result,
-                            response=inline_tool_response,
-                        )
-                    elif parse_no_tool_execution_claim_risk:
-                        no_tool_execution_claim_risk = (
-                            _runtime_support._parse_no_tool_execution_claim_risk_response(
-                                turn_result.response.content
-                            )
-                        )
-                        if no_tool_execution_claim_risk is not None:
-                            turn_result = replace(
-                                turn_result,
-                                response=replace(
-                                    turn_result.response,
-                                    content=(
-                                        no_tool_execution_claim_risk.assistant_reply
-                                    ),
-                                ),
-                            )
-
-                return (
-                    turn_result,
-                    inline_tool_reply,
-                    no_tool_execution_claim_risk,
-                )
-
-            def _run_responder_turn(
-                *,
-                system_notes: tuple[str, ...],
-                content_callback: LLMContentCallback | None,
-            ) -> tuple[
-                OrchestratorTurnResult,
-                str | None,
-                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
-            ]:
-                turn_result = orchestrator.run_turn(
-                    session_id=session.id,
-                    user_message=user_input,
-                    model_profile_name=selected_model_profile_name,
-                    capability_summary=responder_capability_summary,
-                    system_context_notes=system_notes,
-                    thinking_enabled=thinking_enabled,
-                    content_callback=content_callback,
-                    tools=responder_tool_definitions,
-                )
-                return _finalize_responder_turn(turn_result)
-
-            def _run_responder_recovery_turn(
-                *,
-                prior_context_messages: tuple[LLMMessage, ...],
-                recovery_note: str,
-                content_callback: LLMContentCallback | None,
-            ) -> tuple[
-                OrchestratorTurnResult,
-                str | None,
-                _runtime_support._NoToolExecutionClaimRiskAssessment | None,
-            ]:
-                recovery_messages = list(prior_context_messages)
-                insert_index = len(recovery_messages)
-                for index in range(len(recovery_messages) - 1, -1, -1):
-                    if recovery_messages[index].role is LLMRole.USER:
-                        insert_index = index
-                        break
-                recovery_messages.insert(
-                    insert_index,
-                    LLMMessage(role=LLMRole.SYSTEM, content=recovery_note),
-                )
-                turn_result = orchestrator.call_model(
-                    session_id=session.id,
-                    messages=tuple(recovery_messages),
-                    model_profile_name=selected_model_profile_name,
-                    thinking_enabled=thinking_enabled,
-                    content_callback=content_callback,
-                    tools=responder_tool_definitions,
-                )
-                return _finalize_responder_turn(
-                    turn_result,
-                    parse_no_tool_execution_claim_risk=True,
-                )
-
-            initial_stream_chunks: list[str] | None = None
-            initial_content_callback = _effective_stream_func
-            if responder_tool_definitions is not None and _effective_stream_func is not None:
-                initial_stream_chunks = []
-
-                def _buffer_initial_stream(text: str) -> None:
-                    initial_stream_chunks.append(text)
-
-                initial_content_callback = _buffer_initial_stream
-
-            def _flush_initial_stream_chunks() -> None:
-                if (
-                    initial_stream_chunks is None
-                    or _effective_stream_func is None
-                    or not initial_stream_chunks
-                ):
-                    return
-                for chunk in initial_stream_chunks:
-                    _effective_stream_func(chunk)
-                initial_stream_chunks.clear()
-
-            if assistant_reply is None:
-                planner_seed_response: OrchestratorTurnResult | None = None
-                response, assistant_reply, no_tool_execution_claim_risk_assessment = (
-                    _run_responder_turn(
-                        system_notes=system_context_notes,
-                        content_callback=initial_content_callback,
-                    )
-                )
-                planner_seed_response = response
-
-                if (
-                    assistant_reply is None
-                    and not response.response.tool_calls
-                    and responder_tool_definitions is not None
-                    and not turn_tool_results
-                    and not tool_guard_state.is_cancelled()
-                ):
-                    response, assistant_reply, no_tool_execution_claim_risk_assessment = (
-                        _run_responder_recovery_turn(
-                            prior_context_messages=response.context_messages,
-                            recovery_note=(
-                                _runtime_support._build_model_native_tool_recovery_note(
-                                    user_input=user_input,
-                                    assistant_draft_reply=(
-                                        response.response.content.strip()
-                                        or EMPTY_RESPONSE_REPLY
-                                    ),
-                                    tool_definitions=(
-                                        responder_tool_definitions or ()
-                                    ),
-                                    session_goal_state=pre_turn_goal_state,
-                                    session_progress_ledger=(
-                                        pre_turn_progress_ledger
-                                    ),
-                                )
-                            ),
-                            content_callback=None,
-                        )
-                    )
-                elif assistant_reply is None and not response.response.tool_calls:
-                    _flush_initial_stream_chunks()
-
-                planner_first_response = response
-                if (
-                    no_tool_execution_claim_risk_assessment is not None
-                    and planner_seed_response is not None
-                    and not planner_seed_response.response.tool_calls
-                ):
-                    planner_first_response = planner_seed_response
-
-                # Kernel-first mission entry: evaluate mission planning
-                # when the initial response includes tool calls that
-                # may require durable kernel management.  Two cases:
-                #   1. The response itself has a local_write tool call
-                #      (e.g. write_text_file) — always enters the planner.
-                #   2. The response has a search-family tool call AND
-                #      write tools are available in the palette — enters
-                #      the planner because the search may be the first
-                #      step of a compound research→write mission.
-                # This avoids triggering the planner for unrelated tools
-                # (system_info, run_terminal_command, etc.) which would
-                # create unwanted mission state and overwrite goal state.
-                _SEARCH_FAMILY_TOOL_NAMES = frozenset(
-                    {"search_web", "fast_web_search"}
-                )
-                _response_has_search_family_call = any(
-                    tc.tool_name in _SEARCH_FAMILY_TOOL_NAMES
-                    for tc in (response.response.tool_calls or ())
-                )
-                _palette_has_local_write = (
-                    responder_tool_definitions is not None
-                    and any(
-                        td.permission_level.value == "local_write"
-                        for td in responder_tool_definitions
-                    )
-                )
-                kernel_plan = None
-                planner_existing_mission_state = None
-                planner_compatibility_mission_state = None
-                if relation_type in {
-                    "same_active_mission",
-                    "repair_same_mission",
-                    "status_of_same_mission",
-                }:
-                    if pre_turn_mission_state is not None:
-                        planner_existing_mission_state = pre_turn_mission_state
-                    else:
-                        planner_compatibility_mission_state = compatibility_mission_state
-                if (
-                    assistant_reply is None
-                    and responder_tool_definitions
-                    and max_agent_steps > 0
-                    and (
-                        _agent_kernel._response_has_local_write_tool_call(
-                            response=response,
-                            tool_definitions=responder_tool_definitions,
-                        )
-                        or (
-                            _response_has_search_family_call
-                            and _palette_has_local_write
-                        )
-                        or (
-                            no_tool_execution_claim_risk_assessment is not None
-                            and no_tool_execution_claim_risk_assessment.multi_deliverable_request_risk
-                        )
-                    )
-                ):
-                    kernel_plan = _agent_kernel.plan_mission_turn(
-                        session_manager=session_manager,
-                        session_id=session.id,
-                        user_input=user_input,
-                        orchestrator=orchestrator,
-                        tracer=active_tracer,
-                        model_profile_name=selected_model_profile_name,
-                        thinking_enabled=thinking_enabled,
-                        tool_definitions=tuple(responder_tool_definitions or ()),
-                        first_response=planner_first_response,
-                        relation_decision=relation_decision,
-                        existing_mission_state=planner_existing_mission_state,
-                        compatibility_mission_state=planner_compatibility_mission_state,
-                    )
-
-                if (
-                    assistant_reply is None
-                    and kernel_plan is not None
-                    and kernel_plan.should_use_kernel
-                    and kernel_plan.degraded_reply is not None
-                ):
-                    assistant_reply = kernel_plan.degraded_reply
-                elif (
-                    assistant_reply is None
-                    and kernel_plan is not None
-                    and kernel_plan.should_use_kernel
-                    and kernel_plan.plan_decision is not None
-                ):
-                    mission_result = _agent_kernel.run_agent_kernel_turn(
-                        first_response=(
-                            response if response.response.tool_calls else None
-                        ),
-                        session_manager=session_manager,
-                        tool_definitions=tuple(responder_tool_definitions or ()),
-                        tool_registry=active_tool_registry,
-                        orchestrator=orchestrator,
-                        tracer=active_tracer,
-                        session_id=session.id,
-                        user_input=user_input,
-                        model_profile_name=selected_model_profile_name,
-                        thinking_enabled=thinking_enabled,
-                        capability_summary=responder_capability_summary,
-                        system_context_notes=system_context_notes,
-                        max_steps=max_agent_steps,
-                        tool_guard_state=tool_guard_state,
-                        tool_call_callback=tool_call_callback,
-                        mission_event_callback=mission_event_callback,
-                        content_callback=_effective_stream_func,
-                        relation_decision=relation_decision,
-                        existing_mission_state=planner_existing_mission_state,
-                        compatibility_mission_state=(
-                            planner_compatibility_mission_state
-                            if kernel_plan.plan_decision.mission_action != "start_new"
-                            else None
-                        ),
-                        planned_decision=kernel_plan.plan_decision,
-                    )
-                    turn_tool_results = list(mission_result.tool_results)
-                    assistant_reply = mission_result.assistant_reply
-                    mission_execution_used = True
-                    mission_execution_persisted = mission_result.persisted
-                elif (
-                    assistant_reply is None
-                    and response.response.tool_calls
-                    and responder_tool_definitions
-                    and max_agent_steps > 0
-                ):
-                    assistant_reply = _agent_loop._run_agent_loop(
-                        first_response=response,
-                        orchestrator=orchestrator,
-                        session_id=session.id,
-                        session_manager=session_manager,
-                        tracer=active_tracer,
-                        tool_registry=active_tool_registry,
-                        tool_definitions=responder_tool_definitions,
-                        model_profile_name=selected_model_profile_name,
-                        thinking_enabled=thinking_enabled,
-                        content_callback=_effective_stream_func,
-                        max_steps=max_agent_steps,
-                        tool_guard_state=tool_guard_state,
-                        tool_call_callback=tool_call_callback,
-                        build_post_tool_grounding_note=(
-                            _runtime_support._build_post_tool_grounding_note
-                        ),
-                        collected_tool_results=turn_tool_results,
-                        user_input=user_input,
-                        session_goal_state=pre_turn_goal_state,
-                        session_progress_ledger=pre_turn_progress_ledger,
-                    )
-                elif assistant_reply is None:
-                    assistant_reply = (
-                        response.response.content.strip() or EMPTY_RESPONSE_REPLY
-                    )
 
     except ModelCallFailedError as exc:
         active_tracer.trace_model_failed(
@@ -687,39 +172,9 @@ def run_user_turn(
             "Runtime turn completed without producing an assistant reply."
         )
 
-    if active_assistant_reply_transform is not None:
-        assistant_reply = active_assistant_reply_transform(assistant_reply)
-    if orchestrator is None:
-        orchestrator = Orchestrator(
-            settings=session_manager.settings,
-            session_manager=session_manager,
-            tracer=active_tracer,
-        )
-    assistant_reply, grounded_finalization_used = (
-        _runtime_support._finalize_grounded_reply(
-            orchestrator=orchestrator,
-            session_id=session.id,
-            model_profile_name=selected_model_profile_name,
-            thinking_enabled=thinking_enabled,
-            tracer=active_tracer,
-            user_input=user_input,
-            assistant_draft_reply=assistant_reply,
-            tool_results=turn_tool_results,
-            session_goal_state=pre_turn_goal_state,
-            session_progress_ledger=pre_turn_progress_ledger,
-            available_tool_definitions=tuple(responder_tool_definitions or ()),
-            no_tool_execution_claim_risk_assessment=(
-                no_tool_execution_claim_risk_assessment
-            ),
-            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-        )
-    )
-
-    # Streaming emission: avoid duplicating already-shown live content.
-    # The caller's finish() method handles showing the final text and
-    # detecting refinements vs streamed drafts.
-    if stream_output_func is not None and not live_streamed:
-        # No live streaming happened — emit the final reply.
+    if assistant_reply_transform is not None:
+        assistant_reply = assistant_reply_transform(assistant_reply)
+    if stream_output_func is not None:
         stream_output_func(assistant_reply)
 
     session_manager.add_message(
@@ -727,25 +182,45 @@ def run_user_turn(
         assistant_reply,
         session_id=session.id,
     )
-    if mission_execution_persisted or not mission_execution_used:
-        _runtime_support._persist_session_goal_state_from_runtime_facts(
-            session_manager=session_manager,
-            session_id=session.id,
-            user_input=user_input,
-            tool_results=turn_tool_results,
-            assistant_reply=assistant_reply,
-            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-        )
-        _runtime_support._persist_session_progress_ledger_from_runtime_facts(
-            session_manager=session_manager,
-            session_id=session.id,
-            tool_results=turn_tool_results,
-            assistant_reply=assistant_reply,
-            turn_cancelled_reply=_agent_loop._TURN_CANCELLED_REPLY,
-        )
     active_tracer.trace_assistant_reply_persisted(
         session_id=session.id,
         output_length=len(assistant_reply),
         turn_duration_ms=elapsed_ms(turn_started_at),
     )
     return assistant_reply
+
+
+def _run_explicit_tool_call(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    tracer: Tracer,
+    tool_registry: ToolRegistry,
+    tool_call: ToolCall,
+    tool_guard_state: _agent_loop._RuntimeToolGuardState,
+    tool_call_callback: Callable[[ToolCall], None] | None,
+) -> str:
+    stop_reply = _agent_loop._preflight_runtime_tool_batch(
+        tool_calls=(tool_call,),
+        tool_guard_state=tool_guard_state,
+    )
+    if stop_reply is not None:
+        return stop_reply
+    tool_results = _agent_loop._execute_runtime_tool_calls(
+        session_manager=session_manager,
+        session_id=session_id,
+        tracer=tracer,
+        tool_registry=tool_registry,
+        tool_calls=(tool_call,),
+        tool_guard_state=tool_guard_state,
+        tool_call_callback=tool_call_callback,
+    )
+    if not tool_results:
+        return EMPTY_RESPONSE_REPLY
+    result = tool_results[-1]
+    if result.success:
+        return result.output_text or EMPTY_RESPONSE_REPLY
+    return result.error or result.output_text or RUNTIME_ERROR_REPLY
+
+
+__all__ = ["run_user_turn"]
