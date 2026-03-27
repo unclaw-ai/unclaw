@@ -16,12 +16,15 @@ from unclaw.core.mission_state import (
     mission_completion_ready,
 )
 from unclaw.core.mission_verifier import (
+    MissionRelationDecision,
     MissionPlanDecision,
     MissionVerificationDecision,
     build_mission_initialization_note,
+    build_mission_relation_messages,
     build_mission_plan_messages,
     build_mission_progress_note,
     build_mission_verification_messages,
+    parse_mission_relation_response,
     parse_mission_plan_response,
     parse_mission_verification_response,
 )
@@ -41,6 +44,7 @@ from unclaw.logs.tracer import Tracer
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.registry import ToolRegistry
 
+_RELATION_PARSE_REPAIR_ATTEMPTS = 2
 _PLANNER_PARSE_REPAIR_ATTEMPTS = 2
 _VERIFIER_PARSE_REPAIR_ATTEMPTS = 2
 _MISSION_RETRY_BUDGET_PER_DELIVERABLE = 2
@@ -84,6 +88,54 @@ def should_resume_mission_in_kernel(mission_state: MissionState | None) -> bool:
     return True
 
 
+def classify_turn_mission_relation(
+    *,
+    session_id: str,
+    user_input: str,
+    orchestrator: Orchestrator,
+    tracer: Tracer,
+    model_profile_name: str,
+    thinking_enabled: bool,
+    existing_mission_state: MissionState | None,
+    compatibility_mission_state: MissionState | None,
+) -> MissionRelationDecision | None:
+    """Classify how the new turn relates to prior mission context."""
+
+    relation_messages = build_mission_relation_messages(
+        user_input=user_input,
+        existing_mission_state=existing_mission_state,
+        compatibility_mission_state=compatibility_mission_state,
+    )
+    decision = _call_json_decision_with_repair(
+        orchestrator=orchestrator,
+        tracer=tracer,
+        session_id=session_id,
+        model_profile_name=model_profile_name,
+        thinking_enabled=thinking_enabled,
+        messages=relation_messages,
+        parse_response=parse_mission_relation_response,
+        repair_note=(
+            "Mission relation repair: return valid JSON only using the mission "
+            "relation shape and choose exactly one allowed relation."
+        ),
+        parse_kwargs={},
+        max_attempts=_RELATION_PARSE_REPAIR_ATTEMPTS,
+    )
+    if isinstance(decision, MissionRelationDecision):
+        return decision
+    if should_resume_mission_in_kernel(existing_mission_state):
+        return MissionRelationDecision(
+            relation="same_active_mission",
+            summary="fallback to the active mission relation",
+        )
+    if compatibility_mission_state is not None:
+        return MissionRelationDecision(
+            relation="new_mission",
+            summary="fallback to isolated new mission handling",
+        )
+    return None
+
+
 def plan_mission_turn(
     *,
     session_manager: SessionManager,
@@ -95,6 +147,7 @@ def plan_mission_turn(
     thinking_enabled: bool,
     tool_definitions: Sequence[ToolDefinition],
     first_response: OrchestratorTurnResult | None,
+    relation_decision: MissionRelationDecision | None,
     existing_mission_state: MissionState | None,
     compatibility_mission_state: MissionState | None,
 ) -> AgentKernelPlan:
@@ -109,6 +162,7 @@ def plan_mission_turn(
         thinking_enabled=thinking_enabled,
         tool_definitions=tool_definitions,
         first_response=first_response,
+        relation_decision=relation_decision,
         existing_mission_state=existing_mission_state,
         compatibility_mission_state=compatibility_mission_state,
     )
@@ -155,6 +209,7 @@ def run_agent_kernel_turn(
     mission_event_callback: MissionEventCallback | None,
     content_callback: LLMContentCallback | None,
     first_response: OrchestratorTurnResult | None = None,
+    relation_decision: MissionRelationDecision | None = None,
     existing_mission_state: MissionState | None = None,
     compatibility_mission_state: MissionState | None = None,
     planned_decision: MissionPlanDecision | None = None,
@@ -176,6 +231,7 @@ def run_agent_kernel_turn(
         thinking_enabled=thinking_enabled,
         tool_definitions=tool_definitions,
         first_response=first_response,
+        relation_decision=relation_decision,
         existing_mission_state=active_mission_state,
         compatibility_mission_state=compatibility_mission_state,
     )
@@ -224,6 +280,7 @@ def run_agent_kernel_turn(
         session_manager=session_manager,
         session_id=session_id,
         user_input=user_input,
+        relation_decision=relation_decision,
         existing_mission_state=active_mission_state,
         compatibility_mission_state=compatibility_mission_state,
         plan_decision=plan_decision,
@@ -568,11 +625,13 @@ def _plan_mission(
     thinking_enabled: bool,
     tool_definitions: Sequence[ToolDefinition],
     first_response: OrchestratorTurnResult | None,
+    relation_decision: MissionRelationDecision | None,
     existing_mission_state: MissionState | None,
     compatibility_mission_state: MissionState | None,
 ) -> MissionPlanDecision | None:
     planning_messages = build_mission_plan_messages(
         user_input=user_input,
+        mission_relation=relation_decision,
         existing_mission_state=existing_mission_state,
         compatibility_mission_state=compatibility_mission_state,
         first_response=first_response,
@@ -706,6 +765,7 @@ def _resolve_mission_state(
     session_manager: SessionManager,
     session_id: str,
     user_input: str,
+    relation_decision: MissionRelationDecision | None,
     existing_mission_state: MissionState | None,
     compatibility_mission_state: MissionState | None,
     plan_decision: MissionPlanDecision,
@@ -724,6 +784,11 @@ def _resolve_mission_state(
                 existing_mission_state,
                 goal=plan_decision.mission_goal or existing_mission_state.goal,
                 planner_summary=plan_decision.summary,
+                last_turn_relation=(
+                    relation_decision.relation
+                    if relation_decision is not None
+                    else existing_mission_state.last_turn_relation
+                ),
                 updated_at=updated_at,
             ),
             updated_at=updated_at,
@@ -746,6 +811,9 @@ def _resolve_mission_state(
         ),
         execution_queue=plan_decision.execution_queue,
         planner_summary=plan_decision.summary,
+        last_turn_relation=(
+            relation_decision.relation if relation_decision is not None else None
+        ),
         updated_at=updated_at,
     )
 
@@ -868,6 +936,7 @@ def _apply_verification_decision(
     if current_deliverable is not None:
         retry_count = current_deliverable.retry_count
         repair_count = current_deliverable.repair_count
+        enforced_missing_note: str | None = None
         if retry_requested:
             retry_count += 1
         elif (
@@ -909,6 +978,29 @@ def _apply_verification_decision(
             )
             repair_items = verifier_output_items
 
+        if deliverable_status == "completed":
+            satisfied_evidence_kinds = _collect_satisfied_evidence_kinds(
+                current_deliverable=current_deliverable,
+                verification_decision=verification_decision,
+                latest_tool_results=latest_tool_results,
+                draft_reply=draft_reply,
+            )
+            missing_required_evidence = _missing_required_evidence(
+                current_deliverable=current_deliverable,
+                satisfied_evidence_kinds=satisfied_evidence_kinds,
+            )
+            if missing_required_evidence:
+                deliverable_status = "active"
+                deliverable_execution_state = "repairing"
+                enforced_missing_note = _build_required_evidence_repair_note(
+                    missing_required_evidence=missing_required_evidence,
+                    satisfied_evidence_kinds=satisfied_evidence_kinds,
+                )
+                repair_count += 1
+                repair_history.append(enforced_missing_note)
+                verifier_output_items = (enforced_missing_note,)
+                repair_items = verifier_output_items
+
         if (
             deliverable_status == "completed"
             and current_deliverable.mode in {"reply", "mixed"}
@@ -921,7 +1013,8 @@ def _apply_verification_decision(
             current_deliverable,
             status=deliverable_status,
             missing=(
-                verification_decision.missing
+                enforced_missing_note
+                or verification_decision.missing
                 if deliverable_status != "completed"
                 else None
             ),
@@ -941,7 +1034,8 @@ def _apply_verification_decision(
             updated_at=updated_at,
             execution_state=deliverable_execution_state,
             waiting_for=(
-                verification_decision.notes_for_next_step
+                enforced_missing_note
+                or verification_decision.notes_for_next_step
                 or verification_decision.repair_strategy
                 or (
                     "mission deliverable verified"
@@ -953,7 +1047,8 @@ def _apply_verification_decision(
                 None if deliverable_status == "completed" else current_deliverable.verification
             ),
             verifier_notes=(
-                verification_decision.notes_for_next_step
+                enforced_missing_note
+                or verification_decision.notes_for_next_step
                 or verification_decision.repair_strategy
                 or (verifier_output_items[0] if verifier_output_items else None)
             ),
@@ -1112,11 +1207,19 @@ def _build_safe_verification_fallback(
         timed_out = any(
             _tool_result_timed_out(tool_result) for tool_result in latest_tool_results
         )
+        timed_out_search_result = _find_timed_out_search_result(latest_tool_results)
         if (
             timed_out
             and active_deliverable is not None
+            and timed_out_search_result is None
             and active_deliverable.retry_count < _MISSION_RETRY_BUDGET_PER_DELIVERABLE
         ):
+            retry_note = (
+                "Retry search_web once with a narrower step such as max_results=3."
+                if timed_out_search_result is not None
+                and active_deliverable.retry_count == 0
+                else "Retry the active deliverable with a narrower step."
+            )
             return MissionVerificationDecision(
                 mission_status="active",
                 active_deliverable_id=active_deliverable_id,
@@ -1127,8 +1230,50 @@ def _build_safe_verification_fallback(
                 evidence=(),
                 final_deliverables_missing=mission_state.final_deliverables_missing,
                 next_action="continue",
-                repair_strategy="retry after timeout",
-                notes_for_next_step="Retry the active deliverable with a narrower step.",
+                repair_strategy=retry_note,
+                notes_for_next_step=retry_note,
+                assistant_reply=None,
+            )
+
+        if (
+            timed_out_search_result is not None
+            and active_deliverable is not None
+            and active_deliverable.retry_count == 0
+        ):
+            retry_note = "Retry search_web once with a narrower step such as max_results=3."
+            return MissionVerificationDecision(
+                mission_status="active",
+                active_deliverable_id=active_deliverable_id,
+                current_deliverable_status="active",
+                missing="A retry is still needed after the timeout.",
+                blocker=None,
+                artifact_paths=(),
+                evidence=(),
+                final_deliverables_missing=mission_state.final_deliverables_missing,
+                next_action="continue",
+                repair_strategy=retry_note,
+                notes_for_next_step=retry_note,
+                assistant_reply=None,
+            )
+
+        if (
+            timed_out_search_result is not None
+            and active_deliverable is not None
+            and active_deliverable.repair_count < _MISSION_REPAIR_BUDGET_PER_DELIVERABLE
+        ):
+            repair_note = _build_search_timeout_repair_note(timed_out_search_result)
+            return MissionVerificationDecision(
+                mission_status="active",
+                active_deliverable_id=active_deliverable_id,
+                current_deliverable_status="active",
+                missing="A new bounded repair step is needed after repeated search timeout.",
+                blocker=None,
+                artifact_paths=(),
+                evidence=(),
+                final_deliverables_missing=mission_state.final_deliverables_missing,
+                next_action="continue",
+                repair_strategy=repair_note,
+                notes_for_next_step=repair_note,
                 assistant_reply=None,
             )
 
@@ -1322,6 +1467,131 @@ def _find_collision_conflict_result(
     return None
 
 
+def _find_timed_out_search_result(
+    tool_results: Sequence[ToolResult],
+) -> ToolResult | None:
+    for tool_result in tool_results:
+        if tool_result.tool_name != "search_web":
+            continue
+        if tool_result.success is False and _tool_result_timed_out(tool_result):
+            return tool_result
+    return None
+
+
+def _build_search_timeout_repair_note(tool_result: ToolResult) -> str:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    display_sources = payload.get("display_sources")
+    if isinstance(display_sources, list) and display_sources:
+        first_source = display_sources[0]
+        if isinstance(first_source, dict) and isinstance(first_source.get("url"), str):
+            return (
+                "Use one bounded repair step: fetch_url_text on a returned source or "
+                f"decompose the query into a narrower follow-up search. First source: {first_source['url']}"
+            )
+    query = payload.get("query")
+    if isinstance(query, str) and query.strip():
+        return (
+            "Use one bounded repair step: decompose the query into a narrower "
+            f"follow-up search based on {query!r}, or fetch a grounded source directly."
+        )
+    return (
+        "Use one bounded repair step: decompose the search into a narrower query "
+        "or fetch and read one already grounded source directly."
+    )
+
+
+def _collect_satisfied_evidence_kinds(
+    *,
+    current_deliverable: MissionDeliverableState,
+    verification_decision: MissionVerificationDecision,
+    latest_tool_results: Sequence[ToolResult],
+    draft_reply: str,
+) -> tuple[str, ...]:
+    satisfied: list[str] = []
+
+    def _add(kind: str) -> None:
+        if kind not in satisfied:
+            satisfied.append(kind)
+
+    if current_deliverable.artifact_paths or verification_decision.artifact_paths:
+        _add("artifact_write")
+
+    for tool_result in latest_tool_results:
+        if tool_result.success is not True:
+            continue
+        if tool_result.tool_name == "fast_web_search":
+            _add("fast_grounding")
+        elif tool_result.tool_name == "search_web":
+            if not _runtime_support._search_web_result_is_thin(tool_result):
+                _add("full_web_research")
+        elif tool_result.tool_name == "fetch_url_text":
+            _add("full_web_research")
+        elif tool_result.tool_name == "write_text_file":
+            _add("artifact_write")
+        elif tool_result.tool_name == "read_text_file":
+            _add("artifact_readback")
+        elif tool_result.tool_name == "delete_file":
+            _add("local_delete")
+        elif tool_result.tool_name == "list_directory":
+            _add("directory_listing")
+
+    if verification_decision.assistant_reply or draft_reply.strip():
+        _add("reply_emitted")
+    if draft_reply.strip() and not latest_tool_results:
+        _add("calculation_result")
+
+    return tuple(satisfied)
+
+
+def _missing_required_evidence(
+    *,
+    current_deliverable: MissionDeliverableState,
+    satisfied_evidence_kinds: Sequence[str],
+) -> tuple[str, ...]:
+    satisfied = set(satisfied_evidence_kinds)
+    return tuple(
+        evidence_kind
+        for evidence_kind in current_deliverable.required_evidence
+        if evidence_kind not in satisfied
+    )
+
+
+def _build_required_evidence_repair_note(
+    *,
+    missing_required_evidence: Sequence[str],
+    satisfied_evidence_kinds: Sequence[str],
+) -> str:
+    notes: list[str] = []
+    satisfied = set(satisfied_evidence_kinds)
+    for evidence_kind in missing_required_evidence:
+        if evidence_kind == "full_web_research":
+            if "fast_grounding" in satisfied:
+                notes.append(
+                    "fast_web_search only grounded the topic. Use search_web or grounded source reads for full web research."
+                )
+            else:
+                notes.append(
+                    "Use search_web or grounded source reads to complete the required web research."
+                )
+        elif evidence_kind == "fast_grounding":
+            notes.append("Ground the topic first with fast_web_search before advancing.")
+        elif evidence_kind == "artifact_write":
+            notes.append("Write the requested artifact before advancing.")
+        elif evidence_kind == "artifact_readback":
+            notes.append("Read the written artifact back and verify it before advancing.")
+        elif evidence_kind == "reply_emitted":
+            notes.append("Emit the requested user-facing reply before advancing.")
+        elif evidence_kind == "local_delete":
+            notes.append("Delete the requested local file before advancing.")
+        elif evidence_kind == "directory_listing":
+            notes.append("List the target directory before advancing.")
+        elif evidence_kind == "calculation_result":
+            notes.append("Produce the requested calculation result before advancing.")
+    if not notes:
+        return "Produce the missing required evidence before advancing."
+    return " ".join(notes[:2])
+
+
 def _has_verified_artifact_evidence(
     *,
     mission_state: MissionState,
@@ -1512,6 +1782,13 @@ def _build_precise_verification_step(
 ) -> str:
     if active_deliverable is None:
         return "Verify the next unresolved deliverable from persisted mission facts."
+    if "full_web_research" in active_deliverable.required_evidence:
+        return (
+            "Complete one bounded full web research step with search_web or grounded "
+            "source reads before advancing."
+        )
+    if "fast_grounding" in active_deliverable.required_evidence:
+        return "Ground the topic first with fast_web_search before advancing."
     if active_deliverable.mode == "artifact":
         if not has_artifact_evidence:
             return (

@@ -295,7 +295,9 @@ def _resolve_mission_state(
     updated_at = utc_now_iso()
     planning_messages = build_mission_plan_messages(
         user_input=user_input,
+        mission_relation=None,
         existing_mission_state=existing_mission_state,
+        compatibility_mission_state=None,
         first_response=first_response,
         available_tool_names=tuple(tool_definition.name for tool_definition in tool_definitions),
     )

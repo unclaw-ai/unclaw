@@ -753,15 +753,16 @@ def _project_session_goal_state_from_mission(
 def _mission_projection_should_dominate(mission_state: MissionState | None) -> bool:
     if mission_state is None:
         return False
-    if len(mission_state.deliverables) > 1:
-        return True
+    if mission_state.status != "active":
+        return False
+    if mission_state.executor_state in {"blocked", "completed"}:
+        return False
     return bool(
-        mission_state.retry_history
+        mission_state.active_deliverable_id
+        or len(mission_state.deliverables) > 1
+        or mission_state.retry_history
         or mission_state.repair_history
-        or (
-            mission_state.status != "completed"
-            and mission_state.pending_repairs
-        )
+        or mission_state.pending_repairs
     )
 
 

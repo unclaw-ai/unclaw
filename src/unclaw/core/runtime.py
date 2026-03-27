@@ -118,15 +118,19 @@ def run_user_turn(
     pre_turn_goal_state = session_manager.get_session_goal_state(session.id)
     pre_turn_progress_ledger = session_manager.get_session_progress_ledger(session.id)
     pre_turn_mission_state = session_manager.get_current_mission_state(session.id)
-    resume_kernel_mission = _agent_kernel.should_resume_mission_in_kernel(
-        pre_turn_mission_state
-    )
+    resume_kernel_mission = False
     compatibility_mission_state = None
-    if (pre_turn_mission_state is None or not resume_kernel_mission) and pre_turn_goal_state is not None:
+    if (
+        pre_turn_mission_state is None
+        and pre_turn_goal_state is not None
+        and pre_turn_goal_state.status in {"active", "blocked"}
+    ):
         compatibility_mission_state = build_compatibility_mission_state(
             legacy_goal_state=pre_turn_goal_state,
             legacy_progress_ledger=pre_turn_progress_ledger,
         )
+    relation_decision = None
+    relation_checked = False
     orchestrator: Orchestrator | None = None
     grounded_finalization_used = False
     no_tool_execution_claim_risk_assessment = None
@@ -166,12 +170,70 @@ def run_user_turn(
         )
 
     try:
+        def _ensure_relation_decision():
+            nonlocal orchestrator, relation_checked, relation_decision
+            if relation_checked:
+                return relation_decision
+            relation_checked = True
+            if (
+                pre_turn_mission_state is None
+                and compatibility_mission_state is None
+            ):
+                return None
+            if (
+                pre_turn_mission_state is not None
+                and pre_turn_mission_state.status not in {"active", "blocked"}
+                and compatibility_mission_state is None
+            ):
+                return None
+            if orchestrator is None:
+                orchestrator = Orchestrator(
+                    settings=session_manager.settings,
+                    session_manager=session_manager,
+                    tracer=active_tracer,
+                )
+            relation_decision = _agent_kernel.classify_turn_mission_relation(
+                session_id=session.id,
+                user_input=user_input,
+                orchestrator=orchestrator,
+                tracer=active_tracer,
+                model_profile_name=selected_model_profile_name,
+                thinking_enabled=thinking_enabled,
+                existing_mission_state=pre_turn_mission_state,
+                compatibility_mission_state=compatibility_mission_state,
+            )
+            return relation_decision
+
+        relation_decision = _ensure_relation_decision()
+        relation_type = (
+            relation_decision.relation if relation_decision is not None else None
+        )
+        resume_kernel_mission = (
+            pre_turn_mission_state is not None
+            and _agent_kernel.should_resume_mission_in_kernel(pre_turn_mission_state)
+            and relation_type in {"same_active_mission", "repair_same_mission"}
+        )
+        if (
+            assistant_reply is None
+            and relation_type == "status_of_same_mission"
+            and pre_turn_mission_state is not None
+        ):
+            assistant_reply = (
+                _agent_kernel._build_mission_status_reply(pre_turn_mission_state)
+                or EMPTY_RESPONSE_REPLY
+            )
+
         memory_context_note = _runtime_support._build_session_memory_context_note(
             command_handler=command_handler,
             session_id=session.id,
         )
         task_continuity_note = None
-        if not resume_kernel_mission:
+        if (
+            assistant_reply is None
+            and not resume_kernel_mission
+            and relation_type
+            not in {"new_mission", "standalone_direct_reply"}
+        ):
             task_continuity_note = _runtime_support._build_session_task_continuity_note(
                 session_manager=session_manager,
                 session_id=session.id,
@@ -223,6 +285,7 @@ def run_user_turn(
                 mission_event_callback=mission_event_callback,
                 content_callback=_effective_stream_func,
                 first_response=None,
+                relation_decision=relation_decision,
                 existing_mission_state=pre_turn_mission_state,
                 compatibility_mission_state=None,
             )
@@ -470,6 +533,17 @@ def run_user_turn(
                     )
                 )
                 kernel_plan = None
+                planner_existing_mission_state = None
+                planner_compatibility_mission_state = None
+                if relation_type in {
+                    "same_active_mission",
+                    "repair_same_mission",
+                    "status_of_same_mission",
+                }:
+                    if pre_turn_mission_state is not None:
+                        planner_existing_mission_state = pre_turn_mission_state
+                    else:
+                        planner_compatibility_mission_state = compatibility_mission_state
                 if (
                     assistant_reply is None
                     and responder_tool_definitions
@@ -499,8 +573,9 @@ def run_user_turn(
                         thinking_enabled=thinking_enabled,
                         tool_definitions=tuple(responder_tool_definitions or ()),
                         first_response=planner_first_response,
-                        existing_mission_state=None,
-                        compatibility_mission_state=compatibility_mission_state,
+                        relation_decision=relation_decision,
+                        existing_mission_state=planner_existing_mission_state,
+                        compatibility_mission_state=planner_compatibility_mission_state,
                     )
 
                 if (
@@ -516,14 +591,6 @@ def run_user_turn(
                     and kernel_plan.should_use_kernel
                     and kernel_plan.plan_decision is not None
                 ):
-                    # Compatibility containment: when starting a new
-                    # mission, do not leak blocked/active compatibility
-                    # state into the kernel.
-                    kernel_compat_state = (
-                        None
-                        if kernel_plan.plan_decision.mission_action == "start_new"
-                        else compatibility_mission_state
-                    )
                     mission_result = _agent_kernel.run_agent_kernel_turn(
                         first_response=(
                             response if response.response.tool_calls else None
@@ -544,8 +611,13 @@ def run_user_turn(
                         tool_call_callback=tool_call_callback,
                         mission_event_callback=mission_event_callback,
                         content_callback=_effective_stream_func,
-                        existing_mission_state=None,
-                        compatibility_mission_state=kernel_compat_state,
+                        relation_decision=relation_decision,
+                        existing_mission_state=planner_existing_mission_state,
+                        compatibility_mission_state=(
+                            planner_compatibility_mission_state
+                            if kernel_plan.plan_decision.mission_action != "start_new"
+                            else None
+                        ),
                         planned_decision=kernel_plan.plan_decision,
                     )
                     turn_tool_results = list(mission_result.tool_results)

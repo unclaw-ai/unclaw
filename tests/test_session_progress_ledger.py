@@ -63,6 +63,27 @@ def _tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResp
     )
 
 
+def _non_internal_runtime_calls(
+    captured_messages: list[list[object]],
+) -> list[list[object]]:
+    def _is_internal_runtime_call(messages: list[object]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            (
+                "Grounded reply finalizer for one runtime turn.",
+                "Mission relation classifier for the Unclaw local agent runtime.",
+            )
+        )
+
+    return [
+        messages
+        for messages in captured_messages
+        if not _is_internal_runtime_call(messages)
+    ]
+
+
 def test_session_progress_ledger_persists_bounded_tail_across_session_manager_reloads(
     make_temp_project,
 ) -> None:
@@ -216,7 +237,7 @@ def test_later_turn_injects_compact_active_task_continuity_note_without_extra_mo
 
         system_messages = [
             message.content
-            for message in captured_messages[0]
+            for message in _non_internal_runtime_calls(captured_messages)[-1]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [

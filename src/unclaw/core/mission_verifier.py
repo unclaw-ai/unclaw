@@ -13,6 +13,26 @@ from unclaw.tools.contracts import ToolCall, ToolResult
 
 _MISSION_PLAN_NOTE_PREFIX = "Mission planning:"
 _MISSION_PROGRESS_NOTE_PREFIX = "Mission progress check:"
+_MISSION_RELATION_SYSTEM_PROMPT = "\n".join(
+    (
+        "Mission relation classifier for the Unclaw local agent runtime.",
+        "Classify how the new user turn relates to the compact persisted mission context.",
+        "Hard rules:",
+        "- same_active_mission means the user is continuing the same current mission outcome.",
+        "- repair_same_mission means the user is fixing or retrying the same current mission after a blocker or requested repair.",
+        "- status_of_same_mission means the user is asking where the same mission stands.",
+        "- new_mission means the user is asking for a different mission outcome.",
+        "- standalone_direct_reply means answer the turn directly without inheriting mission execution context.",
+        "- Prefer new_mission over contaminating an unrelated local task with an older blocked mission.",
+        "- `compatibility_mission_state` is weak legacy context only and must not win over a newer real mission.",
+        "Return JSON only with this shape:",
+        (
+            '{"relation":"same_active_mission|repair_same_mission|'
+            'status_of_same_mission|new_mission|standalone_direct_reply",'
+            '"summary":"..."}'
+        ),
+    )
+)
 _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
     (
         "Mission planner for the Unclaw local agent runtime.",
@@ -25,12 +45,17 @@ _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
         "- artifact means completion requires verified artifact evidence.",
         "- reply means completion can be verified from the emitted reply without pretending a file exists.",
         "- mixed means both artifact and reply evidence may matter.",
+        "- Every deliverable must declare required_evidence using only these compact evidence kinds: fast_grounding, full_web_research, artifact_write, artifact_readback, reply_emitted, local_delete, directory_listing, calculation_result.",
+        "- Research deliverables that must be complete or that feed a written research artifact require full_web_research.",
+        "- fast_web_search is grounding only. It can satisfy fast_grounding but never full_web_research.",
         "- Keep the plan compact for local models: at most 4 deliverables.",
+        "- Respect mission_relation when provided: if it is new_mission or standalone_direct_reply, do not reuse old mission execution state.",
         "- Use the actual existing mission when the user is continuing, repairing, resuming, or asking mission status for the same outcome.",
         "- `compatibility_mission_state` is weak legacy context only. Do not continue it unless the user is clearly asking for that same old mission and no newer actual mission exists.",
         "- Start a new mission only when the user is clearly asking for a different outcome.",
         "- If the request can be answered honestly in one reply with no durable execution, choose direct_reply_only.",
         "- direct_reply_only is appropriate when the request can be satisfied by calling tools (search, read) and returning the result in one response, without persisting new artifacts or tracking multi-step progress.",
+        "- direct_reply_only is also appropriate for a one-shot single local file action when the tool work and honest reply can both finish in the same turn.",
         "- start_new is appropriate when the request involves creating or writing files, multi-step processes with dependencies, compound requests with multiple distinct deliverables, or any outcome requiring persistent artifacts.",
         "- Do not collapse a compound mission into one generic deliverable unless the user's request truly has only one deliverable.",
         "- Do not rewrite a deliverable into a tool name.",
@@ -41,7 +66,7 @@ _MISSION_PLANNER_SYSTEM_PROMPT = "\n".join(
             '{"mission_action":"start_new|continue_existing|direct_reply_only",'
             '"mission_goal":"...",'
             '"deliverables":[{"id":"d1","mode":"artifact|reply|mixed","task":"...","deliverable":"...",'
-            '"verification":"...","depends_on":["d0"]}],'
+            '"verification":"...","required_evidence":["reply_emitted"],"depends_on":["d0"]}],'
             '"execution_queue":["d1"],'
             '"active_deliverable_id":"d1",'
             '"summary":"..."}'
@@ -58,7 +83,10 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
         "- If a file action did not happen, do not call that deliverable complete.",
         "- If the active deliverable mode is artifact, do not mark it complete without verified read-back or equivalent concrete artifact evidence.",
         "- If the active deliverable mode is reply, verify the reply itself instead of pretending a file is required.",
+        "- The active deliverable required_evidence is a hard contract. Do not mark it completed unless every required evidence kind is satisfied.",
+        "- fast_web_search can satisfy fast_grounding only. It never satisfies full_web_research by itself.",
         "- If a timeout or failure can still be repaired within budget, keep the mission active and say what is missing.",
+        "- On a search_web timeout with retry budget left, first request a narrower retry such as smaller max_results. After that, request one new concrete repair step instead of dead-ending immediately.",
         "- If retry budget is exhausted or a blocker is unrecoverable from the given facts, mark the mission blocked.",
         "- If an existing file might already satisfy the active deliverable but it is not verified yet, keep the mission active and request a verification read in notes_for_next_step.",
         "- Do not mark the mission completed while any final_deliverables_missing item remains.",
@@ -82,6 +110,14 @@ _MISSION_VERIFIER_SYSTEM_PROMPT = "\n".join(
         ),
     )
 )
+
+
+@dataclass(frozen=True, slots=True)
+class MissionRelationDecision:
+    """Parsed relation between the new turn and prior mission context."""
+
+    relation: str
+    summary: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,9 +150,68 @@ class MissionVerificationDecision:
     repair_strategy: str | None = None
 
 
+def build_mission_relation_messages(
+    *,
+    user_input: str,
+    existing_mission_state: MissionState | None,
+    compatibility_mission_state: MissionState | None,
+) -> tuple[LLMMessage, ...]:
+    """Build classifier messages for turn-to-mission relation."""
+
+    payload = {
+        "user_input": user_input,
+        "existing_mission_state": (
+            _serialize_mission_state(existing_mission_state)
+            if existing_mission_state is not None
+            else None
+        ),
+        "compatibility_mission_state": (
+            _serialize_mission_state(compatibility_mission_state)
+            if compatibility_mission_state is not None
+            else None
+        ),
+    }
+    return (
+        LLMMessage(role=LLMRole.SYSTEM, content=_MISSION_RELATION_SYSTEM_PROMPT),
+        LLMMessage(role=LLMRole.USER, content=_serialize_json_payload(payload)),
+    )
+
+
+def parse_mission_relation_response(
+    response_text: str,
+) -> MissionRelationDecision | None:
+    """Parse one mission-relation classification response."""
+
+    payload = _parse_json_dict(response_text)
+    if payload is None:
+        return None
+
+    relation = _read_choice(
+        payload.get("relation"),
+        allowed_values=frozenset(
+            {
+                "same_active_mission",
+                "repair_same_mission",
+                "status_of_same_mission",
+                "new_mission",
+                "standalone_direct_reply",
+            }
+        ),
+    )
+    if relation is None:
+        return None
+
+    return MissionRelationDecision(
+        relation=relation,
+        summary=_read_optional_text(payload.get("summary"))
+        or "mission relation classified",
+    )
+
+
 def build_mission_plan_messages(
     *,
     user_input: str,
+    mission_relation: MissionRelationDecision | None,
     existing_mission_state: MissionState | None,
     compatibility_mission_state: MissionState | None,
     first_response: Any | None,
@@ -126,6 +221,7 @@ def build_mission_plan_messages(
 
     planner_payload = {
         "user_input": user_input,
+        "mission_relation": mission_relation.relation if mission_relation is not None else None,
         "available_tool_names": tuple(available_tool_names),
         "existing_mission_state": (
             _serialize_mission_state(existing_mission_state)
@@ -190,6 +286,9 @@ def parse_mission_plan_response(
         task = _read_optional_text(item.get("task"))
         deliverable_text = _read_optional_text(item.get("deliverable"))
         verification = _read_optional_text(item.get("verification"))
+        required_evidence = _read_evidence_kind_list(
+            item.get("required_evidence")
+        ) or _infer_required_evidence(deliverable_mode)
         if not task or not deliverable_text or not verification:
             return None
         deliverables.append(
@@ -208,6 +307,7 @@ def parse_mission_plan_response(
                 evidence=(),
                 updated_at=updated_at,
                 mode=deliverable_mode,
+                required_evidence=required_evidence,
                 execution_state="pending",
                 waiting_for=None,
                 advance_condition=verification,
@@ -329,6 +429,7 @@ def build_mission_progress_note(
 
     progress_payload = {
         "mission_goal": mission_state.goal,
+        "last_turn_relation": mission_state.last_turn_relation,
         "mission_status": verification_decision.mission_status,
         "executor_state": mission_state.executor_state,
         "executor_reason": mission_state.executor_reason,
@@ -373,6 +474,7 @@ def build_mission_initialization_note(
             "["
             f"id={json.dumps(deliverable.deliverable_id, ensure_ascii=False)}; "
             f"mode={json.dumps(deliverable.mode, ensure_ascii=False)}; "
+            f"required_evidence={json.dumps(deliverable.required_evidence, ensure_ascii=False)}; "
             f"task={json.dumps(deliverable.task, ensure_ascii=False)}; "
             f"deliverable={json.dumps(deliverable.deliverable, ensure_ascii=False)}; "
             f"status={json.dumps(deliverable.status, ensure_ascii=False)}; "
@@ -385,6 +487,7 @@ def build_mission_initialization_note(
         f"{_MISSION_PLAN_NOTE_PREFIX} "
         f"goal={json.dumps(mission_state.goal, ensure_ascii=False)}; "
         f"status={json.dumps(mission_state.status, ensure_ascii=False)}; "
+        f"last_turn_relation={json.dumps(mission_state.last_turn_relation, ensure_ascii=False)}; "
         f"executor_state={json.dumps(mission_state.executor_state, ensure_ascii=False)}; "
         f"active_deliverable_id={json.dumps(mission_state.active_deliverable_id, ensure_ascii=False)}; "
         f"active_task={json.dumps(mission_state.active_task, ensure_ascii=False)}; "
@@ -412,6 +515,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "pending_repairs": mission_state.pending_repairs,
         "final_deliverables_missing": mission_state.final_deliverables_missing,
         "planner_summary": mission_state.planner_summary,
+        "last_turn_relation": mission_state.last_turn_relation,
         "executor_state": mission_state.executor_state,
         "executor_reason": mission_state.executor_reason,
         "waiting_for": mission_state.waiting_for,
@@ -425,6 +529,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "task": deliverable.task,
                 "deliverable": deliverable.deliverable,
                 "verification": deliverable.verification,
+                "required_evidence": deliverable.required_evidence,
                 "status": deliverable.status,
                 "execution_state": deliverable.execution_state,
                 "missing": deliverable.missing,
@@ -533,3 +638,34 @@ def _read_text_list(value: Any) -> tuple[str, ...]:
         if normalized is not None:
             items.append(normalized)
     return tuple(items)
+
+
+def _read_evidence_kind_list(value: Any) -> tuple[str, ...]:
+    allowed_values = frozenset(
+        {
+            "fast_grounding",
+            "full_web_research",
+            "artifact_write",
+            "artifact_readback",
+            "reply_emitted",
+            "local_delete",
+            "directory_listing",
+            "calculation_result",
+        }
+    )
+    if not isinstance(value, list):
+        return ()
+    items: list[str] = []
+    for item in value[:4]:
+        normalized = _read_choice(item, allowed_values=allowed_values)
+        if normalized is not None and normalized not in items:
+            items.append(normalized)
+    return tuple(items)
+
+
+def _infer_required_evidence(deliverable_mode: str) -> tuple[str, ...]:
+    if deliverable_mode == "artifact":
+        return ("artifact_write", "artifact_readback")
+    if deliverable_mode == "reply":
+        return ("reply_emitted",)
+    return ()

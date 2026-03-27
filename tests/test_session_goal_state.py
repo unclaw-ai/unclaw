@@ -64,15 +64,22 @@ def _tool_call_response(tool_name: str, arguments: dict[str, object]) -> LLMResp
 
 
 def _non_finalizer_calls(captured_messages: list[list[object]]) -> list[list[object]]:
-    def _is_finalizer_call(messages: list[object]) -> bool:
+    def _is_internal_runtime_call(messages: list[object]) -> bool:
         if not messages:
             return False
         first_content = getattr(messages[0], "content", "")
         return isinstance(first_content, str) and first_content.startswith(
-            "Grounded reply finalizer for one runtime turn."
+            (
+                "Grounded reply finalizer for one runtime turn.",
+                "Mission relation classifier for the Unclaw local agent runtime.",
+            )
         )
 
-    return [messages for messages in captured_messages if not _is_finalizer_call(messages)]
+    return [
+        messages
+        for messages in captured_messages
+        if not _is_internal_runtime_call(messages)
+    ]
 
 
 def test_one_shot_system_info_turn_does_not_create_session_goal_state(
@@ -1718,9 +1725,10 @@ def test_blocked_task_compact_continuation_turn_keeps_original_goal_text_and_can
         assert goal_state.last_blocker is None
         assert output_path.read_text(encoding="utf-8") == "session note"
 
+        responder_calls = _non_finalizer_calls(captured_messages)
         second_turn_system_messages = [
             message.content
-            for message in captured_messages[2]
+            for message in responder_calls[-1]
             if getattr(message, "role", None) is LLMRole.SYSTEM
         ]
         continuity_notes = [

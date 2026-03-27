@@ -232,6 +232,7 @@ def build_mission_state_from_plan(
     active_deliverable_id: str | None,
     execution_queue: tuple[str, ...] = (),
     planner_summary: str | None,
+    last_turn_relation: str | None = None,
     updated_at: str,
 ) -> MissionState:
     """Create a persisted mission working-memory snapshot from a model plan."""
@@ -283,6 +284,7 @@ def build_mission_state_from_plan(
             last_blocker=None,
             updated_at=updated_at,
             planner_summary=planner_summary,
+            last_turn_relation=last_turn_relation,
             execution_queue=execution_queue,
             executor_state="ready",
             executor_reason="mission planned",

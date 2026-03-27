@@ -23,6 +23,27 @@ _EXECUTOR_STATE_VALUES = frozenset(
     }
 )
 _DELIVERABLE_MODE_VALUES = frozenset({"artifact", "reply", "mixed"})
+_MISSION_RELATION_VALUES = frozenset(
+    {
+        "same_active_mission",
+        "repair_same_mission",
+        "status_of_same_mission",
+        "new_mission",
+        "standalone_direct_reply",
+    }
+)
+_DELIVERABLE_EVIDENCE_KIND_VALUES = frozenset(
+    {
+        "fast_grounding",
+        "full_web_research",
+        "artifact_write",
+        "artifact_readback",
+        "reply_emitted",
+        "local_delete",
+        "directory_listing",
+        "calculation_result",
+    }
+)
 _DELIVERABLE_EXECUTION_STATE_VALUES = frozenset(
     {
         "pending",
@@ -79,6 +100,7 @@ class MissionDeliverableState:
     evidence: tuple[str, ...]
     updated_at: str
     mode: str = "mixed"
+    required_evidence: tuple[str, ...] = ()
     execution_state: str = "pending"
     waiting_for: str | None = None
     advance_condition: str | None = None
@@ -118,6 +140,7 @@ class MissionState:
     advance_condition: str | None = None
     verifier_outputs: tuple[str, ...] = ()
     final_verified_reply: str | None = None
+    last_turn_relation: str | None = None
 
     def get_deliverable(
         self,
@@ -369,6 +392,11 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
             field_name="final_verified_reply",
             max_chars=_MAX_VERIFIED_REPLY_CHARS,
         ),
+        last_turn_relation=_normalize_optional_choice(
+            mission_state.last_turn_relation,
+            field_name="last_turn_relation",
+            allowed_values=_MISSION_RELATION_VALUES,
+        ),
     )
     if (
         normalized_state.status == "completed"
@@ -475,6 +503,12 @@ def normalize_mission_deliverable(
             field_name="deliverable.mode",
             allowed_values=_DELIVERABLE_MODE_VALUES,
         ),
+        required_evidence=_normalize_choice_items(
+            deliverable.required_evidence,
+            field_name="deliverable.required_evidence",
+            allowed_values=_DELIVERABLE_EVIDENCE_KIND_VALUES,
+            max_items=_MAX_EVIDENCE_ITEMS,
+        ),
         execution_state=_normalize_choice(
             deliverable.execution_state,
             field_name="deliverable.execution_state",
@@ -527,6 +561,7 @@ def serialize_mission_state(mission_state: MissionState) -> str:
                     "evidence": list(deliverable.evidence),
                     "updated_at": deliverable.updated_at,
                     "mode": deliverable.mode,
+                    "required_evidence": list(deliverable.required_evidence),
                     "execution_state": deliverable.execution_state,
                     "waiting_for": deliverable.waiting_for,
                     "advance_condition": deliverable.advance_condition,
@@ -559,6 +594,7 @@ def serialize_mission_state(mission_state: MissionState) -> str:
             "advance_condition": normalized.advance_condition,
             "verifier_outputs": list(normalized.verifier_outputs),
             "final_verified_reply": normalized.final_verified_reply,
+            "last_turn_relation": normalized.last_turn_relation,
         },
         ensure_ascii=True,
         separators=(",", ":"),
@@ -637,6 +673,9 @@ def parse_mission_state(payload_json: str) -> MissionState | None:
                 final_verified_reply=_coerce_optional_str(
                     parsed.get("final_verified_reply")
                 ),
+                last_turn_relation=_coerce_optional_str(
+                    parsed.get("last_turn_relation")
+                ),
             )
         )
     except (TypeError, ValueError):
@@ -664,6 +703,9 @@ def _parse_mission_deliverable(payload: Any) -> MissionDeliverableState | None:
                 evidence=_coerce_str_tuple(payload.get("evidence")),
                 updated_at=_coerce_required_str(payload.get("updated_at")),
                 mode=_coerce_optional_str(payload.get("mode")) or "mixed",
+                required_evidence=_coerce_str_tuple(
+                    payload.get("required_evidence")
+                ),
                 execution_state=(
                     _coerce_optional_str(payload.get("execution_state"))
                     or "pending"
@@ -746,8 +788,23 @@ def _normalize_choice(
     if normalized not in allowed_values:
         raise ValueError(
             f"Field '{field_name}' must be one of {sorted(allowed_values)!r}."
-        )
+    )
     return normalized
+
+
+def _normalize_optional_choice(
+    value: str | None,
+    *,
+    field_name: str,
+    allowed_values: frozenset[str],
+) -> str | None:
+    if value is None:
+        return None
+    return _normalize_choice(
+        value,
+        field_name=field_name,
+        allowed_values=allowed_values,
+    )
 
 
 def _normalize_text(
@@ -788,6 +845,27 @@ def _normalize_text_items(
         if item is not None:
             normalized.append(item)
     return tuple(normalized)
+
+
+def _normalize_choice_items(
+    values: tuple[str, ...] | list[str] | None,
+    *,
+    field_name: str,
+    allowed_values: frozenset[str],
+    max_items: int,
+) -> tuple[str, ...]:
+    if not values:
+        return ()
+    normalized_items: list[str] = []
+    for value in values[:max_items]:
+        normalized = _normalize_choice(
+            value,
+            field_name=field_name,
+            allowed_values=allowed_values,
+        )
+        if normalized not in normalized_items:
+            normalized_items.append(normalized)
+    return tuple(normalized_items)
 
 
 def _normalize_non_negative_int(value: int, *, field_name: str) -> int:

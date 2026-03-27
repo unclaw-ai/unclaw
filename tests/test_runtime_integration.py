@@ -9488,8 +9488,7 @@ def test_agent_loop_defaults_write_collision_to_version_policy(
         )
 
         versioned_files = sorted(target.parent.glob("note_*.txt"))
-        assert "completed" in reply.casefold()
-        assert "write a short local note file" in reply.casefold()
+        assert reply == "I saved the note safely."
         assert target.read_text(encoding="utf-8") == "original"
         assert len(versioned_files) == 1
         assert versioned_files[0].read_text(encoding="utf-8") == "updated"

@@ -120,12 +120,84 @@ class ScriptedFakeOllamaProvider:
         )
 
     @staticmethod
+    def _is_mission_relation_call(messages: Sequence[Any]) -> bool:
+        if not messages:
+            return False
+        first_content = getattr(messages[0], "content", "")
+        return isinstance(first_content, str) and first_content.startswith(
+            "Mission relation classifier for the Unclaw local agent runtime."
+        )
+
+    @staticmethod
     def _is_mission_verifier_call(messages: Sequence[Any]) -> bool:
         if not messages:
             return False
         first_content = getattr(messages[0], "content", "")
         return isinstance(first_content, str) and first_content.startswith(
             "Mission step verifier for the Unclaw local agent runtime."
+        )
+
+    @classmethod
+    def _build_auto_mission_relation_response(
+        cls, profile: Any, messages: Sequence[Any]
+    ) -> LLMResponse:
+        payload: dict[str, Any] = {}
+        if messages:
+            raw_content = getattr(messages[-1], "content", "")
+            if isinstance(raw_content, str):
+                try:
+                    parsed = json.loads(raw_content)
+                except json.JSONDecodeError:
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    payload = parsed
+
+        user_input = payload.get("user_input")
+        existing_mission = payload.get("existing_mission_state")
+        compatibility_mission = payload.get("compatibility_mission_state")
+        relation = "standalone_direct_reply"
+        normalized_input = (
+            " ".join(user_input.split()).strip().casefold()
+            if isinstance(user_input, str)
+            else ""
+        )
+        existing_status = (
+            existing_mission.get("status")
+            if isinstance(existing_mission, dict)
+            else None
+        )
+        compatibility_status = (
+            compatibility_mission.get("status")
+            if isinstance(compatibility_mission, dict)
+            else None
+        )
+
+        if normalized_input.startswith(("ou en est", "where does this", "what is the status")):
+            relation = "status_of_same_mission"
+        elif normalized_input in {"ok", "go", "continue", "retry", "resume", "fix"}:
+            relation = (
+                "repair_same_mission"
+                if existing_status == "blocked" or compatibility_status == "blocked"
+                else "same_active_mission"
+            )
+        elif normalized_input.startswith(("continue", "resume", "retry", "finish", "repair")):
+            relation = (
+                "repair_same_mission"
+                if existing_status == "blocked" or compatibility_status == "blocked"
+                else "same_active_mission"
+            )
+        elif isinstance(existing_mission, dict) or isinstance(compatibility_mission, dict):
+            relation = "new_mission"
+
+        return LLMResponse(
+            provider="ollama",
+            model_name=profile.model_name,
+            content=json.dumps(
+                {"relation": relation, "summary": "auto mission relation"},
+                ensure_ascii=False,
+            ),
+            created_at="2026-03-26T00:00:01Z",
+            finish_reason="stop",
         )
 
     @classmethod
@@ -204,7 +276,8 @@ class ScriptedFakeOllamaProvider:
 
         # Determine mission action: continue_existing for active missions,
         # direct_reply_only for simple single-tool turns (no existing
-        # mission, single search-family tool call), start_new otherwise.
+        # mission, single search-family or single write_text_file call),
+        # start_new otherwise.
         _SEARCH_FAMILY = {"search_web", "fast_web_search"}
         first_response_tool_calls = (
             first_response_summary.get("tool_calls", [])
@@ -216,11 +289,17 @@ class ScriptedFakeOllamaProvider:
             and isinstance(first_response_tool_calls[0], dict)
             and first_response_tool_calls[0].get("tool_name") in _SEARCH_FAMILY
         )
+        _is_single_write_only = (
+            len(first_response_tool_calls) == 1
+            and isinstance(first_response_tool_calls[0], dict)
+            and first_response_tool_calls[0].get("tool_name") == "write_text_file"
+        )
         if isinstance(existing_mission, dict):
             mission_action = "continue_existing"
-        elif _is_single_search_only:
+        elif _is_single_search_only or _is_single_write_only:
             # A single search-family tool call without an active mission
-            # does not need kernel management — let the agent loop handle it.
+            # or a one-shot write without an active mission does not need
+            # kernel management — let the agent loop handle it.
             mission_action = "direct_reply_only"
         else:
             mission_action = "start_new"
@@ -252,6 +331,14 @@ class ScriptedFakeOllamaProvider:
                                 "task": task,
                                 "deliverable": deliverable,
                                 "verification": verification,
+                                "required_evidence": (
+                                    raw_deliverable.get("required_evidence")
+                                    if isinstance(
+                                        raw_deliverable.get("required_evidence"),
+                                        list,
+                                    )
+                                    else []
+                                ),
                             }
                         )
             raw_active_id = existing_mission.get("active_deliverable_id")
@@ -268,6 +355,7 @@ class ScriptedFakeOllamaProvider:
                     "task": "Complete the requested mission",
                     "deliverable": user_input,
                     "verification": "The requested outcome is verified from runtime facts.",
+                    "required_evidence": [],
                 }
             )
             active_deliverable_id = "d1"
@@ -647,6 +735,11 @@ class ScriptedFakeOllamaProvider:
 
         if provider_cls._is_pre_write_grounding_check_call(messages):
             return provider_cls._build_auto_pre_write_grounding_response(
+                profile, messages
+            )
+
+        if provider_cls._is_mission_relation_call(messages):
+            return provider_cls._build_auto_mission_relation_response(
                 profile, messages
             )
 
