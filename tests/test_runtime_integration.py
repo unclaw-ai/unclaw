@@ -179,10 +179,11 @@ def test_kernel_requests_one_more_agent_step_when_a_status_summary_is_not_a_real
     )
     fake_provider = build_scripted_ollama_provider(
         _action_response(
-            {
-                "mission_action": "start_new",
-                "mission_goal": "Answer what OS the user is running.",
-                "reasoning_summary": "Get the OS first.",
+                {
+                    "mission_action": "start_new",
+                    "step_mode": "continue",
+                    "mission_goal": "Answer what OS the user is running.",
+                    "reasoning_summary": "Get the OS first.",
                 "tasks": [
                     {
                         "id": "t1",
@@ -211,10 +212,11 @@ def test_kernel_requests_one_more_agent_step_when_a_status_summary_is_not_a_real
             }
         ),
         _action_response(
-            {
-                "mission_action": "continue_existing",
-                "mission_goal": "Answer what OS the user is running.",
-                "reasoning_summary": "Now answer directly from the proven system_info result.",
+                {
+                    "mission_action": "continue_existing",
+                    "step_mode": "final_reply",
+                    "mission_goal": "Answer what OS the user is running.",
+                    "reasoning_summary": "Now answer directly from the proven system_info result.",
                 "tasks": [
                     {
                         "id": "t1",
@@ -293,10 +295,11 @@ def test_kernel_ignores_progress_narration_until_it_gets_a_real_final_reply(
     )
     fake_provider = build_scripted_ollama_provider(
         _action_response(
-            {
-                "mission_action": "start_new",
-                "mission_goal": "Write and verify a local note file.",
-                "reasoning_summary": "Write the file, read it back, then confirm.",
+                {
+                    "mission_action": "start_new",
+                    "step_mode": "continue",
+                    "mission_goal": "Write and verify a local note file.",
+                    "reasoning_summary": "Write the file, read it back, then confirm.",
                 "tasks": [
                     {
                         "id": "t1",
@@ -341,10 +344,11 @@ def test_kernel_ignores_progress_narration_until_it_gets_a_real_final_reply(
             }
         ),
         _action_response(
-            {
-                "mission_action": "continue_existing",
-                "mission_goal": "Write and verify a local note file.",
-                "reasoning_summary": "The file is already proven, so confirm cleanly now.",
+                {
+                    "mission_action": "continue_existing",
+                    "step_mode": "final_reply",
+                    "mission_goal": "Write and verify a local note file.",
+                    "reasoning_summary": "The file is already proven, so confirm cleanly now.",
                 "tasks": [
                     {
                         "id": "t1",
@@ -622,9 +626,325 @@ def test_status_request_is_rendered_from_persisted_mission_state_only(
             prompt="où en est cette mission ?",
         )
 
-        assert "Mission goal: Write a report and send a joke." in reply
-        assert "Current active task: Write the file" in reply
-        assert "Completed tasks: Research the topic" in reply
-        assert "Next expected action or evidence: artifact_write, artifact_readback" in reply
+        assert "Mission in progress: Write a report and send a joke." in reply
+        assert "Done: Research the topic." in reply
+        assert "Current task: Write the file." in reply
+        assert "Waiting for: artifact_write, artifact_readback." in reply
+    finally:
+        session_manager.close()
+
+
+def test_final_reply_does_not_claim_file_creation_without_observed_artifact_evidence(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = settings.paths.files_dir / "missing-proof.txt"
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "step_mode": "final_reply",
+                "mission_goal": "Write a verified local file.",
+                "reasoning_summary": "Incorrectly tries to finish without evidence.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Write and verify the file",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Confirm the file result",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [],
+                "reply_to_user": "Le fichier est créé et prêt.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": "artifact_write, artifact_readback",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "step_mode": "continue",
+                "mission_goal": "Write a verified local file.",
+                "reasoning_summary": "The file is still unproven.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Write and verify the file",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Confirm the file result",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "artifact_write, artifact_readback",
+            }
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=ToolRegistry(),
+            prompt="écris un fichier local et vérifie-le",
+        )
+        mission_state = session_manager.get_current_mission_state()
+
+        assert reply != "Le fichier est créé et prêt."
+        assert "Mission in progress: Write a verified local file." in reply
+        assert "Waiting for: artifact_write, artifact_readback." in reply
+        assert mission_state is not None
+        assert mission_state.status == "active"
+        assert not output_path.exists()
+        assert all(
+            record.kind != "artifact_write" for record in mission_state.evidence_log
+        )
+    finally:
+        session_manager.close()
+
+
+def test_user_correction_resumes_the_same_mission_and_completes_missing_file_work(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = settings.paths.files_dir / "repair-note.txt"
+    observed_tool_calls: list[str] = []
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "step_mode": "final_reply",
+                "mission_goal": "Write a verified local repair note.",
+                "reasoning_summary": "Incorrectly claims success before writing anything.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Confirm the repair note",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [],
+                "reply_to_user": "Le fichier est prêt.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": "artifact_write, artifact_readback",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "step_mode": "continue",
+                "mission_goal": "Write a verified local repair note.",
+                "reasoning_summary": "The repair note still needs real artifact evidence.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Confirm the repair note",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "artifact_write, artifact_readback",
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "step_mode": "final_reply",
+                "mission_goal": "Write a verified local repair note.",
+                "reasoning_summary": "Resume the same mission, do the missing work, then answer.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 1,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Confirm the repair note",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "write_text_file",
+                        "arguments": {
+                            "path": str(output_path),
+                            "content": "repair note complete",
+                        },
+                    },
+                    {
+                        "task_id": "t1",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "C'est corrigé: le fichier est maintenant écrit et vérifié.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        first_reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt="écris une note locale et vérifie-la",
+        )
+        first_state = session_manager.get_current_mission_state()
+        assert first_state is not None
+        mission_id = first_state.mission_id
+        assert first_state.status == "active"
+        assert first_reply != "Le fichier est prêt."
+
+        second_reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt="you did not create the file",
+        )
+        second_state = session_manager.get_current_mission_state()
+
+        assert second_reply == "C'est corrigé: le fichier est maintenant écrit et vérifié."
+        assert observed_tool_calls == ["write_text_file", "read_text_file"]
+        assert second_state is not None
+        assert second_state.mission_id == mission_id
+        assert second_state.status == "completed"
+        assert output_path.read_text(encoding="utf-8") == "repair note complete"
     finally:
         session_manager.close()

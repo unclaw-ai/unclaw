@@ -79,6 +79,8 @@ class _TerminalAssistantStream:
         self.chunks.append(chunk)
 
     def render_status(self, line: str) -> None:
+        if not _should_render_cli_status_line(line):
+            return
         if self.started and not self._suppressed:
             if not self.chunks or not self.chunks[-1].endswith("\n"):
                 sys.stdout.write("\n")
@@ -321,7 +323,6 @@ def run_cli(
                     ),
                 )
             ),
-            mission_event_callback=assistant_stream.render_status,
         )
         assistant_stream.finish(assistant_reply)
         _refresh_session_summary(
@@ -448,6 +449,21 @@ def _render_tool_result(result: ToolResult) -> None:
 
 def _render_assistant_reply(reply_text: str) -> None:
     print(f"Unclaw> {reply_text}")
+
+
+def _should_render_cli_status_line(line: str) -> bool:
+    compact = " ".join(line.split()).strip()
+    if not compact:
+        return False
+    if compact.startswith("[mission] single-agent loop"):
+        return False
+    if compact.startswith("[mission] active task:"):
+        return False
+    if compact.startswith("[mission] mission completed"):
+        return False
+    if compact.startswith("[mission] mission evidence complete; awaiting final reply"):
+        return False
+    return True
 
 
 def _build_tool_call_visibility_line(

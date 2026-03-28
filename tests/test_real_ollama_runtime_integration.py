@@ -172,6 +172,8 @@ def test_real_ollama_run_user_turn_streaming_native_tool_path_when_model_calls_t
         assert len(tool_finished_events) == 1
         assert getattr(tool_finished_events[0], "payload", {}).get("success") is True
         assert "real-tool-ok" in reply
+        assert "Mission goal:" not in reply
+        assert "Current active task:" not in reply
         assert streamed_chunks
         assert "".join(streamed_chunks) == reply
 

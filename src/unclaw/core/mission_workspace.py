@@ -282,6 +282,7 @@ def synchronize_mission_working_memory(
         mission_state,
         updated_at=updated_at,
         reasoning_summary=planner_summary or mission_state.reasoning_summary,
+        latest_truthful_status=planner_summary or mission_state.latest_truthful_status,
         blocker=blocker,
         next_expected_evidence=(
             waiting_for

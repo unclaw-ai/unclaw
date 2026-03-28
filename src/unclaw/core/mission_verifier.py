@@ -22,7 +22,7 @@ _MISSION_AGENT_SYSTEM_PROMPT = "\n".join(
         "Every user turn is a mission.",
         "A simple chat answer is a one-step mission.",
         "A complex request is a multi-step mission.",
-        "Return JSON only using the mission action schema below.",
+        "Return JSON only using the mission step schema below.",
         "Do not add markdown, prose, or explanations outside the JSON object.",
         "You are the only controller: there is no router, no planner, and no verifier after you.",
         "Hard rules:",
@@ -30,19 +30,26 @@ _MISSION_AGENT_SYSTEM_PROMPT = "\n".join(
         "- Use mission_action='start_new' only when the user is clearly asking for a different outcome than the current mission.",
         "- Use mission_action='continue_existing' for status, continue, finish, repair, and follow-up turns about the same mission.",
         "- Keep tasks compact and concrete. Use at most 6 tasks.",
+        "- If the user asked to create, read, update, delete, or list a local artifact, include an explicit file_* or directory_list task in task_board.",
         "- Never erase already-completed tasks from the provided mission state. Add a repair task instead if you need new work after a proven completion.",
-        "- Do not claim mission completion unless every task has the required evidence.",
+        "- If a previous turn said the mission was done but the user says work is missing, continue_existing and add repair work to the same mission.",
+        "- Use the persisted mission state as your external working memory: current_goal, task_board, unresolved_gaps, evidence_log, artifact_observations, and latest_truthful_status.",
+        "- Do not claim mission completion unless every task has the required evidence and unresolved_gaps is empty.",
+        "- Artifact claims must come only from observed evidence already present in evidence_log, artifact_observations, or recent_tool_results.",
         "- reply_to_user is the exact user-facing message for this step. Never narrate internal progress like 'I am now reading the file'.",
-        "- When the mission can already finish in this action, reply_to_user must contain the final answer now.",
+        "- step_mode='final_reply' means reply_to_user is the real final user-facing answer now.",
+        "- step_mode='continue' means more work is still needed after this step.",
+        "- step_mode='blocked' means the mission is honestly blocked now.",
         "- For a simple fact question, answer the fact directly instead of returning a mission-status summary.",
         "- If the listed tool_calls in this action will finish the mission, still write the final user answer now instead of a placeholder or progress note.",
-        "- Never use the runtime status renderer format inside reply_to_user. Do not start it with labels like Mission goal:, Current active task:, Completed tasks:, Blocked task:, or Next expected action or evidence:.",
+        "- Never use raw internal scaffolding inside reply_to_user.",
         "- fast_web_search is grounding only. It can satisfy fast_grounding but never full_web_research.",
         "- search_web is the full research path.",
         "- write_text_file alone never completes a file_write task. A successful read_text_file read-back is also required.",
         "- For local machine facts like OS, time, hostname, or locale, use system_info instead of guessing.",
         "- For status requests, base the answer only on the persisted mission state in the payload.",
         "- reply_to_user may be empty while tool work is still needed.",
+        "- user_visible_progress should be a short truthful status line suitable for a compact UI.",
         "- completion_claim=true means the full mission is done now.",
         "- blocker must be empty unless the mission is honestly blocked.",
         "Task kind guidance:",
@@ -60,12 +67,16 @@ _MISSION_AGENT_SYSTEM_PROMPT = "\n".join(
         "Return JSON only with this shape:",
         (
             '{"mission_action":"start_new|continue_existing",'
+            '"step_mode":"continue|final_reply|blocked",'
             '"mission_goal":"...",'
+            '"current_goal":"...",'
             '"reasoning_summary":"...",'
-            '"tasks":[{"id":"t1","title":"...","kind":"reply","status":"pending|active|repairing|completed|blocked",'
-            '"depends_on":[],"required_evidence":["reply_emitted"],"artifact_paths":[],"latest_error":null,"repair_count":0}],'
+            '"task_board":[{"id":"t1","label":"...","kind":"reply","status":"pending|active|repairing|completed|blocked",'
+            '"depends_on":[],"required_evidence":["reply_emitted"],"artifact_paths":[],"evidence_refs":[],"latest_error":null,"repair_count":0}],'
             '"active_task_id":"t1",'
+            '"unresolved_gaps":["..."],'
             '"tool_calls":[{"task_id":"t1","tool_name":"search_web","arguments":{"query":"..."}}],'
+            '"user_visible_progress":"...",'
             '"reply_to_user":"...",'
             '"completion_claim":false,'
             '"blocker":null,'
@@ -92,11 +103,15 @@ class MissionAgentAction:
     """One structured action emitted by the single-agent model loop."""
 
     mission_action: str
+    step_mode: str
     mission_goal: str
+    current_goal: str
     reasoning_summary: str
     tasks: tuple[MissionTaskState, ...]
     active_task_id: str | None
+    unresolved_gaps: tuple[str, ...]
     tool_calls: tuple[MissionToolRequest, ...]
+    user_visible_progress: str | None
     reply_to_user: str | None
     completion_claim: bool
     blocker: str | None
@@ -191,7 +206,9 @@ def parse_agent_action_response(
             return None
         return MissionAgentAction(
             mission_action="start_new",
+            step_mode="final_reply",
             mission_goal=fallback_user_input,
+            current_goal=fallback_user_input,
             reasoning_summary="plain-text fallback action",
             tasks=(
                 MissionTaskState(
@@ -203,7 +220,9 @@ def parse_agent_action_response(
                 ),
             ),
             active_task_id="t1",
+            unresolved_gaps=(),
             tool_calls=(),
+            user_visible_progress=None,
             reply_to_user=stripped,
             completion_claim=True,
             blocker=None,
@@ -214,13 +233,31 @@ def parse_agent_action_response(
         payload.get("mission_action"),
         allowed_values=frozenset({"start_new", "continue_existing"}),
     ) or "continue_existing"
+    step_mode = _read_choice(
+        payload.get("step_mode"),
+        allowed_values=frozenset({"continue", "final_reply", "blocked"}),
+    )
     mission_goal = _read_optional_text(payload.get("mission_goal")) or fallback_user_input
+    current_goal = (
+        _read_optional_text(payload.get("current_goal"))
+        or mission_goal
+        or fallback_user_input
+    )
     reasoning_summary = (
         _read_optional_text(payload.get("reasoning_summary"))
         or "single-agent mission action"
     )
+    if step_mode is None:
+        if _read_optional_text(payload.get("blocker")) is not None:
+            step_mode = "blocked"
+        elif payload.get("completion_claim") is True:
+            step_mode = "final_reply"
+        else:
+            step_mode = "continue"
 
-    raw_tasks = payload.get("tasks")
+    raw_tasks = payload.get("task_board")
+    if raw_tasks is None:
+        raw_tasks = payload.get("tasks")
     if not isinstance(raw_tasks, list):
         return None
     tasks: list[MissionTaskState] = []
@@ -228,7 +265,11 @@ def parse_agent_action_response(
         if not isinstance(raw_task, dict):
             return None
         task_id = _read_optional_text(raw_task.get("id")) or f"t{index}"
-        title = _read_optional_text(raw_task.get("title")) or task_id
+        title = (
+            _read_optional_text(raw_task.get("label"))
+            or _read_optional_text(raw_task.get("title"))
+            or task_id
+        )
         kind = _read_choice(
             raw_task.get("kind"),
             allowed_values=frozenset(
@@ -263,6 +304,7 @@ def parse_agent_action_response(
                 depends_on=_read_text_list(raw_task.get("depends_on")),
                 required_evidence=required_evidence,
                 artifact_paths=_read_text_list(raw_task.get("artifact_paths")),
+                evidence_refs=_read_text_list(raw_task.get("evidence_refs")),
                 latest_error=_read_optional_text(raw_task.get("latest_error")),
                 repair_count=_read_non_negative_int(raw_task.get("repair_count")),
             )
@@ -294,11 +336,15 @@ def parse_agent_action_response(
 
     return MissionAgentAction(
         mission_action=mission_action,
+        step_mode=step_mode,
         mission_goal=mission_goal,
+        current_goal=current_goal,
         reasoning_summary=reasoning_summary,
         tasks=tuple(tasks),
         active_task_id=active_task_id,
+        unresolved_gaps=_read_text_list(payload.get("unresolved_gaps")),
         tool_calls=tuple(tool_calls),
+        user_visible_progress=_read_optional_text(payload.get("user_visible_progress")),
         reply_to_user=_read_optional_text(payload.get("reply_to_user")),
         completion_claim=payload.get("completion_claim") is True,
         blocker=_read_optional_text(payload.get("blocker")),
@@ -502,34 +548,24 @@ def render_mission_status(mission_state: MissionState | None) -> str:
     """Render persisted mission status without hallucinating missing facts."""
 
     if mission_state is None:
-        return "Mission goal: none\nCurrent active task: none\nCompleted tasks: none\nBlocked task: none\nNext expected action or evidence: none"
+        return "No active mission state is available."
+
+    if mission_state.latest_truthful_status:
+        return mission_state.latest_truthful_status
 
     active_task = mission_state.get_task()
-    blocked_task = next(
-        (task for task in mission_state.tasks if task.status == "blocked"),
-        None,
-    )
     completed_tasks = [task.title for task in mission_state.tasks if task.status == "completed"]
-    return "\n".join(
-        (
-            f"Mission goal: {mission_state.mission_goal}",
-            f"Current active task: {active_task.title if active_task is not None else 'none'}",
-            (
-                "Completed tasks: "
-                + (", ".join(completed_tasks) if completed_tasks else "none")
-            ),
-            (
-                "Blocked task: "
-                + (
-                    f"{blocked_task.title} ({blocked_task.latest_error or 'blocked'})"
-                    if blocked_task is not None
-                    else "none"
-                )
-            ),
-            "Next expected action or evidence: "
-            + (mission_state.next_expected_evidence or "none"),
-        )
-    )
+    parts = [f"Mission status: {mission_state.status}."]
+    parts.append(f"Goal: {mission_state.mission_goal}.")
+    if completed_tasks:
+        parts.append("Done: " + ", ".join(completed_tasks) + ".")
+    if active_task is not None:
+        parts.append(f"Current task: {active_task.title}.")
+    if mission_state.next_expected_evidence:
+        parts.append(f"Waiting for: {mission_state.next_expected_evidence}.")
+    if mission_state.unresolved_gaps:
+        parts.append(f"Unresolved: {mission_state.unresolved_gaps[0]}.")
+    return " ".join(parts)
 
 
 def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, Any] | None:
@@ -540,11 +576,14 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "mission_goal": mission_state.mission_goal,
         "status": mission_state.status,
         "reasoning_summary": mission_state.reasoning_summary,
+        "user_visible_progress": mission_state.user_visible_progress,
         "active_task_id": mission_state.active_task_id,
         "reply_to_user": mission_state.reply_to_user,
         "completion_claim": mission_state.completion_claim,
         "blocker": mission_state.blocker,
         "next_expected_evidence": mission_state.next_expected_evidence,
+        "unresolved_gaps": mission_state.unresolved_gaps,
+        "latest_truthful_status": mission_state.latest_truthful_status,
         "final_reply": mission_state.final_reply,
         "executor_state": mission_state.executor_state,
         "last_verified_artifact_paths": mission_state.last_verified_artifact_paths,
@@ -552,7 +591,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "tasks": [
             {
                 "id": task.id,
-                "title": task.title,
+                "label": task.title,
                 "kind": task.kind,
                 "status": task.status,
                 "depends_on": list(task.depends_on),
@@ -560,6 +599,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "satisfied_evidence": list(task.satisfied_evidence),
                 "artifact_paths": list(task.artifact_paths),
                 "evidence": list(task.evidence),
+                "evidence_refs": list(task.evidence_refs),
                 "latest_error": task.latest_error,
                 "repair_count": task.repair_count,
             }
@@ -567,6 +607,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         ],
         "evidence_log": [
             {
+                "id": record.id,
                 "kind": record.kind,
                 "task_id": record.task_id,
                 "summary": record.summary,
@@ -575,6 +616,17 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "success": record.success,
             }
             for record in mission_state.evidence_log
+        ],
+        "artifact_observations": [
+            {
+                "path": record.path,
+                "status": record.status,
+                "task_id": record.task_id,
+                "summary": record.summary,
+                "tool_name": record.tool_name,
+                "evidence_ref": record.evidence_ref,
+            }
+            for record in mission_state.artifact_observations
         ],
         "tool_history": [
             {

@@ -774,6 +774,9 @@ def _mission_projection_should_dominate(mission_state: MissionState | None) -> b
         or mission_state.retry_history
         or mission_state.repair_history
         or mission_state.pending_repairs
+        or mission_state.user_visible_progress
+        or mission_state.unresolved_gaps
+        or mission_state.artifact_observations
     )
 
 
@@ -852,7 +855,12 @@ def _project_session_progress_ledger_from_mission(
             SessionProgressEntry(
                 status="active",
                 step=projected_step,
-                detail="mission step in progress",
+                detail=_normalize_bounded_text(
+                    mission_state.user_visible_progress or "mission step in progress",
+                    field_name="detail",
+                    max_chars=_SESSION_PROGRESS_DETAIL_MAX_CHARS,
+                    required=True,
+                ),
                 updated_at=mission_state.updated_at,
             )
         )

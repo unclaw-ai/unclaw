@@ -6,7 +6,11 @@ import pytest
 import builtins
 
 from unclaw.channels import cli as cli_channel
-from unclaw.channels.cli import _TerminalAssistantStream, run_cli
+from unclaw.channels.cli import (
+    _TerminalAssistantStream,
+    _should_render_cli_status_line,
+    run_cli,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -31,6 +35,22 @@ def test_terminal_assistant_stream_suppressed_shows_only_final_answer(capsys) ->
     assert capsys.readouterr().out == "Unclaw> final answer\n"
 
 
+def test_terminal_assistant_stream_hides_generic_mission_scaffolding(capsys) -> None:
+    stream = _TerminalAssistantStream()
+
+    stream.render_status("[mission] single-agent loop active")
+    stream.render_status("[mission] active task: reply")
+    stream.render_status("[tool] search_web {\"query\": \"Inoxtag\"}")
+
+    assert capsys.readouterr().out == "[tool] search_web {\"query\": \"Inoxtag\"}\n"
+
+
+def test_cli_status_filter_keeps_compact_useful_lines() -> None:
+    assert _should_render_cli_status_line("[mission] single-agent loop active") is False
+    assert _should_render_cli_status_line("[mission] mission completed") is False
+    assert _should_render_cli_status_line("[tool] search_web {}") is True
+
+
 def test_run_cli_prints_the_runtime_reply_and_exits_cleanly(
     monkeypatch,
     capsys,
@@ -52,6 +72,7 @@ def test_run_cli_prints_the_runtime_reply_and_exits_cleanly(
     fake_tool_executor = SimpleNamespace(
         registry=SimpleNamespace(get_owner_skill_id=lambda tool_name: None)
     )
+    captured_kwargs: dict[str, object] = {}
 
     inputs = iter(["où en est cette mission ?", KeyboardInterrupt])
 
@@ -66,7 +87,10 @@ def test_run_cli_prints_the_runtime_reply_and_exits_cleanly(
     monkeypatch.setattr(
         cli_channel,
         "run_user_turn",
-        lambda **kwargs: "Mission goal: demo\nCurrent active task: none\nCompleted tasks: none\nBlocked task: none\nNext expected action or evidence: none",
+        lambda **kwargs: (
+            captured_kwargs.update(kwargs)
+            or "Mission in progress: demo. Current task: write the file."
+        ),
     )
 
     exit_code = run_cli(
@@ -79,5 +103,7 @@ def test_run_cli_prints_the_runtime_reply_and_exits_cleanly(
 
     out = capsys.readouterr().out
     assert exit_code == 0
-    assert "Mission goal: demo" in out
+    assert captured_kwargs.get("mission_event_callback") is None
+    assert "Mission in progress: demo." in out
+    assert "[mission]" not in out
     assert "Exiting Unclaw." in out

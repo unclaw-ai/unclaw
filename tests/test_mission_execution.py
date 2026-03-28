@@ -270,6 +270,193 @@ def test_compound_research_write_and_joke_finishes_from_one_single_agent_action(
         session_manager.close()
 
 
+def test_compound_mission_status_follow_up_reports_the_real_completed_state(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = settings.paths.files_dir / "inoxtag-status.txt"
+    observed_tool_calls: list[str] = []
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Inoxtag research complete",
+                payload={
+                    "query": call.arguments["query"],
+                    "summary_points": [
+                        "Inoxtag is a French content creator.",
+                        "He is known for ambitious challenge videos.",
+                    ],
+                    "display_sources": [
+                        {"title": "Example", "url": "https://example.com/inoxtag"}
+                    ],
+                },
+            )
+        ),
+    )
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "step_mode": "final_reply",
+                "mission_goal": "Research Inoxtag, write a verified note, and tell a joke.",
+                "reasoning_summary": "Research, write, verify, then answer with the joke.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research Inoxtag",
+                        "kind": "web_research",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Tell the joke",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "Inoxtag biography"},
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {
+                            "path": str(output_path),
+                            "content": "Inoxtag is a French content creator known for ambitious challenge videos.",
+                        },
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "Le fichier est prêt et vérifié. Et la blague: les bananes adorent les missions parce qu'elles avancent en régime groupé.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "step_mode": "final_reply",
+                "mission_goal": "Research Inoxtag, write a verified note, and tell a joke.",
+                "reasoning_summary": "Answer the status follow-up from the persisted completed mission.",
+                "tasks": [],
+                "active_task_id": None,
+                "tool_calls": [],
+                "reply_to_user": (
+                    f"La mission est terminée. La recherche est faite, le fichier vérifié est {output_path}, "
+                    "et la blague sur les bananes a déjà été livrée."
+                ),
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        ),
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        first_reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt=(
+                "Qui est Inoxtag ? fais une recherche complète sur lui, écrit le résultat "
+                "dans un fichier texte et fais moi une blague sur les bananes"
+            ),
+        )
+        first_state = session_manager.get_current_mission_state()
+        assert first_state is not None
+        mission_id = first_state.mission_id
+
+        second_reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt="où en est cette mission ?",
+        )
+        second_state = session_manager.get_current_mission_state()
+
+        assert "bananes" in first_reply
+        assert observed_tool_calls == [
+            "search_web",
+            "write_text_file",
+            "read_text_file",
+        ]
+        assert second_state is not None
+        assert second_state.mission_id == mission_id
+        assert second_state.status == "completed"
+        assert str(output_path) in second_reply
+        assert "mission est terminée" in second_reply.lower()
+    finally:
+        session_manager.close()
+
+
 def test_marine_leleu_uses_grounding_without_confusing_her_with_marine_le_pen(
     monkeypatch,
     make_temp_project,
@@ -921,7 +1108,9 @@ def test_no_dependent_task_runs_before_prerequisite_proof_exists(
         mission_state = session_manager.get_current_mission_state()
 
         assert observed_tool_calls == ["search_web"]
-        assert "Next expected action or evidence" in reply
+        assert "Mission in progress: Research first, then write a file." in reply
+        assert "Current task: Write and verify the file." in reply
+        assert "Waiting for: artifact_write, artifact_readback." in reply
         assert mission_state is not None
         assert mission_state.status == "active"
         assert mission_state.get_task("t1").status == "completed"

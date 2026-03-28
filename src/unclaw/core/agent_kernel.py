@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 import unclaw.core.agent_loop as _agent_loop
 from unclaw.core.mission_events import MissionEventCallback, emit_mission_event
 from unclaw.core.mission_state import (
+    MissionArtifactObservation,
     MissionDeliverableState,
     MissionEvidenceRecord,
     MissionState,
@@ -40,21 +41,6 @@ _MISSION_BLOCKED_REPLY = (
 _MISSION_INCOMPLETE_REPLY = (
     "The mission is still active and needs another proven step before it can finish."
 )
-_STATUS_REPLY_PREFIXES = (
-    "mission goal:",
-    "current active task:",
-    "completed tasks:",
-    "blocked task:",
-    "next expected action or evidence:",
-)
-_PROGRESS_REPLY_PREFIXES = (
-    "i am now ",
-    "i will now ",
-    "i'm now ",
-    "je vais ",
-    "je vais maintenant ",
-    "je suis en train de ",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +68,7 @@ def should_resume_mission_in_kernel(mission_state: MissionState | None) -> bool:
     if mission_state is None:
         return False
     normalized = normalize_mission_state(mission_state)
-    return normalized.status == "active"
+    return bool(normalized.tasks)
 
 
 def classify_turn_mission_relation(  # noqa: D401 - compatibility shim
@@ -193,7 +179,11 @@ def run_agent_kernel_turn(
     recent_tool_results: tuple[ToolResult, ...] = ()
     final_reply: str | None = None
 
-    emit_mission_event(mission_event_callback, scope="mission", detail="single-agent loop")
+    emit_mission_event(
+        mission_event_callback,
+        scope="mission",
+        detail="single-agent loop active",
+    )
 
     for step_index in range(max(max_steps, 1)):
         if tool_guard_state.is_cancelled():
@@ -232,7 +222,10 @@ def run_agent_kernel_turn(
         emit_mission_event(
             mission_event_callback,
             scope="mission",
-            detail=f"active task: {mission_state.active_task or 'none'}",
+            detail=(
+                action.user_visible_progress
+                or f"active task: {mission_state.active_task or 'none'}"
+            ),
         )
 
         recent_tool_results = ()
@@ -250,7 +243,11 @@ def run_agent_kernel_turn(
             )
             all_tool_results.extend(recent_tool_results)
 
-        reply_is_final = _reply_is_final_user_message(action.reply_to_user)
+        reply_is_final = (
+            action.step_mode == "final_reply"
+            and isinstance(action.reply_to_user, str)
+            and bool(action.reply_to_user.strip())
+        )
 
         if action.reply_to_user and reply_is_final:
             mission_state = _apply_reply_evidence(
@@ -284,9 +281,11 @@ def run_agent_kernel_turn(
                     status="completed",
                     completion_claim=True,
                     final_reply=(
-                        final_reply_candidate or render_mission_status(mission_state)
+                        final_reply_candidate
+                        or _build_completion_fallback_reply(mission_state)
                     ),
                     reply_to_user=final_reply_candidate or mission_state.reply_to_user,
+                    user_visible_progress=None,
                 )
             )
             session_manager.persist_mission_state(mission_state, session_id=session_id)
@@ -362,7 +361,7 @@ def _call_agent_action_with_repair(
         )
     )
     repair_note = (
-        "Return valid JSON only using the single mission action schema. "
+        "Return valid JSON only using the single mission step schema. "
         "Do not add prose outside the JSON object."
     )
     for attempt in range(_ACTION_PARSE_REPAIR_ATTEMPTS):
@@ -402,11 +401,7 @@ def _apply_action_metadata(
     existing_mission_state: MissionState | None,
     action: MissionAgentAction,
 ) -> MissionState:
-    if (
-        existing_mission_state is None
-        or existing_mission_state.status == "completed"
-        or action.mission_action == "start_new"
-    ):
+    if existing_mission_state is None or action.mission_action == "start_new":
         tasks = action.tasks or (
             MissionTaskState(
                 id="t1",
@@ -427,10 +422,14 @@ def _apply_action_metadata(
         return normalize_mission_state(
             replace(
                 state,
+                mission_goal=action.current_goal or action.mission_goal or state.mission_goal,
                 reply_to_user=action.reply_to_user,
                 completion_claim=action.completion_claim,
                 blocker=action.blocker,
                 next_expected_evidence=action.next_expected_evidence,
+                unresolved_gaps=action.unresolved_gaps,
+                user_visible_progress=action.user_visible_progress,
+                latest_truthful_status=action.user_visible_progress,
                 last_user_input=user_input,
                 loop_count=1,
             )
@@ -452,6 +451,7 @@ def _apply_action_metadata(
                     action_task.artifact_paths or existing_task.artifact_paths
                 ),
                 evidence=existing_task.evidence,
+                evidence_refs=existing_task.evidence_refs,
                 latest_error=action_task.latest_error or existing_task.latest_error,
                 repair_count=max(action_task.repair_count, existing_task.repair_count),
                 updated_at=utc_now_iso(),
@@ -466,15 +466,24 @@ def _apply_action_metadata(
 
     state = replace(
         existing_mission_state,
-        mission_goal=action.mission_goal or existing_mission_state.mission_goal,
+        mission_goal=(
+            action.current_goal
+            or action.mission_goal
+            or existing_mission_state.mission_goal
+        ),
         tasks=tuple(merged_tasks),
         active_task_id=action.active_task_id or existing_mission_state.active_task_id,
         reasoning_summary=action.reasoning_summary,
+        user_visible_progress=action.user_visible_progress,
         reply_to_user=action.reply_to_user,
         completion_claim=action.completion_claim,
         blocker=action.blocker or existing_mission_state.blocker,
         next_expected_evidence=(
             action.next_expected_evidence or existing_mission_state.next_expected_evidence
+        ),
+        unresolved_gaps=action.unresolved_gaps or existing_mission_state.unresolved_gaps,
+        latest_truthful_status=(
+            action.user_visible_progress or existing_mission_state.latest_truthful_status
         ),
         last_user_input=user_input,
         loop_count=existing_mission_state.loop_count + 1,
@@ -647,6 +656,8 @@ def _apply_tool_result(
                     repair_history=(
                         state.repair_history + (_repair_note_for_tool(tool_call.tool_name),)
                     )[-8:],
+                    user_visible_progress=f"Retrying {task.title.lower()} after a timeout.",
+                    latest_truthful_status=None,
                     executor_state="repairing",
                     blocker=None,
                     last_blocker=None,
@@ -666,6 +677,23 @@ def _apply_tool_result(
         item
         for item in dict.fromkeys(task.satisfied_evidence + evidence_kinds)
     )
+    evidence_records = tuple(
+        MissionEvidenceRecord(
+            id=_next_evidence_id(mission_state=mission_state, offset=index),
+            kind=evidence_kind,
+            task_id=task_id,
+            summary=_evidence_summary(
+                tool_result=tool_result,
+                evidence_kind=evidence_kind,
+            ),
+            created_at=timestamp,
+            tool_name=tool_result.tool_name,
+            artifact_paths=artifact_paths,
+            success=True,
+        )
+        for index, evidence_kind in enumerate(evidence_kinds, start=1)
+    )
+    evidence_refs = tuple(record.id for record in evidence_records)
     updated_task = replace(
         task,
         satisfied_evidence=satisfied_evidence,
@@ -674,6 +702,9 @@ def _apply_tool_result(
         )[:8],
         evidence=tuple(
             item for item in dict.fromkeys(task.evidence + evidence_texts)
+        )[:8],
+        evidence_refs=tuple(
+            item for item in dict.fromkeys(task.evidence_refs + evidence_refs)
         )[:8],
         latest_error=None,
         status=(
@@ -689,20 +720,16 @@ def _apply_tool_result(
             state,
             evidence_log=(
                 state.evidence_log
-                + tuple(
-                    MissionEvidenceRecord(
-                        kind=evidence_kind,
-                        task_id=task_id,
-                        summary=_evidence_summary(
-                            tool_result=tool_result,
-                            evidence_kind=evidence_kind,
-                        ),
-                        created_at=timestamp,
-                        tool_name=tool_result.tool_name,
-                        artifact_paths=artifact_paths,
-                        success=True,
-                    )
-                    for evidence_kind in evidence_kinds
+                + evidence_records
+            )[-12:],
+            artifact_observations=(
+                state.artifact_observations
+                + _build_artifact_observations(
+                    tool_result=tool_result,
+                    task_id=task_id,
+                    artifact_paths=artifact_paths,
+                    evidence_records=evidence_records,
+                    created_at=timestamp,
                 )
             )[-12:],
             tool_history=tool_history[-24:],
@@ -719,6 +746,12 @@ def _apply_tool_result(
                 )
             )[-8:],
             next_expected_evidence=_next_expected_evidence(state),
+            user_visible_progress=_tool_progress_update(
+                task_title=task.title,
+                tool_name=tool_call.tool_name,
+                artifact_paths=artifact_paths,
+            ),
+            latest_truthful_status=None,
             executor_state=(
                 "active"
                 if state.status == "active"
@@ -758,9 +791,21 @@ def _apply_reply_evidence(
                 mission_state,
                 reply_to_user=reply_to_user,
                 final_reply=reply_to_user if mission_completion_ready(mission_state) else mission_state.final_reply,
+                user_visible_progress=None,
+                latest_truthful_status=None,
             )
         )
     timestamp = utc_now_iso()
+    evidence_record = MissionEvidenceRecord(
+        id=_next_evidence_id(mission_state=mission_state, offset=1),
+        kind="reply_emitted",
+        task_id=target_task.id,
+        summary=_compact_reply_evidence(reply_to_user),
+        created_at=timestamp,
+        tool_name=None,
+        artifact_paths=(),
+        success=True,
+    )
     satisfied_evidence = tuple(
         item
         for item in dict.fromkeys(target_task.satisfied_evidence + ("reply_emitted",))
@@ -772,6 +817,12 @@ def _apply_reply_evidence(
             item
             for item in dict.fromkeys(
                 target_task.evidence + (_compact_reply_evidence(reply_to_user),)
+            )
+        )[:8],
+        evidence_refs=tuple(
+            item
+            for item in dict.fromkeys(
+                target_task.evidence_refs + (evidence_record.id,)
             )
         )[:8],
         status=(
@@ -792,17 +843,7 @@ def _apply_reply_evidence(
             final_reply=(reply_to_user if mission_completion_ready(state) else state.final_reply),
             evidence_log=(
                 state.evidence_log
-                + (
-                    MissionEvidenceRecord(
-                        kind="reply_emitted",
-                        task_id=updated_task.id,
-                        summary=_compact_reply_evidence(reply_to_user),
-                        created_at=timestamp,
-                        tool_name=None,
-                        artifact_paths=(),
-                        success=True,
-                    ),
-                )
+                + (evidence_record,)
             )[-12:],
             last_successful_evidence=tuple(
                 item
@@ -812,6 +853,8 @@ def _apply_reply_evidence(
                 )
             )[-8:],
             next_expected_evidence=_next_expected_evidence(state),
+            user_visible_progress=None,
+            latest_truthful_status=None,
         )
     )
 
@@ -822,16 +865,33 @@ def _apply_action_completion_signals(
     action: MissionAgentAction,
     reply_is_final: bool,
 ) -> MissionState:
-    state = mission_state
-    if action.blocker:
+    state = normalize_mission_state(
+        replace(
+            mission_state,
+            user_visible_progress=action.user_visible_progress,
+            unresolved_gaps=action.unresolved_gaps or mission_state.unresolved_gaps,
+            latest_truthful_status=(
+                action.user_visible_progress or mission_state.latest_truthful_status
+            ),
+        )
+    )
+    blocker_text = action.blocker
+    if action.step_mode == "blocked" and blocker_text is None:
+        blocker_text = action.user_visible_progress or _MISSION_BLOCKED_REPLY
+    if blocker_text:
         return _block_mission(
             mission_state=state,
-            blocker=action.blocker,
+            blocker=blocker_text,
             user_input=state.last_user_input or state.mission_goal,
             target_task_id=state.active_task_id,
         )
-    if action.completion_claim and mission_completion_ready(state) and (
+    if (
+        action.step_mode == "final_reply"
+        and action.completion_claim
+        and mission_completion_ready(state)
+        and (
         reply_is_final or state.final_reply is not None
+        )
     ):
         return normalize_mission_state(
             replace(
@@ -846,6 +906,9 @@ def _apply_action_completion_signals(
                 ),
                 executor_state="completed",
                 next_expected_evidence=None,
+                unresolved_gaps=(),
+                user_visible_progress=None,
+                latest_truthful_status=None,
             )
         )
     if action.next_expected_evidence:
@@ -853,9 +916,16 @@ def _apply_action_completion_signals(
             replace(
                 state,
                 next_expected_evidence=action.next_expected_evidence,
+                latest_truthful_status=None,
             )
         )
-    return normalize_mission_state(replace(state, next_expected_evidence=_next_expected_evidence(state)))
+    return normalize_mission_state(
+        replace(
+            state,
+            next_expected_evidence=_next_expected_evidence(state),
+            latest_truthful_status=None,
+        )
+    )
 
 
 def _record_rejected_tool_call(
@@ -883,6 +953,7 @@ def _record_rejected_tool_call(
                     ),
                 )
             )[-24:],
+            latest_truthful_status=None,
         )
     )
 
@@ -912,8 +983,11 @@ def _block_mission(
                 tasks=(task,),
                 active_task_id=None,
                 updated_at=timestamp,
+                user_visible_progress=blocker,
                 blocker=blocker,
                 next_expected_evidence=None,
+                unresolved_gaps=(blocker,),
+                latest_truthful_status=f"Mission blocked: {blocker}.",
                 last_user_input=user_input,
                 executor_state="blocked",
                 last_blocker=blocker,
@@ -937,8 +1011,11 @@ def _block_mission(
             status="blocked",
             tasks=tuple(tasks),
             active_task_id=None,
+            user_visible_progress=blocker,
             blocker=blocker,
             next_expected_evidence=None,
+            unresolved_gaps=(blocker,),
+            latest_truthful_status=f"Mission blocked: {blocker}.",
             final_reply=None,
             updated_at=timestamp,
             executor_state="blocked",
@@ -1029,20 +1106,6 @@ def _compact_reply_evidence(reply_to_user: str) -> str:
     return compact[:160] if len(compact) > 160 else compact
 
 
-def _reply_is_final_user_message(reply_to_user: str | None) -> bool:
-    if reply_to_user is None:
-        return False
-    compact = " ".join(reply_to_user.split()).strip()
-    if not compact:
-        return False
-    lowered = compact.casefold()
-    if lowered.startswith(_STATUS_REPLY_PREFIXES):
-        return False
-    if any(lowered.startswith(prefix) for prefix in _PROGRESS_REPLY_PREFIXES):
-        return False
-    return True
-
-
 def _final_reply_candidate(
     *,
     mission_state: MissionState,
@@ -1051,9 +1114,9 @@ def _final_reply_candidate(
 ) -> str | None:
     if reply_is_final and action.reply_to_user:
         return action.reply_to_user
-    if mission_state.final_reply and _reply_is_final_user_message(mission_state.final_reply):
+    if mission_state.final_reply:
         return mission_state.final_reply
-    if mission_state.reply_to_user and _reply_is_final_user_message(mission_state.reply_to_user):
+    if mission_state.status == "completed" and mission_state.reply_to_user:
         return mission_state.reply_to_user
     return None
 
@@ -1071,11 +1134,75 @@ def _build_mission_status_reply(mission_state: MissionState | None) -> str:
     if mission_state is None:
         return _MISSION_INCOMPLETE_REPLY
     if mission_state.status == "completed":
-        return mission_state.final_reply or render_mission_status(mission_state)
-    if mission_state.status == "blocked":
-        blocker = mission_state.last_blocker or mission_state.blocker or "unknown blocker"
-        return f"{render_mission_status(mission_state)}\nBlocker: {blocker}"
+        return mission_state.final_reply or _build_completion_fallback_reply(mission_state)
     return render_mission_status(mission_state)
+
+
+def _build_completion_fallback_reply(mission_state: MissionState) -> str:
+    verified_artifacts = mission_state.last_verified_artifact_paths
+    if verified_artifacts:
+        joined = ", ".join(verified_artifacts)
+        return f"The mission is complete. Verified artifact evidence exists for: {joined}."
+    completed_tasks = [
+        task.title for task in mission_state.tasks if task.status == "completed"
+    ]
+    if completed_tasks:
+        return "The mission is complete. Finished: " + ", ".join(completed_tasks) + "."
+    return render_mission_status(mission_state)
+
+
+def _next_evidence_id(*, mission_state: MissionState, offset: int) -> str:
+    return f"e{mission_state.loop_count + 1}-{len(mission_state.evidence_log) + offset}"
+
+
+def _artifact_status_for_tool_result(tool_name: str) -> str | None:
+    mapping = {
+        "write_text_file": "written",
+        "read_text_file": "read_back",
+        "delete_file": "deleted",
+        "list_directory": "listed",
+    }
+    return mapping.get(tool_name)
+
+
+def _build_artifact_observations(
+    *,
+    tool_result: ToolResult,
+    task_id: str,
+    artifact_paths: tuple[str, ...],
+    evidence_records: tuple[MissionEvidenceRecord, ...],
+    created_at: str,
+) -> tuple[MissionArtifactObservation, ...]:
+    status = _artifact_status_for_tool_result(tool_result.tool_name)
+    if status is None or not artifact_paths:
+        return ()
+    evidence_ref = evidence_records[0].id if evidence_records else None
+    summary = tool_result.output_text.strip().splitlines()[0] if tool_result.output_text.strip() else None
+    return tuple(
+        MissionArtifactObservation(
+            path=path,
+            status=status,
+            task_id=task_id,
+            created_at=created_at,
+            summary=summary,
+            tool_name=tool_result.tool_name,
+            evidence_ref=evidence_ref,
+        )
+        for path in artifact_paths
+    )
+
+
+def _tool_progress_update(
+    *,
+    task_title: str,
+    tool_name: str,
+    artifact_paths: tuple[str, ...],
+) -> str:
+    if artifact_paths and tool_name == "write_text_file":
+        return f"Wrote artifact evidence for {task_title}: {artifact_paths[0]}"
+    if artifact_paths and tool_name == "read_text_file":
+        return f"Verified artifact evidence for {task_title}: {artifact_paths[0]}"
+    return f"Observed {tool_name} evidence for {task_title}."
 
 
 def _trace_model_success(*, tracer: Tracer, session_id: str, turn_result) -> None:
