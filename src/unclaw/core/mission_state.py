@@ -41,8 +41,10 @@ _DEFAULT_REQUIRED_EVIDENCE_BY_KIND: dict[str, tuple[str, ...]] = {
 }
 _MAX_TASKS = 8
 _MAX_EVIDENCE_ITEMS = 12
+_MAX_EVIDENCE_CAPSULES = 8
 _MAX_ARTIFACT_OBSERVATIONS = 12
 _MAX_TOOL_HISTORY = 24
+_MAX_TOOL_OBSERVATION_REFS = 12
 _MAX_TEXT_ITEMS = 8
 
 
@@ -99,6 +101,24 @@ class MissionEvidenceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MissionEvidenceCapsule:
+    """Compact model- or runtime-authored evidence for mission continuation."""
+
+    id: str
+    task_id: str | None
+    tool_name: str
+    created_at: str
+    summary: str
+    found: tuple[str, ...] = ()
+    usable_facts: tuple[str, ...] = ()
+    unresolved: tuple[str, ...] = ()
+    pending_artifact_work: tuple[str, ...] = ()
+    artifact_paths: tuple[str, ...] = ()
+    source_refs: tuple[str, ...] = ()
+    observation_ref: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class MissionArtifactObservation:
     """One compact observed artifact fact persisted for later turns."""
 
@@ -125,6 +145,20 @@ class MissionToolCallRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class MissionToolObservationRef:
+    """Pointer to one externally persisted raw tool observation."""
+
+    id: str
+    tool_name: str
+    task_id: str | None
+    created_at: str
+    workspace_path: str
+    success: bool = True
+    payload_bytes: int = 0
+    output_chars: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class MissionState:
     """Persisted mission snapshot for one session."""
 
@@ -143,7 +177,9 @@ class MissionState:
     unresolved_gaps: tuple[str, ...] = ()
     latest_truthful_status: str | None = None
     evidence_log: tuple[MissionEvidenceRecord, ...] = ()
+    evidence_capsules: tuple[MissionEvidenceCapsule, ...] = ()
     artifact_observations: tuple[MissionArtifactObservation, ...] = ()
+    tool_observation_refs: tuple[MissionToolObservationRef, ...] = ()
     tool_history: tuple[MissionToolCallRecord, ...] = ()
     final_reply: str | None = None
     last_user_input: str | None = None
@@ -311,6 +347,9 @@ def normalize_mission_task(task: MissionTaskState) -> MissionTaskState:
     normalized_required = _normalize_text_items(
         task.required_evidence or default_required
     )
+    normalized_artifact_paths = _normalize_text_items(task.artifact_paths)
+    normalized_evidence = _normalize_text_items(task.evidence)
+    normalized_evidence_refs = _normalize_text_items(task.evidence_refs)
     normalized_satisfied = tuple(
         item
         for item in _normalize_text_items(task.satisfied_evidence)
@@ -321,15 +360,17 @@ def normalize_mission_task(task: MissionTaskState) -> MissionTaskState:
         allowed_values=_TASK_STATUS_VALUES,
         fallback="pending",
     )
+    task_has_runtime_proof = bool(
+        normalized_satisfied
+        or normalized_evidence
+        or normalized_evidence_refs
+    )
     if normalized_required and all(
         evidence in normalized_satisfied for evidence in normalized_required
     ):
         normalized_status = "completed"
-    if normalized_status == "completed":
-        normalized_satisfied = tuple(
-            item
-            for item in dict.fromkeys(normalized_required + normalized_satisfied)
-        )
+    elif normalized_status == "completed" and not task_has_runtime_proof:
+        normalized_status = "pending"
     return MissionTaskState(
         id=normalized_id,
         title=normalized_title,
@@ -338,9 +379,9 @@ def normalize_mission_task(task: MissionTaskState) -> MissionTaskState:
         depends_on=_normalize_text_items(task.depends_on),
         required_evidence=normalized_required,
         satisfied_evidence=normalized_satisfied,
-        artifact_paths=_normalize_text_items(task.artifact_paths),
-        evidence=_normalize_text_items(task.evidence),
-        evidence_refs=_normalize_text_items(task.evidence_refs),
+        artifact_paths=normalized_artifact_paths,
+        evidence=normalized_evidence,
+        evidence_refs=normalized_evidence_refs,
         latest_error=_normalize_optional_text(task.latest_error),
         repair_count=max(task.repair_count, 0),
         updated_at=_normalize_timestamp(task.updated_at),
@@ -354,6 +395,50 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
     """Return a normalized copy safe for persistence."""
 
     normalized_tasks = _normalize_tasks(mission_state.tasks)
+
+    evidence_log = tuple(
+        _normalize_evidence_record(record)
+        for record in mission_state.evidence_log[-_MAX_EVIDENCE_ITEMS:]
+    )
+    evidence_capsules = tuple(
+        _normalize_evidence_capsule(record)
+        for record in mission_state.evidence_capsules[-_MAX_EVIDENCE_CAPSULES:]
+    )
+    artifact_observations = tuple(
+        _normalize_artifact_observation(record)
+        for record in mission_state.artifact_observations[-_MAX_ARTIFACT_OBSERVATIONS:]
+    )
+    tool_observation_refs = tuple(
+        _normalize_tool_observation_ref(record)
+        for record in mission_state.tool_observation_refs[-_MAX_TOOL_OBSERVATION_REFS:]
+    )
+    tool_history = tuple(
+        _normalize_tool_call_record(record)
+        for record in mission_state.tool_history[-_MAX_TOOL_HISTORY:]
+    )
+
+    last_artifact_paths: list[str] = []
+    for path in _normalize_text_items(mission_state.last_verified_artifact_paths):
+        if path not in last_artifact_paths:
+            last_artifact_paths.append(path)
+    for record in evidence_log:
+        for path in record.artifact_paths:
+            if path not in last_artifact_paths:
+                last_artifact_paths.append(path)
+    for observation in artifact_observations:
+        if observation.path not in last_artifact_paths:
+            last_artifact_paths.append(observation.path)
+    for capsule in evidence_capsules:
+        for path in capsule.artifact_paths:
+            if path not in last_artifact_paths:
+                last_artifact_paths.append(path)
+
+    normalized_tasks = _reconcile_tasks_with_observed_artifacts(
+        tasks=normalized_tasks,
+        evidence_log=evidence_log,
+        artifact_observations=artifact_observations,
+        last_artifact_paths=tuple(last_artifact_paths),
+    )
     completed_task_ids = tuple(
         task.id for task in normalized_tasks if task.status == "completed"
     )
@@ -383,26 +468,68 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
         None,
     )
 
+    normalized_blocker = _normalize_optional_text(
+        mission_state.blocker or mission_state.last_blocker
+    )
+
+    last_successful_evidence: list[str] = []
+    for task in normalized_tasks:
+        for item in task.evidence:
+            if item not in last_successful_evidence:
+                last_successful_evidence.append(item)
+    for record in evidence_log:
+        if record.summary and record.summary not in last_successful_evidence and record.success:
+            last_successful_evidence.append(record.summary)
+    for capsule in evidence_capsules:
+        if capsule.summary and capsule.summary not in last_successful_evidence:
+            last_successful_evidence.append(capsule.summary)
+        for item in capsule.usable_facts:
+            if item not in last_successful_evidence:
+                last_successful_evidence.append(item)
+
+    next_expected_evidence = _normalize_optional_text(mission_state.next_expected_evidence)
+    if next_expected_evidence is None and active_task is not None:
+        missing = [
+            evidence
+            for evidence in active_task.required_evidence
+            if evidence not in active_task.satisfied_evidence
+        ]
+        if missing:
+            next_expected_evidence = ", ".join(missing)
+        elif active_task.latest_error:
+            next_expected_evidence = active_task.latest_error
+
+    unresolved_gaps = _normalize_text_items(mission_state.unresolved_gaps)
+    if not unresolved_gaps:
+        unresolved_gaps = _derive_unresolved_gaps(
+            tasks=normalized_tasks,
+            status="active",
+            blocker=normalized_blocker,
+        )
+
     normalized_status = _normalize_choice(
         mission_state.status,
         allowed_values=_MISSION_STATUS_VALUES,
         fallback="active",
     )
-    if normalized_tasks and all(task.status == "completed" for task in normalized_tasks):
+    if (
+        normalized_tasks
+        and all(task.status == "completed" for task in normalized_tasks)
+        and not unresolved_gaps
+    ):
         normalized_status = "completed"
         active_task_id = None
+        active_task = None
     elif blocked_task_ids and active_task is None and not any(
         task.status in {"pending", "active", "repairing"} for task in normalized_tasks
     ):
         normalized_status = "blocked"
     else:
         normalized_status = "active"
-
-    normalized_blocker = _normalize_optional_text(
-        mission_state.blocker or mission_state.last_blocker
-    )
     if normalized_status == "completed":
         normalized_blocker = None
+        next_expected_evidence = None
+        unresolved_gaps = ()
 
     normalized_executor_state = _normalize_choice(
         mission_state.executor_state,
@@ -425,63 +552,6 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
         normalized_executor_state = "repairing"
     else:
         normalized_executor_state = "active"
-
-    evidence_log = tuple(
-        _normalize_evidence_record(record)
-        for record in mission_state.evidence_log[-_MAX_EVIDENCE_ITEMS:]
-    )
-    artifact_observations = tuple(
-        _normalize_artifact_observation(record)
-        for record in mission_state.artifact_observations[-_MAX_ARTIFACT_OBSERVATIONS:]
-    )
-    tool_history = tuple(
-        _normalize_tool_call_record(record)
-        for record in mission_state.tool_history[-_MAX_TOOL_HISTORY:]
-    )
-
-    last_artifact_paths: list[str] = []
-    for task in normalized_tasks:
-        for path in task.artifact_paths:
-            if path not in last_artifact_paths:
-                last_artifact_paths.append(path)
-    for record in evidence_log:
-        for path in record.artifact_paths:
-            if path not in last_artifact_paths:
-                last_artifact_paths.append(path)
-    for observation in artifact_observations:
-        if observation.path not in last_artifact_paths:
-            last_artifact_paths.append(observation.path)
-
-    last_successful_evidence: list[str] = []
-    for task in normalized_tasks:
-        for item in task.evidence:
-            if item not in last_successful_evidence:
-                last_successful_evidence.append(item)
-    for record in evidence_log:
-        if record.summary and record.summary not in last_successful_evidence and record.success:
-            last_successful_evidence.append(record.summary)
-
-    next_expected_evidence = _normalize_optional_text(mission_state.next_expected_evidence)
-    if normalized_status == "completed":
-        next_expected_evidence = None
-    elif next_expected_evidence is None and active_task is not None:
-        missing = [
-            evidence
-            for evidence in active_task.required_evidence
-            if evidence not in active_task.satisfied_evidence
-        ]
-        if missing:
-            next_expected_evidence = ", ".join(missing)
-
-    unresolved_gaps = _normalize_text_items(mission_state.unresolved_gaps)
-    if normalized_status == "completed":
-        unresolved_gaps = ()
-    elif not unresolved_gaps:
-        unresolved_gaps = _derive_unresolved_gaps(
-            tasks=normalized_tasks,
-            status=normalized_status,
-            blocker=normalized_blocker,
-        )
 
     latest_truthful_status = _normalize_optional_text(mission_state.latest_truthful_status)
     if latest_truthful_status is None:
@@ -520,7 +590,9 @@ def normalize_mission_state(mission_state: MissionState) -> MissionState:
         unresolved_gaps=unresolved_gaps,
         latest_truthful_status=latest_truthful_status,
         evidence_log=evidence_log,
+        evidence_capsules=evidence_capsules,
         artifact_observations=artifact_observations,
+        tool_observation_refs=tool_observation_refs,
         tool_history=tool_history,
         final_reply=_normalize_optional_text(mission_state.final_reply),
         last_user_input=_normalize_optional_text(mission_state.last_user_input),
@@ -585,6 +657,23 @@ def serialize_mission_state(mission_state: MissionState) -> str:
                 }
                 for record in normalized.evidence_log
             ],
+            "evidence_capsules": [
+                {
+                    "id": record.id,
+                    "task_id": record.task_id,
+                    "tool_name": record.tool_name,
+                    "created_at": record.created_at,
+                    "summary": record.summary,
+                    "found": list(record.found),
+                    "usable_facts": list(record.usable_facts),
+                    "unresolved": list(record.unresolved),
+                    "pending_artifact_work": list(record.pending_artifact_work),
+                    "artifact_paths": list(record.artifact_paths),
+                    "source_refs": list(record.source_refs),
+                    "observation_ref": record.observation_ref,
+                }
+                for record in normalized.evidence_capsules
+            ],
             "artifact_observations": [
                 {
                     "path": record.path,
@@ -608,6 +697,19 @@ def serialize_mission_state(mission_state: MissionState) -> str:
                     "reason": record.reason,
                 }
                 for record in normalized.tool_history
+            ],
+            "tool_observation_refs": [
+                {
+                    "id": record.id,
+                    "tool_name": record.tool_name,
+                    "task_id": record.task_id,
+                    "created_at": record.created_at,
+                    "workspace_path": record.workspace_path,
+                    "success": record.success,
+                    "payload_bytes": record.payload_bytes,
+                    "output_chars": record.output_chars,
+                }
+                for record in normalized.tool_observation_refs
             ],
             "final_reply": normalized.final_reply,
             "last_user_input": normalized.last_user_input,
@@ -709,10 +811,20 @@ def _parse_v2_mission_state(payload: dict[str, Any]) -> MissionState | None:
                     for item in _coerce_dict_list(payload.get("evidence_log"))
                     if _parse_evidence_record(item) is not None
                 ),
+                evidence_capsules=tuple(
+                    _parse_evidence_capsule(item)
+                    for item in _coerce_dict_list(payload.get("evidence_capsules"))
+                    if _parse_evidence_capsule(item) is not None
+                ),
                 artifact_observations=tuple(
                     _parse_artifact_observation(item)
                     for item in _coerce_dict_list(payload.get("artifact_observations"))
                     if _parse_artifact_observation(item) is not None
+                ),
+                tool_observation_refs=tuple(
+                    _parse_tool_observation_ref(item)
+                    for item in _coerce_dict_list(payload.get("tool_observation_refs"))
+                    if _parse_tool_observation_ref(item) is not None
                 ),
                 tool_history=tuple(
                     _parse_tool_call_record(item)
@@ -805,7 +917,9 @@ def _parse_legacy_mission_state(payload: dict[str, Any]) -> MissionState | None:
                 unresolved_gaps=(),
                 latest_truthful_status=None,
                 evidence_log=(),
+                evidence_capsules=(),
                 artifact_observations=(),
+                tool_observation_refs=(),
                 final_reply=_coerce_optional_str(payload.get("final_verified_reply")),
                 last_user_input=None,
                 loop_count=0,
@@ -894,6 +1008,25 @@ def _normalize_evidence_record(
     )
 
 
+def _normalize_evidence_capsule(
+    record: MissionEvidenceCapsule,
+) -> MissionEvidenceCapsule:
+    return MissionEvidenceCapsule(
+        id=_normalize_text(record.id, fallback="capsule"),
+        task_id=_normalize_optional_text(record.task_id),
+        tool_name=_normalize_text(record.tool_name, fallback="tool"),
+        created_at=_normalize_timestamp(record.created_at),
+        summary=_normalize_text(record.summary, fallback="evidence capsule"),
+        found=_normalize_text_items(record.found),
+        usable_facts=_normalize_text_items(record.usable_facts),
+        unresolved=_normalize_text_items(record.unresolved),
+        pending_artifact_work=_normalize_text_items(record.pending_artifact_work),
+        artifact_paths=_normalize_text_items(record.artifact_paths),
+        source_refs=_normalize_text_items(record.source_refs),
+        observation_ref=_normalize_optional_text(record.observation_ref),
+    )
+
+
 def _normalize_artifact_observation(
     record: MissionArtifactObservation,
 ) -> MissionArtifactObservation:
@@ -922,6 +1055,21 @@ def _normalize_tool_call_record(
     )
 
 
+def _normalize_tool_observation_ref(
+    record: MissionToolObservationRef,
+) -> MissionToolObservationRef:
+    return MissionToolObservationRef(
+        id=_normalize_text(record.id, fallback="observation"),
+        tool_name=_normalize_text(record.tool_name, fallback="tool"),
+        task_id=_normalize_optional_text(record.task_id),
+        created_at=_normalize_timestamp(record.created_at),
+        workspace_path=_normalize_text(record.workspace_path, fallback="observation.json"),
+        success=bool(record.success),
+        payload_bytes=max(record.payload_bytes, 0),
+        output_chars=max(record.output_chars, 0),
+    )
+
+
 def _parse_evidence_record(payload: dict[str, Any]) -> MissionEvidenceRecord | None:
     try:
         return MissionEvidenceRecord(
@@ -933,6 +1081,30 @@ def _parse_evidence_record(payload: dict[str, Any]) -> MissionEvidenceRecord | N
             tool_name=_coerce_optional_str(payload.get("tool_name")),
             artifact_paths=_coerce_str_tuple(payload.get("artifact_paths")),
             success=payload.get("success") is not False,
+        )
+    except ValueError:
+        return None
+
+
+def _parse_evidence_capsule(
+    payload: dict[str, Any],
+) -> MissionEvidenceCapsule | None:
+    try:
+        return MissionEvidenceCapsule(
+            id=_coerce_optional_str(payload.get("id")) or "capsule",
+            task_id=_coerce_optional_str(payload.get("task_id")),
+            tool_name=_coerce_required_str(payload.get("tool_name")),
+            created_at=_coerce_optional_str(payload.get("created_at")) or utc_now_iso(),
+            summary=_coerce_required_str(payload.get("summary")),
+            found=_coerce_str_tuple(payload.get("found")),
+            usable_facts=_coerce_str_tuple(payload.get("usable_facts")),
+            unresolved=_coerce_str_tuple(payload.get("unresolved")),
+            pending_artifact_work=_coerce_str_tuple(
+                payload.get("pending_artifact_work")
+            ),
+            artifact_paths=_coerce_str_tuple(payload.get("artifact_paths")),
+            source_refs=_coerce_str_tuple(payload.get("source_refs")),
+            observation_ref=_coerce_optional_str(payload.get("observation_ref")),
         )
     except ValueError:
         return None
@@ -950,6 +1122,24 @@ def _parse_artifact_observation(
             summary=_coerce_optional_str(payload.get("summary")),
             tool_name=_coerce_optional_str(payload.get("tool_name")),
             evidence_ref=_coerce_optional_str(payload.get("evidence_ref")),
+        )
+    except ValueError:
+        return None
+
+
+def _parse_tool_observation_ref(
+    payload: dict[str, Any],
+) -> MissionToolObservationRef | None:
+    try:
+        return MissionToolObservationRef(
+            id=_coerce_optional_str(payload.get("id")) or "observation",
+            tool_name=_coerce_required_str(payload.get("tool_name")),
+            task_id=_coerce_optional_str(payload.get("task_id")),
+            created_at=_coerce_optional_str(payload.get("created_at")) or utc_now_iso(),
+            workspace_path=_coerce_required_str(payload.get("workspace_path")),
+            success=payload.get("success") is not False,
+            payload_bytes=_coerce_non_negative_int(payload.get("payload_bytes")),
+            output_chars=_coerce_non_negative_int(payload.get("output_chars")),
         )
     except ValueError:
         return None
@@ -1081,6 +1271,9 @@ def _derive_unresolved_gaps(
         if missing:
             gaps.append(f"{task.title}: missing {', '.join(missing)}")
             continue
+        if task.latest_error:
+            gaps.append(f"{task.title}: {task.latest_error}")
+            continue
         gaps.append(f"{task.title}: still {task.status}")
     if blocker and blocker not in gaps:
         gaps.append(blocker)
@@ -1119,13 +1312,78 @@ def _build_truthful_status_text(
     return " ".join(parts)
 
 
+def _reconcile_tasks_with_observed_artifacts(
+    *,
+    tasks: tuple[MissionTaskState, ...],
+    evidence_log: tuple[MissionEvidenceRecord, ...],
+    artifact_observations: tuple[MissionArtifactObservation, ...],
+    last_artifact_paths: tuple[str, ...],
+) -> tuple[MissionTaskState, ...]:
+    reconciled: list[MissionTaskState] = []
+    for task in tasks:
+        if task.status == "completed" and task.kind in {"file_write", "file_read"}:
+            if not _task_has_observed_artifact_evidence(
+                task=task,
+                evidence_log=evidence_log,
+                artifact_observations=artifact_observations,
+                last_artifact_paths=last_artifact_paths,
+            ):
+                reconciled.append(
+                    replace(
+                        task,
+                        status="active",
+                        latest_error="observed artifact evidence missing",
+                    )
+                )
+                continue
+        reconciled.append(task)
+    return tuple(reconciled)
+
+
+def _task_has_observed_artifact_evidence(
+    *,
+    task: MissionTaskState,
+    evidence_log: tuple[MissionEvidenceRecord, ...],
+    artifact_observations: tuple[MissionArtifactObservation, ...],
+    last_artifact_paths: tuple[str, ...],
+) -> bool:
+    if task.kind not in {"file_write", "file_read"}:
+        return True
+    observed_kinds = {
+        record.kind
+        for record in evidence_log
+        if record.task_id == task.id and record.success
+    }
+    observed_paths: set[str] = set()
+    for record in evidence_log:
+        if record.task_id == task.id and record.success:
+            observed_paths.update(record.artifact_paths)
+    observed_paths.update(
+        record.path for record in artifact_observations if record.task_id == task.id
+    )
+    if not observed_paths and task.artifact_paths:
+        observed_paths.update(
+            path for path in last_artifact_paths if path in task.artifact_paths
+        )
+    if task.kind == "file_write":
+        if not {"artifact_write", "artifact_readback"}.issubset(observed_kinds):
+            return False
+    if task.kind == "file_read" and "artifact_readback" not in observed_kinds:
+        return False
+    if task.artifact_paths:
+        return all(path in observed_paths for path in task.artifact_paths)
+    return bool(observed_paths)
+
+
 __all__ = [
     "MissionArtifactObservation",
+    "MissionEvidenceCapsule",
     "MissionDeliverableState",
     "MissionEvidenceRecord",
     "MissionState",
     "MissionTaskState",
     "MissionToolCallRecord",
+    "MissionToolObservationRef",
     "mission_completion_ready",
     "normalize_mission_deliverable",
     "normalize_mission_state",

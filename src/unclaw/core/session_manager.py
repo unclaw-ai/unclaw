@@ -28,6 +28,7 @@ from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.schemas.events import EventLevel
 from unclaw.schemas.session import SessionRecord, SessionSummary
 from unclaw.settings import Settings
+from unclaw.tools.contracts import ToolCall, ToolResult
 
 _SESSION_GOAL_STATE_EVENT_TYPE = "session.goal_state.updated"
 _SESSION_PROGRESS_LEDGER_EVENT_TYPE = "session.progress.ledger.updated"
@@ -496,6 +497,33 @@ class SessionManager:
             created_at=mission_state.updated_at,
         )
         return mission_state
+
+    def persist_tool_observation(
+        self,
+        *,
+        mission_id: str,
+        observation_id: str,
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+        session_id: str | None = None,
+    ) -> str:
+        """Persist one raw tool observation under the mission workspace."""
+
+        resolved_session_id = self._resolve_session_id(session_id)
+        if self.load_session(resolved_session_id) is None:
+            raise SessionManagerError(
+                f"Session '{resolved_session_id}' is not available."
+            )
+        if self.mission_workspace_store is None:
+            raise SessionManagerError("Mission workspace store is not available.")
+        observation_path = self.mission_workspace_store.save_tool_observation(
+            session_id=resolved_session_id,
+            mission_id=mission_id,
+            observation_id=observation_id,
+            tool_call=tool_call,
+            tool_result=tool_result,
+        )
+        return str(observation_path)
 
     def create_mission_id(self) -> str:
         """Return a new stable mission identifier."""

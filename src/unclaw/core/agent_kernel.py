@@ -9,11 +9,13 @@ import unclaw.core.agent_loop as _agent_loop
 from unclaw.core.mission_events import MissionEventCallback, emit_mission_event
 from unclaw.core.mission_state import (
     MissionArtifactObservation,
+    MissionEvidenceCapsule,
     MissionDeliverableState,
     MissionEvidenceRecord,
     MissionState,
     MissionTaskState,
     MissionToolCallRecord,
+    MissionToolObservationRef,
     mission_completion_ready,
     normalize_mission_state,
 )
@@ -21,6 +23,8 @@ from unclaw.core.mission_verifier import (
     MissionAgentAction,
     MissionToolRequest,
     build_agent_action_messages,
+    build_evidence_capsule_messages,
+    parse_evidence_capsule_response,
     parse_agent_action_response,
     render_mission_status,
 )
@@ -41,6 +45,9 @@ _MISSION_BLOCKED_REPLY = (
 _MISSION_INCOMPLETE_REPLY = (
     "The mission is still active and needs another proven step before it can finish."
 )
+_HEAVY_TOOL_RESULT_NAMES = frozenset({"search_web"})
+_HEAVY_TOOL_OUTPUT_CHARS = 1600
+_HEAVY_TOOL_PAYLOAD_CHARS = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,18 +237,22 @@ def run_agent_kernel_turn(
 
         recent_tool_results = ()
         if action.tool_calls:
-            mission_state, recent_tool_results = _execute_action_tool_calls(
+            mission_state, raw_tool_results, recent_tool_results = _execute_action_tool_calls(
                 mission_state=mission_state,
                 action=action,
                 session_manager=session_manager,
                 session_id=session_id,
+                user_input=user_input,
+                orchestrator=orchestrator,
                 tracer=tracer,
                 tool_registry=tool_registry,
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
                 tool_guard_state=tool_guard_state,
                 tool_call_callback=tool_call_callback,
                 mission_event_callback=mission_event_callback,
             )
-            all_tool_results.extend(recent_tool_results)
+            all_tool_results.extend(raw_tool_results)
 
         reply_is_final = (
             action.step_mode == "final_reply"
@@ -477,11 +488,11 @@ def _apply_action_metadata(
         user_visible_progress=action.user_visible_progress,
         reply_to_user=action.reply_to_user,
         completion_claim=action.completion_claim,
-        blocker=action.blocker or existing_mission_state.blocker,
+        blocker=action.blocker,
         next_expected_evidence=(
             action.next_expected_evidence or existing_mission_state.next_expected_evidence
         ),
-        unresolved_gaps=action.unresolved_gaps or existing_mission_state.unresolved_gaps,
+        unresolved_gaps=action.unresolved_gaps,
         latest_truthful_status=(
             action.user_visible_progress or existing_mission_state.latest_truthful_status
         ),
@@ -503,12 +514,17 @@ def _execute_action_tool_calls(
     action: MissionAgentAction,
     session_manager: SessionManager,
     session_id: str,
+    user_input: str,
+    orchestrator: Orchestrator,
     tracer: Tracer,
     tool_registry: ToolRegistry,
+    model_profile_name: str,
+    thinking_enabled: bool,
     tool_guard_state: _agent_loop._RuntimeToolGuardState,
     tool_call_callback: Callable[[ToolCall], None] | None,
     mission_event_callback: MissionEventCallback | None,
-) -> tuple[MissionState, tuple[ToolResult, ...]]:
+) -> tuple[MissionState, tuple[ToolResult, ...], tuple[ToolResult, ...]]:
+    raw_tool_results: list[ToolResult] = []
     recent_tool_results: list[ToolResult] = []
     state = mission_state
     for tool_request in action.tool_calls:
@@ -571,6 +587,7 @@ def _execute_action_tool_calls(
                     user_input=state.last_user_input or state.mission_goal,
                     target_task_id=target_task.id,
                 ),
+                tuple(raw_tool_results),
                 tuple(recent_tool_results),
             )
 
@@ -584,16 +601,30 @@ def _execute_action_tool_calls(
             tool_call_callback=tool_call_callback,
         )
         for tool_result in tool_results:
-            recent_tool_results.append(tool_result)
+            raw_tool_results.append(tool_result)
             state = _apply_tool_result(
                 mission_state=state,
                 task_id=target_task.id,
                 tool_call=tool_call,
                 tool_result=tool_result,
             )
+            context_tool_result, state = _compact_tool_result_for_continuation(
+                mission_state=state,
+                task_id=target_task.id,
+                tool_call=tool_call,
+                tool_result=tool_result,
+                session_manager=session_manager,
+                session_id=session_id,
+                user_input=user_input,
+                orchestrator=orchestrator,
+                tracer=tracer,
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
+            )
+            recent_tool_results.append(context_tool_result)
             if state.status == "blocked":
-                return state, tuple(recent_tool_results)
-    return state, tuple(recent_tool_results)
+                return state, tuple(raw_tool_results), tuple(recent_tool_results)
+    return state, tuple(raw_tool_results), tuple(recent_tool_results)
 
 
 def _annotate_tool_call_for_mission(
@@ -869,7 +900,7 @@ def _apply_action_completion_signals(
         replace(
             mission_state,
             user_visible_progress=action.user_visible_progress,
-            unresolved_gaps=action.unresolved_gaps or mission_state.unresolved_gaps,
+            unresolved_gaps=action.unresolved_gaps,
             latest_truthful_status=(
                 action.user_visible_progress or mission_state.latest_truthful_status
             ),
@@ -1090,6 +1121,8 @@ def _next_expected_evidence(mission_state: MissionState) -> str | None:
     ]
     if missing:
         return ", ".join(missing)
+    if active_task.latest_error:
+        return active_task.latest_error
     return None
 
 
@@ -1155,6 +1188,17 @@ def _next_evidence_id(*, mission_state: MissionState, offset: int) -> str:
     return f"e{mission_state.loop_count + 1}-{len(mission_state.evidence_log) + offset}"
 
 
+def _next_capsule_id(*, mission_state: MissionState) -> str:
+    return f"c{mission_state.loop_count + 1}-{len(mission_state.evidence_capsules) + 1}"
+
+
+def _next_observation_id(*, mission_state: MissionState) -> str:
+    return (
+        f"o{mission_state.loop_count + 1}-"
+        f"{len(mission_state.tool_observation_refs) + 1}"
+    )
+
+
 def _artifact_status_for_tool_result(tool_name: str) -> str | None:
     mapping = {
         "write_text_file": "written",
@@ -1190,6 +1234,330 @@ def _build_artifact_observations(
         )
         for path in artifact_paths
     )
+
+
+def _compact_tool_result_for_continuation(
+    *,
+    mission_state: MissionState,
+    task_id: str,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    session_manager: SessionManager,
+    session_id: str,
+    user_input: str,
+    orchestrator: Orchestrator,
+    tracer: Tracer,
+    model_profile_name: str,
+    thinking_enabled: bool,
+) -> tuple[ToolResult, MissionState]:
+    if not _should_externalize_tool_result(tool_result):
+        return _build_context_tool_result(
+            tool_result=tool_result,
+            observation_ref=None,
+            capsule=None,
+        ), mission_state
+
+    state = mission_state
+    observation_id = _next_observation_id(mission_state=state)
+    observation_ref: str | None = None
+    try:
+        observation_ref = session_manager.persist_tool_observation(
+            mission_id=state.mission_id,
+            observation_id=observation_id,
+            tool_call=tool_call,
+            tool_result=tool_result,
+            session_id=session_id,
+        )
+    except Exception:
+        observation_ref = None
+    if observation_ref is not None:
+        state = _append_tool_observation_ref(
+            mission_state=state,
+            task_id=task_id,
+            tool_name=tool_result.tool_name,
+            observation_id=observation_id,
+            observation_ref=observation_ref,
+            tool_result=tool_result,
+        )
+
+    capsule = _call_evidence_capsule_reducer(
+        session_id=session_id,
+        user_input=user_input,
+        mission_state=state,
+        task=state.get_task(task_id),
+        tool_call=tool_call,
+        tool_result=tool_result,
+        observation_ref=observation_ref,
+        orchestrator=orchestrator,
+        tracer=tracer,
+        model_profile_name=model_profile_name,
+        thinking_enabled=thinking_enabled,
+    )
+    if capsule is None:
+        capsule = _build_fallback_evidence_capsule(
+            mission_state=state,
+            task_id=task_id,
+            tool_result=tool_result,
+            observation_ref=observation_ref,
+        )
+
+    state = _append_evidence_capsule(
+        mission_state=state,
+        capsule=capsule,
+    )
+    return _build_context_tool_result(
+        tool_result=tool_result,
+        observation_ref=observation_ref,
+        capsule=capsule,
+    ), state
+
+
+def _should_externalize_tool_result(tool_result: ToolResult) -> bool:
+    if tool_result.success is not True:
+        return False
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    payload_chars = len(_serialize_payload_for_size(payload))
+    if len(tool_result.output_text) >= _HEAVY_TOOL_OUTPUT_CHARS:
+        return True
+    if payload_chars >= _HEAVY_TOOL_PAYLOAD_CHARS:
+        return True
+    if tool_result.tool_name in _HEAVY_TOOL_RESULT_NAMES:
+        return any(
+            key in payload
+            for key in (
+                "results",
+                "evidence",
+                "research_source_notes",
+                "research_merged_note",
+            )
+        )
+    return False
+
+
+def _serialize_payload_for_size(payload: object) -> str:
+    if payload is None:
+        return ""
+    try:
+        return str(payload)
+    except Exception:
+        return ""
+
+
+def _append_tool_observation_ref(
+    *,
+    mission_state: MissionState,
+    task_id: str,
+    tool_name: str,
+    observation_id: str,
+    observation_ref: str,
+    tool_result: ToolResult,
+) -> MissionState:
+    observation = MissionToolObservationRef(
+        id=observation_id,
+        tool_name=tool_name,
+        task_id=task_id,
+        created_at=utc_now_iso(),
+        workspace_path=observation_ref,
+        success=tool_result.success,
+        payload_bytes=len(_serialize_payload_for_size(tool_result.payload)),
+        output_chars=len(tool_result.output_text),
+    )
+    return normalize_mission_state(
+        replace(
+            mission_state,
+            tool_observation_refs=(
+                mission_state.tool_observation_refs + (observation,)
+            )[-12:],
+            latest_truthful_status=None,
+        )
+    )
+
+
+def _call_evidence_capsule_reducer(
+    *,
+    session_id: str,
+    user_input: str,
+    mission_state: MissionState,
+    task: MissionTaskState | None,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    observation_ref: str | None,
+    orchestrator: Orchestrator,
+    tracer: Tracer,
+    model_profile_name: str,
+    thinking_enabled: bool,
+) -> MissionEvidenceCapsule | None:
+    messages = list(
+        build_evidence_capsule_messages(
+            user_input=user_input,
+            mission_state=mission_state,
+            task=task,
+            tool_call=tool_call,
+            tool_result=tool_result,
+            observation_ref=observation_ref,
+        )
+    )
+    repair_note = (
+        "Return valid JSON only with the evidence capsule schema. "
+        "Do not add prose outside the JSON object."
+    )
+    timestamp = utc_now_iso()
+    for attempt in range(_ACTION_PARSE_REPAIR_ATTEMPTS):
+        try:
+            turn_result = orchestrator.call_model(
+                session_id=session_id,
+                messages=tuple(messages),
+                model_profile_name=model_profile_name,
+                thinking_enabled=thinking_enabled,
+                content_callback=None,
+                tools=(),
+            )
+        except ModelCallFailedError:
+            return None
+        _trace_model_success(tracer=tracer, session_id=session_id, turn_result=turn_result)
+        capsule = parse_evidence_capsule_response(
+            turn_result.response.content,
+            fallback_tool_name=tool_result.tool_name,
+            task_id=task.id if task is not None else None,
+            created_at=timestamp,
+            observation_ref=observation_ref,
+        )
+        if capsule is not None:
+            return capsule
+        if attempt + 1 >= _ACTION_PARSE_REPAIR_ATTEMPTS:
+            return None
+        messages.extend(
+            (
+                replace(messages[-1], role="assistant", content=turn_result.response.content),
+                messages[0].__class__(role="system", content=repair_note),
+            )
+        )
+    return None
+
+
+def _build_fallback_evidence_capsule(
+    *,
+    mission_state: MissionState,
+    task_id: str,
+    tool_result: ToolResult,
+    observation_ref: str | None,
+) -> MissionEvidenceCapsule:
+    evidence_texts = _collect_evidence_texts(tool_result)
+    source_refs = _collect_source_refs(tool_result)
+    artifact_paths = _collect_artifact_paths(tool_result)
+    summary = evidence_texts[0] if evidence_texts else f"{tool_result.tool_name} succeeded"
+    pending_artifact_work = tuple(
+        task.title
+        for task in mission_state.tasks
+        if task.kind in {"file_write", "file_read"} and task.status != "completed"
+    )[:3]
+    unresolved = ()
+    if mission_state.next_expected_evidence:
+        unresolved = (mission_state.next_expected_evidence,)
+    return MissionEvidenceCapsule(
+        id="capsule",
+        task_id=task_id,
+        tool_name=tool_result.tool_name,
+        created_at=utc_now_iso(),
+        summary=summary,
+        found=evidence_texts[:4],
+        usable_facts=evidence_texts[:4],
+        unresolved=unresolved,
+        pending_artifact_work=pending_artifact_work,
+        artifact_paths=artifact_paths,
+        source_refs=source_refs,
+        observation_ref=observation_ref,
+    )
+
+
+def _append_evidence_capsule(
+    *,
+    mission_state: MissionState,
+    capsule: MissionEvidenceCapsule,
+) -> MissionState:
+    persisted_capsule = replace(
+        capsule,
+        id=_next_capsule_id(mission_state=mission_state),
+    )
+    return normalize_mission_state(
+        replace(
+            mission_state,
+            evidence_capsules=(
+                mission_state.evidence_capsules + (persisted_capsule,)
+            )[-8:],
+            last_successful_evidence=tuple(
+                item
+                for item in dict.fromkeys(
+                    mission_state.last_successful_evidence
+                    + ((persisted_capsule.summary,) if persisted_capsule.summary else ())
+                    + persisted_capsule.usable_facts
+                )
+            )[-8:],
+            latest_truthful_status=None,
+        )
+    )
+
+
+def _build_context_tool_result(
+    *,
+    tool_result: ToolResult,
+    observation_ref: str | None,
+    capsule: MissionEvidenceCapsule | None,
+) -> ToolResult:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    compact_payload: dict[str, object] = {}
+    for key in (
+        "query",
+        "workspace_id",
+        "workspace_dir",
+        "resolved_path",
+        "path",
+        "requested_path",
+    ):
+        value = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(value, str) and value:
+            compact_payload[key] = value
+    artifact_paths = _collect_artifact_paths(tool_result)
+    if artifact_paths:
+        compact_payload["artifact_paths"] = list(artifact_paths)
+    if observation_ref is not None:
+        compact_payload["mission_observation_ref"] = observation_ref
+    if capsule is not None:
+        compact_payload["mission_evidence_capsule"] = {
+            "summary": capsule.summary,
+            "found": list(capsule.found),
+            "usable_facts": list(capsule.usable_facts),
+            "unresolved": list(capsule.unresolved),
+            "pending_artifact_work": list(capsule.pending_artifact_work),
+            "artifact_paths": list(capsule.artifact_paths),
+            "source_refs": list(capsule.source_refs),
+            "observation_ref": capsule.observation_ref,
+        }
+    output_text = capsule.summary if capsule is not None else tool_result.output_text
+    return ToolResult(
+        tool_name=tool_result.tool_name,
+        success=tool_result.success,
+        output_text=output_text,
+        payload=compact_payload or None,
+        error=tool_result.error,
+        failure_kind=tool_result.failure_kind,
+    )
+
+
+def _collect_source_refs(tool_result: ToolResult) -> tuple[str, ...]:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    refs: list[str] = []
+    for key in ("display_sources", "results"):
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("url")
+            if isinstance(url, str) and url not in refs:
+                refs.append(url)
+    return tuple(refs[:4])
 
 
 def _tool_progress_update(

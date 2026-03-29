@@ -51,6 +51,12 @@ def test_cli_status_filter_keeps_compact_useful_lines() -> None:
     assert _should_render_cli_status_line("[tool] search_web {}") is True
 
 
+def test_cli_status_filter_hides_internal_json_blob_lines() -> None:
+    assert _should_render_cli_status_line(
+        '[mission] {"mission_action":"continue_existing","task_board":[]}'
+    ) is False
+
+
 def test_run_cli_prints_the_runtime_reply_and_exits_cleanly(
     monkeypatch,
     capsys,

@@ -19,6 +19,7 @@ from unclaw.llm.base import utc_now_iso
 
 if TYPE_CHECKING:
     from unclaw.core.session_manager import SessionGoalState, SessionProgressEntry
+    from unclaw.tools.contracts import ToolCall, ToolResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,9 @@ class MissionWorkspaceStore:
 
     def workspace_path(self, *, session_id: str, mission_id: str) -> Path:
         return self.base_dir / session_id / f"{mission_id}.json"
+
+    def observation_dir(self, *, session_id: str, mission_id: str) -> Path:
+        return self.base_dir / session_id / f"{mission_id}.observations"
 
     def save_mission(self, *, session_id: str, mission_state: MissionState) -> Path:
         normalized_state = normalize_mission_state(mission_state)
@@ -78,6 +82,51 @@ class MissionWorkspaceStore:
         except OSError:
             return None
         return parse_mission_state(payload)
+
+    def save_tool_observation(
+        self,
+        *,
+        session_id: str,
+        mission_id: str,
+        observation_id: str,
+        tool_call: ToolCall,
+        tool_result: ToolResult,
+    ) -> Path:
+        """Persist one raw tool result outside the main mission loop context."""
+
+        observation_dir = self.observation_dir(
+            session_id=session_id,
+            mission_id=mission_id,
+        )
+        observation_dir.mkdir(parents=True, exist_ok=True)
+        observation_path = observation_dir / f"{observation_id}.json"
+        temporary_path = observation_path.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "schema": "mission_tool_observation.v1",
+                    "observation_id": observation_id,
+                    "tool_call": {
+                        "tool_name": tool_call.tool_name,
+                        "arguments": tool_call.arguments,
+                    },
+                    "tool_result": {
+                        "tool_name": tool_result.tool_name,
+                        "success": tool_result.success,
+                        "output_text": tool_result.output_text,
+                        "payload": tool_result.payload,
+                        "error": tool_result.error,
+                        "failure_kind": tool_result.failure_kind,
+                    },
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        os.replace(temporary_path, observation_path)
+        return observation_path
 
 
 def serialize_mission_workspace_pointer(pointer: MissionWorkspacePointer) -> str:

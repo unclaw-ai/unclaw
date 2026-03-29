@@ -7,7 +7,7 @@ import pytest
 
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.mission_state import MissionState, MissionTaskState
-from unclaw.core.runtime import run_user_turn
+from unclaw.core.runtime import _sanitize_assistant_reply, run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMResponse
 from unclaw.logs.event_bus import EventBus
@@ -745,6 +745,55 @@ def test_final_reply_does_not_claim_file_creation_without_observed_artifact_evid
         assert all(
             record.kind != "artifact_write" for record in mission_state.evidence_log
         )
+    finally:
+        session_manager.close()
+
+
+def test_runtime_sanitizes_internal_json_reply_into_a_truthful_status(
+    make_temp_project,
+    set_profile_tool_mode,
+) -> None:
+    project_root = make_temp_project()
+    settings, session_manager, _tracer, _command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    session = session_manager.ensure_current_session()
+    session_manager.persist_mission_state(
+        MissionState(
+            mission_id="mission-json-leak",
+            mission_goal="Write a verified local file.",
+            status="active",
+            tasks=(
+                MissionTaskState(
+                    id="t1",
+                    title="Write and verify the file",
+                    kind="file_write",
+                    status="active",
+                    required_evidence=("artifact_write", "artifact_readback"),
+                    artifact_paths=(str(settings.paths.files_dir / "sanitized.txt"),),
+                ),
+            ),
+            active_task_id="t1",
+            updated_at="2026-03-29T09:00:00Z",
+            next_expected_evidence="artifact_write, artifact_readback",
+            last_user_input="continue",
+        ),
+        session_id=session.id,
+    )
+
+    try:
+        sanitized = _sanitize_assistant_reply(
+            assistant_reply=(
+                '{"mission_action":"continue_existing","task_board":[],"reply_to_user":"internal"}'
+            ),
+            session_manager=session_manager,
+            session_id=session.id,
+        )
+
+        assert sanitized != '{"mission_action":"continue_existing","task_board":[],"reply_to_user":"internal"}'
+        assert "Mission in progress: Write a verified local file." in sanitized
+        assert "artifact_write, artifact_readback" in sanitized
     finally:
         session_manager.close()
 

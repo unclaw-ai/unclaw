@@ -455,6 +455,8 @@ def _should_render_cli_status_line(line: str) -> bool:
     compact = " ".join(line.split()).strip()
     if not compact:
         return False
+    if _looks_like_internal_cli_blob(compact):
+        return False
     if compact.startswith("[mission] single-agent loop"):
         return False
     if compact.startswith("[mission] active task:"):
@@ -464,6 +466,21 @@ def _should_render_cli_status_line(line: str) -> bool:
     if compact.startswith("[mission] mission evidence complete; awaiting final reply"):
         return False
     return True
+
+
+def _looks_like_internal_cli_blob(text: str) -> bool:
+    if text.startswith("[mission] {") or text.startswith("{"):
+        try:
+            payload = json.loads(text.removeprefix("[mission] ").strip())
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            keys = set(payload)
+            if {"mission_action", "task_board"}.issubset(keys):
+                return True
+            if {"mission_id", "tasks", "status"}.issubset(keys):
+                return True
+    return False
 
 
 def _build_tool_call_visibility_line(

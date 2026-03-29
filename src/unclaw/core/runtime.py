@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
 from time import perf_counter
 
 import unclaw.core.agent_kernel as _agent_kernel
@@ -172,6 +173,11 @@ def run_user_turn(
             "Runtime turn completed without producing an assistant reply."
         )
 
+    assistant_reply = _sanitize_assistant_reply(
+        assistant_reply=assistant_reply,
+        session_manager=session_manager,
+        session_id=session.id,
+    )
     if assistant_reply_transform is not None:
         assistant_reply = assistant_reply_transform(assistant_reply)
     if stream_output_func is not None:
@@ -221,6 +227,55 @@ def _run_explicit_tool_call(
     if result.success:
         return result.output_text or EMPTY_RESPONSE_REPLY
     return result.error or result.output_text or RUNTIME_ERROR_REPLY
+
+
+def _sanitize_assistant_reply(
+    *,
+    assistant_reply: str,
+    session_manager: SessionManager,
+    session_id: str,
+) -> str:
+    stripped = assistant_reply.strip()
+    if not stripped:
+        return assistant_reply
+    if not (
+        _looks_like_internal_json_reply(stripped)
+        or _looks_like_internal_scaffolding_reply(stripped)
+    ):
+        return assistant_reply
+    mission_state = session_manager.get_current_mission_state(session_id)
+    if mission_state is None:
+        return EMPTY_RESPONSE_REPLY
+    return _agent_kernel._build_mission_status_reply(mission_state)
+
+
+def _looks_like_internal_json_reply(reply_text: str) -> bool:
+    if not reply_text.startswith(("{", "[")):
+        return False
+    try:
+        payload = json.loads(reply_text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    keys = set(payload)
+    if {"mission_action", "task_board"}.issubset(keys):
+        return True
+    return {"mission_id", "tasks", "status"}.issubset(keys)
+
+
+def _looks_like_internal_scaffolding_reply(reply_text: str) -> bool:
+    lines = [line.strip() for line in reply_text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    prefixes = (
+        "Mission goal:",
+        "Current active task:",
+        "Completed tasks:",
+    )
+    return sum(
+        1 for line in lines if any(line.startswith(prefix) for prefix in prefixes)
+    ) >= 2
 
 
 __all__ = ["run_user_turn"]

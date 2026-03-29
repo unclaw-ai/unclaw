@@ -145,6 +145,34 @@ def test_compound_research_write_and_joke_finishes_from_one_single_agent_action(
         ),
     )
 
+    final_reply_step = _action_response(
+        {
+            "mission_action": "continue_existing",
+            "step_mode": "final_reply",
+            "mission_goal": "Research Inoxtag, write the result to a file, then tell a joke.",
+            "reasoning_summary": "The file is proven, so answer cleanly now.",
+            "tasks": [
+                {
+                    "id": "t3",
+                    "title": "Tell the banana joke",
+                    "kind": "reply",
+                    "status": "active",
+                    "depends_on": ["t2"],
+                    "required_evidence": ["reply_emitted"],
+                    "artifact_paths": [],
+                    "latest_error": None,
+                    "repair_count": 0,
+                }
+            ],
+            "active_task_id": "t3",
+            "tool_calls": [],
+            "reply_to_user": "Le fichier est écrit et vérifié. Et la blague: les bananes adorent les recherches parce qu'elles ont toujours la pêche.",
+            "completion_claim": True,
+            "blocker": None,
+            "next_expected_evidence": None,
+        }
+    )
+
     fake_provider = build_scripted_ollama_provider(
         _action_response(
             {
@@ -266,6 +294,299 @@ def test_compound_research_write_and_joke_finishes_from_one_single_agent_action(
             "artifact_write",
             "artifact_readback",
         )
+    finally:
+        session_manager.close()
+
+
+def test_heavy_search_web_result_is_compacted_before_the_follow_up_action(
+    monkeypatch,
+    make_temp_project,
+    set_profile_tool_mode,
+    build_scripted_ollama_provider,
+) -> None:
+    project_root = make_temp_project()
+    settings, session_manager, tracer, command_handler = _build_native_runtime(
+        project_root,
+        set_profile_tool_mode,
+    )
+    output_path = settings.paths.files_dir / "inoxtag-heavy.txt"
+    observed_tool_calls: list[str] = []
+    captured_messages: list[list[object]] = []
+
+    tool_registry = ToolRegistry()
+    tool_registry.register(
+        SEARCH_WEB_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or ToolResult.ok(
+                tool_name=call.tool_name,
+                output_text="Inoxtag research complete with many sources",
+                payload={
+                    "query": call.arguments["query"],
+                    "summary_points": [
+                        "Inoxtag is a French content creator.",
+                        "He is known for ambitious challenge videos.",
+                    ],
+                    "display_sources": [
+                        {"title": "Example 1", "url": "https://example.com/inoxtag-1"},
+                        {"title": "Example 2", "url": "https://example.com/inoxtag-2"},
+                    ],
+                    "results": [
+                        {
+                            "title": f"Source {index}",
+                            "url": f"https://example.com/source-{index}",
+                            "takeaway": "Detailed source note",
+                            "depth": 1,
+                            "fetched": True,
+                            "evidence_count": 2,
+                            "fetch_error": None,
+                            "used_snippet_fallback": False,
+                            "usefulness": 0.8,
+                        }
+                        for index in range(1, 7)
+                    ],
+                    "evidence": [
+                        {
+                            "text": f"Evidence point {index}",
+                            "url": f"https://example.com/evidence-{index}",
+                            "source_title": f"Evidence Source {index}",
+                            "score": 0.8,
+                            "depth": 1,
+                            "query_relevance": 0.8,
+                            "evidence_quality": 0.8,
+                            "novelty": 0.5,
+                            "supporting_urls": [f"https://example.com/support-{index}"],
+                            "supporting_titles": [f"Support {index}"],
+                        }
+                        for index in range(1, 7)
+                    ],
+                },
+            )
+        ),
+    )
+    tool_registry.register(
+        WRITE_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or write_text_file(
+                call,
+                allowed_roots=(settings.paths.project_root,),
+                default_write_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+    tool_registry.register(
+        READ_TEXT_FILE_DEFINITION,
+        lambda call: (
+            observed_tool_calls.append(call.tool_name)
+            or read_text_file(
+                call,
+                read_allowed_roots=(settings.paths.project_root,),
+                default_read_dir=settings.paths.files_dir,
+            )
+        ),
+    )
+
+    final_reply_step = _action_response(
+        {
+            "mission_action": "continue_existing",
+            "step_mode": "final_reply",
+            "mission_goal": "Research Inoxtag, write the result to a file, then tell a joke.",
+            "reasoning_summary": "The file is proven, so answer cleanly now.",
+            "tasks": [
+                {
+                    "id": "t3",
+                    "title": "Tell the banana joke",
+                    "kind": "reply",
+                    "status": "active",
+                    "depends_on": ["t2"],
+                    "required_evidence": ["reply_emitted"],
+                    "artifact_paths": [],
+                    "latest_error": None,
+                    "repair_count": 0,
+                }
+            ],
+            "active_task_id": "t3",
+            "tool_calls": [],
+            "reply_to_user": "Le fichier est écrit et vérifié. Et la blague: les bananes adorent les recherches parce qu'elles ont toujours la pêche.",
+            "completion_claim": True,
+            "blocker": None,
+            "next_expected_evidence": None,
+        }
+    )
+
+    fake_provider = build_scripted_ollama_provider(
+        _action_response(
+            {
+                "mission_action": "start_new",
+                "step_mode": "continue",
+                "mission_goal": "Research Inoxtag, write the result to a file, then tell a joke.",
+                "reasoning_summary": "Research first, then write and verify the file, then reply.",
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "title": "Research Inoxtag",
+                        "kind": "web_research",
+                        "status": "active",
+                        "depends_on": [],
+                        "required_evidence": ["full_web_research"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "pending",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Tell the banana joke",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t1",
+                "tool_calls": [
+                    {
+                        "task_id": "t1",
+                        "tool_name": "search_web",
+                        "arguments": {"query": "Inoxtag biography"},
+                    }
+                ],
+                "reply_to_user": None,
+                "completion_claim": False,
+                "blocker": None,
+                "next_expected_evidence": "full_web_research",
+            }
+        ),
+        _action_response(
+            {
+                "summary": "Inoxtag is a French creator known for ambitious challenge videos.",
+                "found": [
+                    "Inoxtag is a French content creator.",
+                    "He is known for ambitious challenge videos.",
+                ],
+                "usable_facts": [
+                    "Inoxtag is a French content creator.",
+                    "He is known for ambitious challenge videos.",
+                ],
+                "unresolved": ["Write and verify the note."],
+                "pending_artifact_work": ["Write and verify the note"],
+                "artifact_paths": [],
+                "source_refs": ["https://example.com/inoxtag-1"],
+            }
+        ),
+        _action_response(
+            {
+                "mission_action": "continue_existing",
+                "step_mode": "final_reply",
+                "mission_goal": "Research Inoxtag, write the result to a file, then tell a joke.",
+                "reasoning_summary": "Use the compact evidence, write and verify the file, then answer.",
+                "tasks": [
+                    {
+                        "id": "t2",
+                        "title": "Write and verify the note",
+                        "kind": "file_write",
+                        "status": "active",
+                        "depends_on": ["t1"],
+                        "required_evidence": ["artifact_write", "artifact_readback"],
+                        "artifact_paths": [str(output_path)],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                    {
+                        "id": "t3",
+                        "title": "Tell the banana joke",
+                        "kind": "reply",
+                        "status": "pending",
+                        "depends_on": ["t2"],
+                        "required_evidence": ["reply_emitted"],
+                        "artifact_paths": [],
+                        "latest_error": None,
+                        "repair_count": 0,
+                    },
+                ],
+                "active_task_id": "t2",
+                "tool_calls": [
+                    {
+                        "task_id": "t2",
+                        "tool_name": "write_text_file",
+                        "arguments": {
+                            "path": str(output_path),
+                            "content": "Inoxtag is a French content creator known for ambitious challenge videos.",
+                        },
+                    },
+                    {
+                        "task_id": "t2",
+                        "tool_name": "read_text_file",
+                        "arguments": {"path": str(output_path)},
+                    },
+                ],
+                "reply_to_user": "Le fichier est écrit et vérifié. Et la blague: les bananes adorent les recherches parce qu'elles ont toujours la pêche.",
+                "completion_claim": True,
+                "blocker": None,
+                "next_expected_evidence": None,
+            }
+        ),
+        final_reply_step,
+        final_reply_step,
+        final_reply_step,
+        final_reply_step,
+        captured_messages=captured_messages,
+    )
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", fake_provider)
+
+    try:
+        reply = _run_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_registry=tool_registry,
+            prompt=(
+                "Qui est Inoxtag ? fais une recherche complète sur lui, écrit le résultat "
+                "dans un fichier texte et fais moi une blague sur les bananes"
+            ),
+        )
+        mission_state = session_manager.get_current_mission_state()
+
+        assert fake_provider.call_count() >= 3
+        assert observed_tool_calls == [
+            "search_web",
+            "write_text_file",
+            "read_text_file",
+        ]
+        assert "bananes" in reply
+        assert output_path.read_text(encoding="utf-8").startswith("Inoxtag is a French")
+        assert mission_state is not None
+        assert mission_state.status == "completed"
+        assert mission_state.tool_observation_refs
+        assert mission_state.evidence_capsules
+
+        third_call_payload = json.loads(captured_messages[2][-1].content)
+        serialized_recent = json.dumps(
+            third_call_payload["recent_tool_results"],
+            ensure_ascii=False,
+        )
+        serialized_state = json.dumps(
+            third_call_payload["current_mission_state"],
+            ensure_ascii=False,
+        )
+        assert "mission_evidence_capsule" in serialized_recent
+        assert "\"results\"" not in serialized_recent
+        assert "\"evidence\"" not in serialized_recent
+        assert "evidence_capsules" in serialized_state
     finally:
         session_manager.close()
 

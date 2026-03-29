@@ -7,7 +7,11 @@ from dataclasses import dataclass
 import json
 from typing import Any
 
-from unclaw.core.mission_state import MissionState, MissionTaskState
+from unclaw.core.mission_state import (
+    MissionEvidenceCapsule,
+    MissionState,
+    MissionTaskState,
+)
 from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.tools.contracts import (
     ToolCall,
@@ -30,10 +34,11 @@ _MISSION_AGENT_SYSTEM_PROMPT = "\n".join(
         "- Use mission_action='start_new' only when the user is clearly asking for a different outcome than the current mission.",
         "- Use mission_action='continue_existing' for status, continue, finish, repair, and follow-up turns about the same mission.",
         "- Keep tasks compact and concrete. Use at most 6 tasks.",
+        "- Once a task_board exists, keep unfinished tasks visible until they are proven completed or honestly blocked.",
         "- If the user asked to create, read, update, delete, or list a local artifact, include an explicit file_* or directory_list task in task_board.",
         "- Never erase already-completed tasks from the provided mission state. Add a repair task instead if you need new work after a proven completion.",
         "- If a previous turn said the mission was done but the user says work is missing, continue_existing and add repair work to the same mission.",
-        "- Use the persisted mission state as your external working memory: current_goal, task_board, unresolved_gaps, evidence_log, artifact_observations, and latest_truthful_status.",
+        "- Use the persisted mission state as your external working memory: current_goal, task_board, unresolved_gaps, evidence_log, evidence_capsules, artifact_observations, tool_observation_refs, and latest_truthful_status.",
         "- Do not claim mission completion unless every task has the required evidence and unresolved_gaps is empty.",
         "- Artifact claims must come only from observed evidence already present in evidence_log, artifact_observations, or recent_tool_results.",
         "- reply_to_user is the exact user-facing message for this step. Never narrate internal progress like 'I am now reading the file'.",
@@ -84,6 +89,39 @@ _MISSION_AGENT_SYSTEM_PROMPT = "\n".join(
         ),
     )
 )
+
+_MISSION_EVIDENCE_REDUCER_SYSTEM_PROMPT = "\n".join(
+    (
+        "Mission evidence reducer for the Unclaw local runtime.",
+        "You are still inside the same single-agent mission loop.",
+        "A heavy tool result was persisted externally because it is too large to keep reinjecting.",
+        "Return JSON only with a compact mission evidence capsule.",
+        "Do not plan the whole mission again.",
+        "Do not emit user-facing prose.",
+        "Keep the capsule small and continuation-oriented.",
+        "Focus only on:",
+        "- what was found,",
+        "- what facts are usable now,",
+        "- what remains unresolved,",
+        "- what artifact work is still pending,",
+        "- the most useful source refs or artifact paths.",
+        "Return JSON only with this shape:",
+        (
+            '{"summary":"...",'
+            '"found":["..."],'
+            '"usable_facts":["..."],'
+            '"unresolved":["..."],'
+            '"pending_artifact_work":["..."],'
+            '"artifact_paths":["..."],'
+            '"source_refs":["..."]}'
+        ),
+    )
+)
+
+_PROMPT_MAX_LIST_ITEMS = 8
+_PROMPT_MAX_DICT_ITEMS = 12
+_PROMPT_MAX_VALUE_CHARS = 320
+_PROMPT_MAX_OUTPUT_CHARS = 1200
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +223,50 @@ def build_agent_action_messages(
     }
     return (
         LLMMessage(role=LLMRole.SYSTEM, content=_MISSION_AGENT_SYSTEM_PROMPT),
+        LLMMessage(
+            role=LLMRole.USER,
+            content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        ),
+    )
+
+
+def build_evidence_capsule_messages(
+    *,
+    user_input: str,
+    mission_state: MissionState,
+    task: MissionTaskState | None,
+    tool_call: ToolCall,
+    tool_result: ToolResult,
+    observation_ref: str | None,
+) -> tuple[LLMMessage, ...]:
+    """Build the compact-evidence reduction prompt for one heavy tool result."""
+
+    payload = {
+        "user_input": user_input,
+        "mission_state": _serialize_mission_state(mission_state),
+        "task": (
+            {
+                "id": task.id,
+                "label": task.title,
+                "kind": task.kind,
+                "status": task.status,
+                "depends_on": list(task.depends_on),
+                "required_evidence": list(task.required_evidence),
+                "artifact_paths": list(task.artifact_paths),
+                "latest_error": task.latest_error,
+            }
+            if task is not None
+            else None
+        ),
+        "tool_call": {
+            "tool_name": tool_call.tool_name,
+            "arguments": _compact_prompt_value(tool_call.arguments),
+        },
+        "observation_ref": observation_ref,
+        "heavy_tool_result": _serialize_tool_result_for_reduction(tool_result),
+    }
+    return (
+        LLMMessage(role=LLMRole.SYSTEM, content=_MISSION_EVIDENCE_REDUCER_SYSTEM_PROMPT),
         LLMMessage(
             role=LLMRole.USER,
             content=json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
@@ -351,6 +433,38 @@ def parse_agent_action_response(
         next_expected_evidence=_read_optional_text(
             payload.get("next_expected_evidence")
         ),
+    )
+
+
+def parse_evidence_capsule_response(
+    response_text: str,
+    *,
+    fallback_tool_name: str,
+    task_id: str | None,
+    created_at: str,
+    observation_ref: str | None,
+) -> MissionEvidenceCapsule | None:
+    """Parse one compact evidence-capsule response."""
+
+    payload = _parse_json_dict(response_text)
+    if payload is None:
+        return None
+    summary = _read_optional_text(payload.get("summary"))
+    if summary is None:
+        return None
+    return MissionEvidenceCapsule(
+        id="capsule",
+        task_id=task_id,
+        tool_name=fallback_tool_name,
+        created_at=created_at,
+        summary=summary,
+        found=_read_text_list(payload.get("found")),
+        usable_facts=_read_text_list(payload.get("usable_facts")),
+        unresolved=_read_text_list(payload.get("unresolved")),
+        pending_artifact_work=_read_text_list(payload.get("pending_artifact_work")),
+        artifact_paths=_read_text_list(payload.get("artifact_paths")),
+        source_refs=_read_text_list(payload.get("source_refs")),
+        observation_ref=observation_ref,
     )
 
 
@@ -586,6 +700,7 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
         "latest_truthful_status": mission_state.latest_truthful_status,
         "final_reply": mission_state.final_reply,
         "executor_state": mission_state.executor_state,
+        "task_board_summary": _summarize_task_board(mission_state),
         "last_verified_artifact_paths": mission_state.last_verified_artifact_paths,
         "last_successful_evidence": mission_state.last_successful_evidence,
         "tasks": [
@@ -615,7 +730,23 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "artifact_paths": list(record.artifact_paths),
                 "success": record.success,
             }
-            for record in mission_state.evidence_log
+            for record in mission_state.evidence_log[-6:]
+        ],
+        "evidence_capsules": [
+            {
+                "id": record.id,
+                "task_id": record.task_id,
+                "tool_name": record.tool_name,
+                "summary": record.summary,
+                "found": list(record.found),
+                "usable_facts": list(record.usable_facts),
+                "unresolved": list(record.unresolved),
+                "pending_artifact_work": list(record.pending_artifact_work),
+                "artifact_paths": list(record.artifact_paths),
+                "source_refs": list(record.source_refs),
+                "observation_ref": record.observation_ref,
+            }
+            for record in mission_state.evidence_capsules[-4:]
         ],
         "artifact_observations": [
             {
@@ -626,18 +757,28 @@ def _serialize_mission_state(mission_state: MissionState | None) -> dict[str, An
                 "tool_name": record.tool_name,
                 "evidence_ref": record.evidence_ref,
             }
-            for record in mission_state.artifact_observations
+            for record in mission_state.artifact_observations[-6:]
         ],
         "tool_history": [
             {
                 "tool_name": record.tool_name,
                 "task_id": record.task_id,
-                "arguments": record.arguments,
+                "arguments": _compact_prompt_value(record.arguments),
                 "executed": record.executed,
                 "success": record.success,
                 "reason": record.reason,
             }
-            for record in mission_state.tool_history
+            for record in mission_state.tool_history[-8:]
+        ],
+        "tool_observation_refs": [
+            {
+                "id": record.id,
+                "tool_name": record.tool_name,
+                "task_id": record.task_id,
+                "workspace_path": record.workspace_path,
+                "success": record.success,
+            }
+            for record in mission_state.tool_observation_refs[-6:]
         ],
     }
 
@@ -647,10 +788,22 @@ def _serialize_tool_result(tool_result: ToolResult) -> dict[str, Any]:
     return {
         "tool_name": tool_result.tool_name,
         "success": tool_result.success,
-        "output_text": tool_result.output_text,
+        "output_text": _truncate_text(tool_result.output_text, _PROMPT_MAX_OUTPUT_CHARS),
         "error": tool_result.error,
         "failure_kind": tool_result.failure_kind,
-        "payload": payload,
+        "payload": _compact_prompt_value(payload),
+    }
+
+
+def _serialize_tool_result_for_reduction(tool_result: ToolResult) -> dict[str, Any]:
+    payload = tool_result.payload if isinstance(tool_result.payload, dict) else {}
+    return {
+        "tool_name": tool_result.tool_name,
+        "success": tool_result.success,
+        "output_text": _truncate_text(tool_result.output_text, _PROMPT_MAX_OUTPUT_CHARS * 2),
+        "error": tool_result.error,
+        "failure_kind": tool_result.failure_kind,
+        "payload": _compact_prompt_value(payload, max_depth=4),
     }
 
 
@@ -676,6 +829,68 @@ def _default_required_evidence(kind: str) -> tuple[str, ...]:
         "calc": ("calculation_result",),
     }
     return defaults.get(kind, ())
+
+
+def _summarize_task_board(mission_state: MissionState) -> dict[str, Any]:
+    completed = [task.title for task in mission_state.tasks if task.status == "completed"]
+    pending = [
+        task.title
+        for task in mission_state.tasks
+        if task.status in {"pending", "active", "repairing"}
+    ]
+    return {
+        "active_task": mission_state.active_task,
+        "completed": completed[-4:],
+        "pending": pending[:4],
+        "next_expected_evidence": mission_state.next_expected_evidence,
+        "unresolved_gaps": list(mission_state.unresolved_gaps[:4]),
+    }
+
+
+def _compact_prompt_value(
+    value: Any,
+    *,
+    max_depth: int = 3,
+) -> Any:
+    if max_depth <= 0:
+        if isinstance(value, str):
+            return _truncate_text(value, _PROMPT_MAX_VALUE_CHARS)
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        if isinstance(value, list):
+            return f"[list:{len(value)}]"
+        if isinstance(value, dict):
+            return f"{{dict:{len(value)}}}"
+        return repr(value)
+    if isinstance(value, str):
+        return _truncate_text(value, _PROMPT_MAX_VALUE_CHARS)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [
+            _compact_prompt_value(item, max_depth=max_depth - 1)
+            for item in value[:_PROMPT_MAX_LIST_ITEMS]
+        ]
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for index, key in enumerate(sorted(value)):
+            if index >= _PROMPT_MAX_DICT_ITEMS:
+                break
+            compacted[str(key)] = _compact_prompt_value(
+                value[key],
+                max_depth=max_depth - 1,
+            )
+        return compacted
+    return _truncate_text(repr(value), _PROMPT_MAX_VALUE_CHARS)
+
+
+def _truncate_text(value: str | None, max_chars: int) -> str | None:
+    if value is None:
+        return None
+    compact = " ".join(value.split()).strip()
+    if len(compact) <= max_chars:
+        return compact
+    return compact[: max_chars - 3] + "..."
 
 
 def _parse_json_dict(response_text: str) -> dict[str, Any] | None:
@@ -736,6 +951,8 @@ __all__ = [
     "MissionAgentAction",
     "MissionToolRequest",
     "build_agent_action_messages",
+    "build_evidence_capsule_messages",
+    "parse_evidence_capsule_response",
     "parse_agent_action_response",
     "render_mission_status",
 ]
